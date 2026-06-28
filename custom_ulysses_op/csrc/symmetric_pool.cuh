@@ -7,26 +7,26 @@
 #include <tuple>
 #include <vector>
 
-namespace ulysess {
+namespace ulysses {
 
 class SymmetricHeapPool {
 public:
-    // reserved_bytes：本 group 自设上限（须 ≤ init 时的 NVSHMEM_SYMMETRIC_SIZE 预留）。
+    // reserved_bytes: per-group cap (must be <= NVSHMEM_SYMMETRIC_SIZE reserved at init).
     SymmetricHeapPool(int64_t reserved_bytes, int world_size, std::vector<int> peer_global_pes, nvshmem_team_t team);
 
     struct Buffer {
         void*                 sym_base;
         int64_t               nbytes;
         std::vector<uint64_t> peer_ptrs;  // nvshmem_ptr(sym_base, peer_global_pe)
-        at::Tensor            view;       // from_blob，no-op deleter（pool 持生命周期）
+        at::Tensor            view;       // from_blob with no-op deleter (pool owns lifetime)
     };
 
-    // 命中 (tag,shape,dtype) 直接复用；否则集体新分配一段并登记。
+    // Reuse on (tag,shape,dtype) hit; otherwise collectively allocate a new segment and register it.
     const Buffer& acquire(const std::vector<int64_t>& shape, c10::ScalarType dtype, const std::string& tag);
 
-    // 终态且为集体操作：调用前须释放所有 acquire() 返回的 from_blob 视图，且不得有进行中的 A2A/集体操作，因为它会
-    // nvshmem_free 这些视图所别名的段。
-    void destroy();  // 释放全部段（nvshmem_free）+ 清注册表
+    // Terminal collective op: before calling, release all from_blob views returned by acquire() and
+    // ensure no A2A/collective is in flight, since this nvshmem_free's the segments those views alias.
+    void destroy();  // nvshmem_free all segments + clear registry
 
 private:
     using Key = std::tuple<std::string, std::vector<int64_t>, c10::ScalarType>;
@@ -34,14 +34,15 @@ private:
     int                   world_size_;
     std::vector<int>      peer_global_pes_;
     nvshmem_team_t        team_;
-    int64_t*              scratch_ = nullptr;  // 2 个对称 int64，做 nbytes 一致性校验
+    int64_t*              scratch_ = nullptr;  // 2 symmetric int64s for nbytes consistency check
     std::vector<void*>    segments_;
     std::map<Key, Buffer> registry_;
     bool                  destroyed_ = false;
 
-    // 集体对 nbytes 取全局 max 并返回（变长时各 rank 输出大小不同，对称堆按 max 同尺寸分配，
-    // 每 rank 只用自己那块）；uniform 时 gmax==nbytes，行为不变。
+    // Collectively reduce nbytes to global max and return it (in varlen mode ranks have different
+    // output sizes, so the symmetric heap allocates the same max size on every rank and each rank
+    // uses only its own slice); in uniform mode gmax==nbytes, so behavior is unchanged.
     int64_t collective_max_nbytes(int64_t nbytes);
 };
 
-}  // namespace ulysess
+}  // namespace ulysses

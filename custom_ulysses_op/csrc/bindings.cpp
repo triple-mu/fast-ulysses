@@ -5,16 +5,29 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 
+#include "a2a_config.cuh"
 #include "ulysses_common.cuh"
 #include "ulysses_group.cuh"
 
-namespace ulysess {
+namespace ulysses {
 
-// 冒烟：包含 NVSHMEM 头 + 引用其类型，证明编译与 host 链接通路；无需 runtime
-// init。
+// Smoke test: include NVSHMEM headers + reference its types to prove the
+// compile/host-link path works; no runtime init required.
 int64_t nvshmem_uniqueid_nbytes()
 {
     return static_cast<int64_t>(sizeof(nvshmemx_uniqueid_t));
+}
+
+// Decide whether this call takes the TMA path (thin wrapper over the shared
+// helper decide_tma_path; single source of truth in a2a_config.cuh).
+// use_tma: None = auto by arch, True/False = explicit on/off. Explicit True
+// with sm<9 errors here.
+static bool decide_tma(c10::optional<bool> use_tma, int sm_major, bool is_varlen)
+{
+    int i = use_tma.has_value() ? (*use_tma ? 1 : 0) : -1;
+    if (i > 0)
+        TORCH_CHECK(sm_major >= 9, "use_tma=True requires sm90+ (TMA unavailable on this GPU)");
+    return decide_tma_path(i, sm_major, is_varlen);
 }
 
 at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
@@ -22,7 +35,8 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
                                 int64_t                                 mode,
                                 std::string                             tag,
                                 c10::optional<std::vector<int64_t>>     seq_lens,
-                                c10::optional<std::vector<int64_t>>     head_splits)
+                                c10::optional<std::vector<int64_t>>     head_splits,
+                                c10::optional<bool>                     use_tma)
 {
     TORCH_CHECK(input.is_cuda() && input.dim() == 4, "input must be a 4D CUDA tensor");
     TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
@@ -42,7 +56,7 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
     const at::cuda::CUDAGuard guard(input.device());
     cudaStream_t              stream = at::cuda::getCurrentCUDAStream();
 
-    // ---- 变长路径：调用方提供 split（无运行时 gather）；对称堆按 max 集体分配 ----
+    // ---- Varlen path: caller supplies splits (no runtime gather); symmetric heap allocated collectively by max ----
     if (seq_lens.has_value() || head_splits.has_value()) {
         TORCH_CHECK(seq_lens.has_value() && head_splits.has_value(), "varlen needs BOTH seq_lens and head_splits");
         const auto& sl = *seq_lens;
@@ -74,13 +88,20 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
             out_shape = {b, static_cast<int64_t>(sl[me]), N, d};
         }
         const auto& buf = group->pool().acquire(out_shape, input.scalar_type(), tag);
-        launch_a2a_varlen(input.data_ptr(), buf.peer_ptrs, sp, static_cast<int>(mode), elem, stream);
-        nvshmemx_quiet_on_stream(stream);
-        nvshmemx_barrier_on_stream(group->team(), stream);
+        // Varlen defaults to the faster non-TMA path: with uneven seq, TMA is forced to tile_s=1
+        // and ends up ~1.5x slower. auto/None always picks non-TMA; only explicit use_tma=True
+        // takes TMA-varlen (is_varlen=true inside decide_tma).
+        const bool tma = decide_tma(use_tma, group->sm_major(), /*is_varlen=*/true);
+        if (tma)
+            launch_a2a_tma_varlen(input.data_ptr(), buf.peer_ptrs, sp, static_cast<int>(mode), elem, stream);
+        else
+            launch_a2a_varlen(input.data_ptr(), buf.peer_ptrs, sp, static_cast<int>(mode), elem, stream);
+        nvshmemx_quiet_on_stream(stream);  // complete this rank's P2P writes (globally visible)
+        group->fast_barrier(stream);       // custom NVLink flag barrier (cross-rank sync)
         return buf.view;
     }
 
-    // ---- 均匀快路径（s/n 被 world_size 整除）----
+    // ---- Uniform fast path (s/n divisible by world_size) ----
     Ulysses4DDims dims;
     dims.b    = b;
     dims.d    = d;
@@ -104,32 +125,44 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
     }
 
     const auto& buf = group->pool().acquire(out_shape, input.scalar_type(), tag);
-    launch_a2a(input.data_ptr(), buf.peer_ptrs, dims, static_cast<int>(mode), elem, stream);
-    nvshmemx_quiet_on_stream(stream);                   // 完成本 rank 的 P2P 写
-    nvshmemx_barrier_on_stream(group->team(), stream);  // 跨 rank 同步 + 可见
+    // Path decision (auto: sm90+ -> TMA). All ranks must pass the same use_tma; otherwise they
+    // diverge on kernel/barrier + cfg_cache and hang.
+    const bool tma = decide_tma(use_tma, group->sm_major(), /*is_varlen=*/false);
+    // Hit in the group cache returns directly; miss runs a micro-benchmark to pick the best and
+    // caches it (collective call -- all ranks must issue the same shape sequence).
+    A2AConfig cfg =
+        group->resolve_config(dims, static_cast<int>(mode), tma, input.data_ptr(), buf.peer_ptrs, elem, stream);
+    if (tma)
+        launch_a2a_tma(input.data_ptr(), buf.peer_ptrs, dims, static_cast<int>(mode), elem, cfg, stream);
+    else
+        launch_a2a(input.data_ptr(), buf.peer_ptrs, dims, static_cast<int>(mode), elem, cfg, stream);
+    nvshmemx_quiet_on_stream(stream);  // complete this rank's P2P writes (globally visible)
+    group->fast_barrier(stream);       // custom NVLink flag barrier (cross-rank sync)
     return buf.view;
 }
 
-}  // namespace ulysess
+}  // namespace ulysses
 
-TORCH_LIBRARY(ulysess, m)
+TORCH_LIBRARY(ulysses, m)
 {
     m.def("nvshmem_uniqueid_nbytes() -> int");
-    m.impl("nvshmem_uniqueid_nbytes", &ulysess::nvshmem_uniqueid_nbytes);
+    m.impl("nvshmem_uniqueid_nbytes", &ulysses::nvshmem_uniqueid_nbytes);
 
-    m.class_<ulysess::UlyssesGroup>("UlyssesGroup")
+    m.class_<ulysses::UlyssesGroup>("UlyssesGroup")
         .def(torch::init<std::vector<int64_t>, int64_t, int64_t, int64_t>())
-        .def("rank", &ulysess::UlyssesGroup::rank)
-        .def("world_size", &ulysess::UlyssesGroup::world_size)
-        .def("destroy", &ulysess::UlyssesGroup::destroy)
-        .def_static("uniqueid_nints", &ulysess::UlyssesGroup::uniqueid_nints)
-        .def_static("get_uniqueid", &ulysess::UlyssesGroup::get_uniqueid)
-        .def_static("init_world", &ulysess::UlyssesGroup::init_world);
+        .def("rank", &ulysses::UlyssesGroup::rank)
+        .def("world_size", &ulysses::UlyssesGroup::world_size)
+        .def("tune", &ulysses::UlyssesGroup::tune)
+        .def("destroy", &ulysses::UlyssesGroup::destroy)
+        .def_static("uniqueid_nints", &ulysses::UlyssesGroup::uniqueid_nints)
+        .def_static("get_uniqueid", &ulysses::UlyssesGroup::get_uniqueid)
+        .def_static("init_world", &ulysses::UlyssesGroup::init_world);
 
-    m.def("all_to_all_single_4d(__torch__.torch.classes.ulysess.UlyssesGroup group, "
-          "Tensor input, int mode, str tag, int[]? seq_lens=None, int[]? head_splits=None) -> Tensor");
-    m.impl("all_to_all_single_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysess::all_to_all_single_4d);
+    m.def("all_to_all_single_4d(__torch__.torch.classes.ulysses.UlyssesGroup group, "
+          "Tensor input, int mode, str tag, int[]? seq_lens=None, int[]? head_splits=None, "
+          "bool? use_tma=None) -> Tensor");
+    m.impl("all_to_all_single_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d);
 }
 
-// Python `import _C` 需要 PyInit__C；TORCH_LIBRARY 在 dlopen 时已完成注册。
+// Python `import _C` needs PyInit__C; TORCH_LIBRARY already registered at dlopen time.
 PYBIND11_MODULE(_C, m) {}

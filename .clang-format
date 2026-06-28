@@ -1,4 +1,4 @@
-# custom_ulysess_op 的 C++/CUDA 统一风格（独立、框架无关的自定义算子包）。
+# custom_ulysses_op 的 C++/CUDA 统一风格（独立、框架无关的自定义算子包）。
 # clang-format 向上查找此文件，使本包 csrc/ 下的源不受外层仓库风格影响。
 Language: Cpp
 Standard: c++17

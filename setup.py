@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import sysconfig
@@ -29,13 +28,11 @@ class CMakeBuild(build_ext):
     def build_extension(self, ext: Extension) -> None:
         outdir = Path(self.get_ext_fullpath(ext.name)).resolve().parent
         ext_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-        builddir = Path(self.build_temp).resolve()
+        # Persistent build dir (not pip's ephemeral build_temp) so CMake can
+        # build incrementally and skip recompiling unchanged TUs. CMake re-runs
+        # configure automatically when the -D args change, so no manual wipe.
+        builddir = _HERE / "build"
         builddir.mkdir(parents=True, exist_ok=True)
-        for stale in (builddir / "CMakeCache.txt", builddir / "CMakeFiles"):
-            if stale.is_file():
-                stale.unlink()
-            elif stale.is_dir():
-                shutil.rmtree(stale)
         env = os.environ.copy()
         arch = env.get("CUSTOM_ULYSSES_CUDA_ARCH", "80;90;100")
         # Torch expects dotted arch (e.g. 86 -> 8.6, 100 -> 10.0); insert the
@@ -63,9 +60,9 @@ class CMakeBuild(build_ext):
 
 
 setup(
-    name="custom_ulysess_op",
+    name="custom_ulysses_op",
     version="0.0.1",
-    packages=["custom_ulysess_op"],
-    ext_modules=[CMakeExtension("custom_ulysess_op._C")],
+    packages=["custom_ulysses_op"],
+    ext_modules=[CMakeExtension("custom_ulysses_op._C")],
     cmdclass={"build_ext": CMakeBuild},
 )

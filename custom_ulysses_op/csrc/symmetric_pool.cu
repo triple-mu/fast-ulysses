@@ -4,7 +4,7 @@
 #include <nvshmemx.h>
 #include <torch/torch.h>
 
-namespace ulysess {
+namespace ulysses {
 
 SymmetricHeapPool::SymmetricHeapPool(int64_t          reserved_bytes,
                                      int              world_size,
@@ -15,7 +15,7 @@ SymmetricHeapPool::SymmetricHeapPool(int64_t          reserved_bytes,
     peer_global_pes_(std::move(peer_global_pes)),
     team_(team)
 {
-    // 集体分配一小块对称 scratch，用于 acquire 时的 nbytes 一致性校验。
+    // Collectively allocate a small symmetric scratch for nbytes consistency checks in acquire.
     scratch_ = static_cast<int64_t*>(nvshmem_align(256, 2 * sizeof(int64_t)));
     TORCH_CHECK(scratch_ != nullptr, "nvshmem_align scratch failed");
     segments_.push_back(scratch_);
@@ -23,9 +23,10 @@ SymmetricHeapPool::SymmetricHeapPool(int64_t          reserved_bytes,
 
 int64_t SymmetricHeapPool::collective_max_nbytes(int64_t nbytes)
 {
-    // 全 PE 对 nbytes 取 max（变长下各 rank 输出大小不同，对称堆须同尺寸 → 按 max 分配）。
-    // scratch_ 是 nvshmem_align 返回的 DEVICE 对称内存，host 不能直接解引用；
-    // 故经 cudaMemcpy 在 host/device 间搬运，reduce 在 device 上完成（host-blocking）。
+    // Max-reduce nbytes across all PEs (varlen: per-rank output sizes differ, but the symmetric
+    // heap requires a uniform size, so allocate by the global max).
+    // scratch_ is DEVICE symmetric memory from nvshmem_align and cannot be dereferenced on host,
+    // so we cudaMemcpy host<->device and run the reduce on device (host-blocking).
     int64_t gmax = 0;
     cudaMemcpy(scratch_, &nbytes, sizeof(int64_t), cudaMemcpyHostToDevice);
     nvshmem_int64_max_reduce(team_, scratch_ + 1, scratch_, 1);
@@ -40,16 +41,17 @@ SymmetricHeapPool::acquire(const std::vector<int64_t>& shape, c10::ScalarType dt
     Key  key{tag, shape, dtype};
     auto it = registry_.find(key);
     if (it != registry_.end())
-        return it->second;  // 复用
+        return it->second;  // reuse
 
     int64_t numel = 1;
     for (auto s : shape)
         numel *= s;
     const int64_t elem   = c10::elementSize(dtype);
     int64_t       nbytes = numel * elem;
-    nbytes               = (nbytes + 15) / 16 * 16;  // uint4 对齐
+    nbytes               = (nbytes + 15) / 16 * 16;  // uint4 alignment
 
-    // 变长下各 rank 输出大小不同；对称堆须同尺寸 → 全 rank 按全局 max 分配，各自只用本地那块。
+    // Varlen: per-rank output sizes differ, but the symmetric heap requires a uniform size, so all
+    // ranks allocate the global max and each uses only its local portion.
     const int64_t alloc_bytes = collective_max_nbytes(nbytes);
     TORCH_CHECK(used_ + alloc_bytes <= reserved_,
                 "SymmetricHeapPool OOM: need ",
@@ -60,7 +62,7 @@ SymmetricHeapPool::acquire(const std::vector<int64_t>& shape, c10::ScalarType dt
                 reserved_,
                 " B. Increase initial_pool_bytes.");
 
-    void* p = nvshmem_align(256, alloc_bytes);  // 集体分配（同尺寸）；地址永不移动
+    void* p = nvshmem_align(256, alloc_bytes);  // collective alloc (uniform size); address never moves
     TORCH_CHECK(p != nullptr, "nvshmem_align failed for ", alloc_bytes, " B");
     segments_.push_back(p);
     used_ += alloc_bytes;
@@ -71,7 +73,7 @@ SymmetricHeapPool::acquire(const std::vector<int64_t>& shape, c10::ScalarType dt
     buf.peer_ptrs.resize(world_size_);
     for (int i = 0; i < world_size_; ++i)
         buf.peer_ptrs[i] = reinterpret_cast<uint64_t>(nvshmem_ptr(p, peer_global_pes_[i]));
-    // 单节点 P2P：所有 peer 指针都应非空。
+    // Single-node P2P: all peer pointers must be non-null.
     for (int i = 0; i < world_size_; ++i)
         TORCH_CHECK(buf.peer_ptrs[i] != 0,
                     "nvshmem_ptr returned NULL for peer ",
@@ -79,7 +81,8 @@ SymmetricHeapPool::acquire(const std::vector<int64_t>& shape, c10::ScalarType dt
                     " (non-P2P-reachable; phase-1 requires single-node NVLink).");
 
     auto opts = at::TensorOptions().dtype(dtype).device(at::kCUDA, at::cuda::current_device());
-    buf.view  = at::from_blob(p, shape, [](void*) {}, opts);  // no-op deleter
+    buf.view  = at::from_blob(
+        p, shape, [](void*) {}, opts);  // no-op deleter
 
     auto res = registry_.emplace(std::move(key), std::move(buf));
     return res.first->second;
@@ -89,12 +92,12 @@ void SymmetricHeapPool::destroy()
 {
     if (destroyed_)
         return;
-    registry_.clear();  // 释放 from_blob 视图（不 free 底层）
+    registry_.clear();  // drop from_blob views (does not free underlying memory)
     for (void* p : segments_)
         nvshmem_free(p);
     segments_.clear();
-    scratch_   = nullptr;  // 段已释放，置空避免后续误用悬垂指针
+    scratch_   = nullptr;  // segments freed; null it out to avoid dangling-pointer misuse
     destroyed_ = true;
 }
 
-}  // namespace ulysess
+}  // namespace ulysses

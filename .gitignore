@@ -6,3 +6,13 @@ dist/
 __pycache__/
 *.so
 *.o
+
+# vendored 第三方参考（含各自 .git），不入库
+3rdparty/
+
+# IDE / pytest 缓存
+.idea/
+.pytest_cache/
+
+# SDD session scratch
+.superpowers/

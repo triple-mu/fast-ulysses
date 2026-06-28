@@ -1,7 +1,7 @@
-"""torchrun 正确性对拍：custom_ulysess_op vs torch permute + all_to_all_single + permute。
+"""torchrun correctness check: custom_ulysses_op vs torch permute + all_to_all_single + permute.
 
-纯数据搬运 → 逐位相等。运行（目标多卡机，ws ∈ {2,4,8}）：
-    torchrun --nproc_per_node=8 custom_ulysess_op/test/test_correctness.py
+Pure data movement, so results must be bit-exact. Run on a multi-GPU host (ws in {2,4,8}):
+    torchrun --nproc_per_node=8 custom_ulysses_op/test/test_correctness.py
 """
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ import os
 import torch
 import torch.distributed as dist
 
-from custom_ulysess_op import UlyssesGroup
+from custom_ulysses_op import UlyssesGroup
 
 
 def torch_a2a(x: torch.Tensor, mode: int, ws: int, group) -> torch.Tensor:
-    """标准 Ulysses all-to-all 参考实现（permute → all_to_all_single → permute）。"""
+    """Reference Ulysses all-to-all (permute -> all_to_all_single -> permute)."""
     b, d = x.shape[0], x.shape[-1]
     if mode == 0:
         s_local, n_global = x.shape[1], x.shape[2]
@@ -34,10 +34,10 @@ def torch_a2a(x: torch.Tensor, mode: int, ws: int, group) -> torch.Tensor:
 
 
 def torch_a2a_varlen(x, mode, me, ws, s_off, n_off, group):
-    """变长参考：用 torch.distributed.all_to_all（list 形式）做 uneven A2A。"""
+    """Varlen reference: uneven A2A via torch.distributed.all_to_all (list form)."""
     b, d = x.shape[0], x.shape[-1]
     if mode == 0:
-        # 发给 peer r：me 的序列 × r 的头块；从 r 收：r 的序列 × me 的头块 → 沿序列拼
+        # send to peer r: my seq x r's head block; recv from r: r's seq x my head block -> concat along seq
         send = [x[:, :, n_off[r] : n_off[r + 1], :].contiguous() for r in range(ws)]
         recv = [
             torch.empty(
@@ -95,20 +95,29 @@ def main() -> None:
                 x = torch.randn(shape, dtype=dtype, device=dev)
                 tag = f"t_{str(dtype).split('.')[-1]}_d{d}_m{mode}"
 
-                ours = group.all_to_all_single_4d(x, mode=mode, tag=tag)
                 ref = torch_a2a(x, mode, ws, pg)
-                if not torch.equal(ours, ref):
-                    raise AssertionError(
-                        f"MISMATCH rank={rank} ws={ws} dtype={dtype} d={d} mode={mode}"
+                # use_tma=None (auto path) for every (dtype,d,mode); explicit True/False only at d==128
+                # (avoid blowup), covering both TMA / non-TMA uniform paths. All ranks must pass the
+                # same use_tma (hard collective invariant).
+                use_tma_list = [None] if d != 128 else [None, True, False]
+                for use_tma in use_tma_list:
+                    ours = group.all_to_all_single_4d(
+                        x, mode=mode, tag=f"{tag}_ut{use_tma}", use_tma=use_tma
                     )
-                if rank == 0:
-                    print(
-                        f"OK ws={ws} {str(dtype).split('.')[-1]} d={d} mode={mode} shape={tuple(ours.shape)}",
-                        flush=True,
-                    )
-                dist.barrier()
+                    if not torch.equal(ours, ref):
+                        raise AssertionError(
+                            f"MISMATCH rank={rank} ws={ws} dtype={dtype} d={d} "
+                            f"mode={mode} use_tma={use_tma}"
+                        )
+                    if rank == 0:
+                        print(
+                            f"OK ws={ws} {str(dtype).split('.')[-1]} d={d} mode={mode} "
+                            f"use_tma={use_tma} shape={tuple(ours.shape)}",
+                            flush=True,
+                        )
+                    dist.barrier()
 
-    # 变长（uneven s/n，不能被 world_size 整除）：split 由调用方提供，无运行时 gather。
+    # Varlen (uneven s/n, not divisible by world_size): splits supplied by caller, no runtime gather.
     seq_lens = [4, 6, 3, 7, 5, 2, 8, 1][:ws]
     head_splits = [2, 3, 1, 4, 2, 5, 1, 3][:ws]
     s_off = _prefix(seq_lens)
@@ -125,20 +134,30 @@ def main() -> None:
                 x = torch.randn(shape, dtype=dtype, device=dev)
                 tag = f"v_{str(dtype).split('.')[-1]}_d{d}_m{mode}"
 
-                ours = group.all_to_all_single_4d(
-                    x, mode=mode, tag=tag, seq_lens=seq_lens, head_splits=head_splits
-                )
                 ref = torch_a2a_varlen(x, mode, rank, ws, s_off, n_off, pg)
-                if not torch.equal(ours, ref):
-                    raise AssertionError(
-                        f"VARLEN MISMATCH rank={rank} ws={ws} dtype={dtype} d={d} mode={mode}"
+                # use_tma=None (auto -> non-TMA varlen); d==128 also runs True (TMA-varlen debug path) + False.
+                use_tma_list = [None] if d != 128 else [None, True, False]
+                for use_tma in use_tma_list:
+                    ours = group.all_to_all_single_4d(
+                        x,
+                        mode=mode,
+                        tag=f"{tag}_ut{use_tma}",
+                        seq_lens=seq_lens,
+                        head_splits=head_splits,
+                        use_tma=use_tma,
                     )
-                if rank == 0:
-                    print(
-                        f"OK[varlen] ws={ws} {str(dtype).split('.')[-1]} d={d} mode={mode} shape={tuple(ours.shape)}",
-                        flush=True,
-                    )
-                dist.barrier()
+                    if not torch.equal(ours, ref):
+                        raise AssertionError(
+                            f"VARLEN MISMATCH rank={rank} ws={ws} dtype={dtype} d={d} "
+                            f"mode={mode} use_tma={use_tma}"
+                        )
+                    if rank == 0:
+                        print(
+                            f"OK[varlen] ws={ws} {str(dtype).split('.')[-1]} d={d} mode={mode} "
+                            f"use_tma={use_tma} shape={tuple(ours.shape)}",
+                            flush=True,
+                        )
+                    dist.barrier()
 
     if rank == 0:
         print("ALL PASS", flush=True)
