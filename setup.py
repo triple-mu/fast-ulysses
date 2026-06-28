@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import sysconfig
+from pathlib import Path
+
+from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext
+
+_HERE = Path(__file__).resolve().parent
+os.chdir(_HERE)
+
+NVSHMEM_HOME = os.environ.get(
+    "NVSHMEM_HOME", "/data/libnvshmem-linux-x86_64-3.7.0_cuda12-archive"
+)
+if not (Path(NVSHMEM_HOME) / "include" / "nvshmem.h").exists():
+    raise FileNotFoundError(f"NVSHMEM_HOME invalid: {NVSHMEM_HOME}")
+
+
+class CMakeExtension(Extension):
+    def __init__(self, name: str) -> None:
+        super().__init__(name, sources=[])
+
+
+class CMakeBuild(build_ext):
+    def build_extension(self, ext: Extension) -> None:
+        outdir = Path(self.get_ext_fullpath(ext.name)).resolve().parent
+        ext_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+        builddir = Path(self.build_temp).resolve()
+        builddir.mkdir(parents=True, exist_ok=True)
+        for stale in (builddir / "CMakeCache.txt", builddir / "CMakeFiles"):
+            if stale.is_file():
+                stale.unlink()
+            elif stale.is_dir():
+                shutil.rmtree(stale)
+        env = os.environ.copy()
+        arch = env.get("CUSTOM_ULYSSES_CUDA_ARCH", "80;90;100")
+        # Torch expects dotted arch (e.g. 86 -> 8.6, 100 -> 10.0); insert the
+        # decimal point before the last digit of each ";"-separated token.
+        env["TORCH_CUDA_ARCH_LIST"] = " ".join(
+            f"{tok[:-1]}.{tok[-1]}" for tok in arch.split(";") if tok
+        )
+        subprocess.check_call(
+            [
+                "cmake",
+                "-S",
+                str(_HERE),
+                "-B",
+                str(builddir),
+                f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={outdir}",
+                f"-DPython_EXECUTABLE={sys.executable}",
+                f"-DEXT_SUFFIX={ext_suffix}",
+                "-DCMAKE_BUILD_TYPE=Release",
+                f"-DCMAKE_CUDA_ARCHITECTURES={arch}",
+                f"-DNVSHMEM_HOME={NVSHMEM_HOME}",
+            ],
+            env=env,
+        )
+        subprocess.check_call(["cmake", "--build", str(builddir), "-j"], env=env)
+
+
+setup(
+    name="custom_ulysess_op",
+    version="0.0.1",
+    packages=["custom_ulysess_op"],
+    ext_modules=[CMakeExtension("custom_ulysess_op._C")],
+    cmdclass={"build_ext": CMakeBuild},
+)

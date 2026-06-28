@@ -1,0 +1,8 @@
+# 构建产物 / 临时目录（本包是独立可分发工程，源外的一律不入库）
+build/
+cmake-build-*/
+dist/
+*.egg-info/
+__pycache__/
+*.so
+*.o
