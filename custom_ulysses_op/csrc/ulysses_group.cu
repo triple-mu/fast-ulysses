@@ -2,6 +2,7 @@
 #include "ulysses_group.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cstdio>
 #include <cstring>
 #include <cuda_runtime.h>
 #include <nvshmem.h>
@@ -162,45 +163,43 @@ A2AConfig UlyssesGroup::resolve_config(const Ulysses4DDims&         dims,
     if (it != cfg_cache_.end())
         return it->second;  // hit: no collective primitive
     A2AConfig cfg = use_tma ? resolve_config_tma(src, peers, dims, mode, elem, static_cast<int>(team_), false, stream) :
-                              resolve_config_nontma(src, peers, dims, mode, elem, stream);
+                              resolve_config_nontma(src, peers, dims, mode, elem, stream, /*verbose=*/false);
     cfg_cache_[key] = cfg;
     return cfg;
 }
 
-// See the "collective-call hard invariant" note in ulysses_group.cuh. dims derivation matches the
-// bindings.cpp uniform section verbatim. use_tma: -1 auto / 0 / 1, resolved via the shared helper
-// decide_tma_path (uniform, is_varlen=false); only that path is warmed up.
-void UlyssesGroup::tune(int64_t b, int64_t s_local, int64_t n, int64_t d, int64_t mode, int64_t use_tma, bool verbose)
+// See the "collective-call hard invariant" note in ulysses_group.cuh. Params are the per-rank LOCAL
+// logical dims (b, s_local, n_local, d), identical for mode0/mode1 (s_local=S_global/ws, n_local=H/ws):
+// passing local on both axes removes the old ambiguity (one axis was global, and which one flipped by
+// mode). The mode-dependent physical input shape is reconstructed here (global = local*ws), so the
+// resulting dims/cache-key match the bindings.cpp uniform path and the lazy all_to_all hits this entry.
+// use_tma: -1 auto / 0 / 1, resolved via decide_tma_path (uniform, is_varlen=false); only that path warms.
+void UlyssesGroup::tune(
+    int64_t b, int64_t s_local, int64_t n_local, int64_t d, int64_t mode, int64_t use_tma, bool verbose)
 {
     TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 or 1");
     if (use_tma > 0)
         TORCH_CHECK(sm_major_ >= 9, "use_tma=True requires sm90+ (TMA unavailable on this GPU)");
     const bool    tma = decide_tma_path(static_cast<int>(use_tma), sm_major_, /*is_varlen=*/false);
     const int     ws  = world_size_;
-    const int     x1 = static_cast<int>(s_local), x2 = static_cast<int>(n);
     Ulysses4DDims dims;
-    dims.b    = static_cast<int>(b);
-    dims.d    = static_cast<int>(d);
-    dims.rank = my_rank_;
-    std::vector<int64_t> in_shape{b, s_local, n, d};
-    std::vector<int64_t> out_shape;
+    dims.b        = static_cast<int>(b);
+    dims.d        = static_cast<int>(d);
+    dims.rank     = my_rank_;
+    dims.s_local  = static_cast<int>(s_local);
+    dims.n_local  = static_cast<int>(n_local);
+    dims.s_global = static_cast<int>(s_local) * ws;
+    dims.n_global = static_cast<int>(n_local) * ws;
+    // Physical all_to_all input/output by mode: mode0 input (b,s_local,n_global,d) -> output
+    // (b,s_global,n_local,d); mode1 is the reverse.
+    std::vector<int64_t> in_shape, out_shape;
     if (mode == 0) {
-        // Physical input (b, s_local, n_global, d): matches bindings uniform mode0.
-        TORCH_CHECK(x2 % ws == 0, "n_global must be divisible by world_size");
-        dims.s_local  = x1;
-        dims.n_global = x2;
-        dims.s_global = x1 * ws;
-        dims.n_local  = x2 / ws;
-        out_shape     = {b, dims.s_global, dims.n_local, d};
+        in_shape  = {b, dims.s_local, dims.n_global, d};
+        out_shape = {b, dims.s_global, dims.n_local, d};
     }
     else {
-        // Physical input (b, s_global, n_local, d): matches bindings uniform mode1.
-        TORCH_CHECK(x1 % ws == 0, "s_global must be divisible by world_size");
-        dims.s_global = x1;
-        dims.n_local  = x2;
-        dims.s_local  = x1 / ws;
-        dims.n_global = x2 * ws;
-        out_shape     = {b, dims.s_local, dims.n_global, d};
+        in_shape  = {b, dims.s_global, dims.n_local, d};
+        out_shape = {b, dims.s_local, dims.n_global, d};
     }
 
     const at::cuda::CUDAGuard guard(at::Device(at::kCUDA, device_id_));
@@ -214,8 +213,66 @@ void UlyssesGroup::tune(int64_t b, int64_t s_local, int64_t n, int64_t d, int64_
     A2AConfig   cfg =
         tma ? resolve_config_tma(
             src.data_ptr(), buf.peer_ptrs, dims, static_cast<int>(mode), 2, static_cast<int>(team_), verbose, stream) :
-                resolve_config_nontma(src.data_ptr(), buf.peer_ptrs, dims, static_cast<int>(mode), 2, stream);
+                resolve_config_nontma(src.data_ptr(), buf.peer_ptrs, dims, static_cast<int>(mode), 2, stream, verbose);
     cfg_cache_[config_key(ws, static_cast<int>(mode), tma, dims)] = cfg;
+}
+
+// Varlen tune: build SplitInfo from the per-rank splits, allocate a temp physical src + symmetric scratch
+// output, and warm the non-TMA varlen config (resolve_config_varlen's own process-static cache). See tune()
+// for the collective-call invariant. Shapes match the bindings.cpp varlen section.
+void UlyssesGroup::tune_varlen(int64_t              b,
+                               std::vector<int64_t> seq_lens,
+                               std::vector<int64_t> head_splits,
+                               int64_t              d,
+                               int64_t              mode,
+                               int64_t              use_tma,
+                               bool                 verbose)
+{
+    TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 or 1");
+    const int ws = world_size_;
+    TORCH_CHECK(static_cast<int>(seq_lens.size()) == ws && static_cast<int>(head_splits.size()) == ws,
+                "seq_lens/head_splits length must equal world_size");
+    if (use_tma > 0)
+        TORCH_CHECK(sm_major_ >= 9, "use_tma=True requires sm90+ (TMA unavailable on this GPU)");
+    const int me = my_rank_;
+    SplitInfo sp;
+    sp.world_size = ws;
+    sp.rank       = me;
+    sp.b          = static_cast<int>(b);
+    sp.d          = static_cast<int>(d);
+    sp.s_off[0]   = 0;
+    sp.n_off[0]   = 0;
+    for (int r = 0; r < ws; ++r) {
+        sp.s_off[r + 1] = sp.s_off[r] + static_cast<int>(seq_lens[r]);
+        sp.n_off[r + 1] = sp.n_off[r] + static_cast<int>(head_splits[r]);
+    }
+    const int S = sp.s_off[ws];
+    const int N = sp.n_off[ws];
+    // Physical input/output for this rank (matches bindings varlen): mode0 input [b, seq_lens[me], N, d] ->
+    // output [b, S, head_splits[me], d]; mode1 is the reverse.
+    std::vector<int64_t> in_shape, out_shape;
+    if (mode == 0) {
+        in_shape  = {b, seq_lens[me], N, d};
+        out_shape = {b, S, head_splits[me], d};
+    }
+    else {
+        in_shape  = {b, S, head_splits[me], d};
+        out_shape = {b, seq_lens[me], N, d};
+    }
+
+    const at::cuda::CUDAGuard guard(at::Device(at::kCUDA, device_id_));
+    cudaStream_t              stream = at::cuda::getCurrentCUDAStream();
+    at::Tensor  src = at::empty(in_shape, at::TensorOptions().dtype(at::kBFloat16).device(at::kCUDA, device_id_));
+    const auto& buf = pool().acquire(out_shape, at::kBFloat16, "__tune_varlen__");
+    // Varlen path: auto/false -> non-TMA (the tuned path); explicit True -> TMA-varlen (fixed launch, nothing to
+    // tune). pool().acquire above is still the collective both branches must issue in lockstep.
+    const bool tma = decide_tma_path(static_cast<int>(use_tma), sm_major_, /*is_varlen=*/true);
+    if (tma) {
+        if (verbose && me == 0)
+            printf("[ulysses varlen tune] use_tma=True -> TMA-varlen has no tunable launch config (skip)\n");
+        return;
+    }
+    resolve_config_varlen(src.data_ptr(), buf.peer_ptrs, sp, static_cast<int>(mode), 2, stream, verbose);
 }
 
 void UlyssesGroup::destroy()

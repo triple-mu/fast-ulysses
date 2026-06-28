@@ -24,16 +24,16 @@ def _prefix(xs: list[int]) -> list[int]:
 
 
 def torch_varlen_mode0(
-    x: torch.Tensor,
-    me: int,
-    ws: int,
-    s_off: list[int],
-    n_off: list[int],
-    group,
+        x: torch.Tensor,
+        me: int,
+        ws: int,
+        s_off: list[int],
+        n_off: list[int],
+        group,
 ) -> torch.Tensor:
     # Variable-length mode0 oracle via torch.distributed.all_to_all (list form).
     b, s_me, N, d = x.shape
-    send = [x[:, :, n_off[p] : n_off[p + 1], :].contiguous() for p in range(ws)]
+    send = [x[:, :, n_off[p]: n_off[p + 1], :].contiguous() for p in range(ws)]
     recv = [
         torch.empty(
             b,
@@ -82,8 +82,8 @@ def main() -> None:
     # Uneven seqs; head blocks default larger (realistic DiT: uneven seqs, ~8-32 heads), override via PROF_HEADS.
     seq_units = [3, 5, 2, 6, 4, 7, 1, 8][:ws]
     head_splits = [
-        int(x) for x in os.environ.get("PROF_HEADS", "12,20,8,24,16,28,4,32").split(",")
-    ][:ws]
+                      int(x) for x in os.environ.get("PROF_HEADS", "12,20,8,24,16,28,4,32").split(",")
+                  ][:ws]
     seq_lens = [u * scale for u in seq_units]
     s_off, n_off = _prefix(seq_lens), _prefix(head_splits)
     S, N = s_off[ws], n_off[ws]
@@ -96,6 +96,8 @@ def main() -> None:
         )
 
     x = torch.randn(b, seq_lens[rank], N, d, dtype=torch.bfloat16, device=dev)
+    # Tune the varlen launch config (threads x unroll x blocks) for these splits; verbose prints the winner.
+    group.tune_varlen(b, d, seq_lens, head_splits, mode=0, use_tma=ut, verbose=False)
     remote = x.numel() * 2 * (ws - 1) / ws
     ours = timed(
         lambda: group.all_to_all_single_4d(

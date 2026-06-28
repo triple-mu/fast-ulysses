@@ -8,9 +8,55 @@
 //     causing rare data corruption that small shapes won't catch.
 //   - tma_commit_group / tma_wait_group / mbar_init / mbar_arrive_expect keep their original
 //     no-clobber form.
+//
+// The TMA / mbarrier helpers below use sm90+ only PTX (cp.async.bulk.tensor, mbarrier.*expect_tx,
+// mbarrier.try_wait.parity, cp.async.bulk.commit_group/wait_group, fence.proxy.async). They are
+// reached only on the TMA path, which the host gates to sm90+ at runtime (see decide_tma_path).
+// For multi-arch builds that include sm80, the sm80 device pass cannot assemble these features, so
+// we emit __trap() stubs for __CUDA_ARCH__ < 900; they are never executed on pre-Hopper GPUs. The
+// host pass (__CUDA_ARCH__ undefined) takes the real definitions but does not codegen __device__
+// bodies, so the asm is harmless there.
 #include <cstdint>
 
 namespace ulysses {
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 900)
+
+// --- sm80 (pre-Hopper) trap stubs: the TMA path is never selected here at runtime. ---
+__device__ __forceinline__ void mbar_init(uint32_t)
+{
+    __trap();
+}
+__device__ __forceinline__ void mbar_arrive_expect(uint32_t, uint32_t)
+{
+    __trap();
+}
+__device__ __forceinline__ void mbar_wait(uint32_t, int)
+{
+    __trap();
+}
+__device__ __forceinline__ void tma_load_4d(uint32_t, const void*, int, int, int, int, uint32_t)
+{
+    __trap();
+}
+__device__ __forceinline__ void tma_store_4d(const void*, int, int, int, int, uint32_t)
+{
+    __trap();
+}
+__device__ __forceinline__ void tma_commit_group()
+{
+    __trap();
+}
+__device__ __forceinline__ void tma_wait_group(int)
+{
+    __trap();
+}
+__device__ __forceinline__ void async_proxy_fence()
+{
+    __trap();
+}
+
+#else
 
 // Init mbarrier with expected arrival count 1. Arg is an already-__cvta'd uint32_t smem address.
 __device__ __forceinline__ void mbar_init(uint32_t mbar)
@@ -102,7 +148,9 @@ __device__ __forceinline__ void async_proxy_fence()
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }
 
-// System-scope release store / acquire load (for cross-GPU P2P flag sync).
+#endif  // __CUDA_ARCH__ < 900
+
+// System-scope release store / acquire load (sm70+, used by fast_barrier on all archs; not gated).
 __device__ __forceinline__ void st_release_sys_u64(uint64_t* addr, uint64_t v)
 {
     asm volatile("st.release.sys.global.u64 [%0], %1;" ::"l"(addr), "l"(v) : "memory");

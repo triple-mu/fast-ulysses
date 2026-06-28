@@ -47,14 +47,15 @@ void launch_a2a(const void*                  src,
                 const A2AConfig&             cfg,
                 cudaStream_t                 stream);
 
-// non-TMA config resolution: default config + pick_blocks measured block count (pick_blocks has
-// its own process-level static cache; the result is then held by the group's cfg_cache_).
+// non-TMA config resolution: micro-benchmark sweep over threads x unroll x blocks, keep the fastest
+// (result held by the group's cfg_cache_). verbose: print the chosen config (rank 0 only).
 A2AConfig resolve_config_nontma(const void*                  src,
                                 const std::vector<uint64_t>& peer_ptrs,
                                 const Ulysses4DDims&         dims,
                                 int                          mode,
                                 int                          elem_size,
-                                cudaStream_t                 stream);
+                                cudaStream_t                 stream,
+                                bool                         verbose);
 
 // Varlen version: source-side routing (scan local input, route each head/seq slot to its owning peer via split
 // offsets).
@@ -64,6 +65,16 @@ void launch_a2a_varlen(const void*                  src,
                        int                          mode,
                        int                          elem_size,
                        cudaStream_t                 stream);
+
+// varlen non-TMA config resolution: micro-benchmark sweep over threads x unroll x blocks, keep the fastest.
+// Own process-static cache keyed by (ws, mode, local-total). verbose: print the chosen config (rank 0 only).
+A2AConfig resolve_config_varlen(const void*                  src,
+                                const std::vector<uint64_t>& peer_ptrs,
+                                const SplitInfo&             sp,
+                                int                          mode,
+                                int                          elem_size,
+                                cudaStream_t                 stream,
+                                bool                         verbose);
 
 // Varlen TMA version (sm90+): one src map + a separate dst map per peer, grid.y=peer. See a2a_tma.cu.
 void launch_a2a_tma_varlen(const void*                  src,

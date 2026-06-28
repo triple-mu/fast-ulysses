@@ -11,10 +11,10 @@ import torch.distributed as dist
 
 class UlyssesGroup:
     def __init__(
-        self,
-        process_group: Optional[dist.ProcessGroup] = None,
-        device: Optional[torch.device] = None,
-        initial_pool_bytes: int = 2 << 30,
+            self,
+            process_group: Optional[dist.ProcessGroup] = None,
+            device: Optional[torch.device] = None,
+            initial_pool_bytes: int = 2 << 30,
     ) -> None:
         pg = process_group if process_group is not None else dist.group.WORLD
         self.pg = pg
@@ -56,14 +56,14 @@ class UlyssesGroup:
         dist.barrier(group=pg)
 
     def all_to_all_single_4d(
-        self,
-        x: torch.Tensor,
-        *,
-        mode: int = 0,
-        tag: str = "",
-        seq_lens: list[int] | None = None,
-        head_splits: list[int] | None = None,
-        use_tma: bool | None = None,
+            self,
+            x: torch.Tensor,
+            *,
+            mode: int = 0,
+            tag: str = "",
+            seq_lens: list[int] | None = None,
+            head_splits: list[int] | None = None,
+            use_tma: bool | None = None,
     ) -> torch.Tensor:
         # seq_lens/head_splits are the per-rank sequence lengths / head counts (varlen, supplied by
         # the caller, no runtime gather); both None -> uniform path (s/n must divide world_size).
@@ -83,12 +83,12 @@ class UlyssesGroup:
         )
 
     def tune(
-        self,
-        shape: tuple[int, int, int, int],
-        *,
-        mode: int = 0,
-        use_tma: bool | None = None,
-        verbose: bool = False,
+            self,
+            shape: tuple[int, int, int, int],
+            *,
+            mode: int = 0,
+            use_tma: bool | None = None,
+            verbose: bool = False,
     ) -> None:
         """Warm up the launch config for a shape (collective; warm-up only, result unchanged).
 
@@ -97,8 +97,11 @@ class UlyssesGroup:
         same shape set, or all ranks rely on the lazy fallback in the first all_to_all. Mixing
         tune/lazy across ranks hangs the whole group.
 
-        shape is the all_to_all input physical shape (b, x1, x2, d):
-          mode0 -> (b, s_local, n_global, d); mode1 -> (b, s_global, n_local, d).
+        shape is the per-rank LOCAL logical shape (b, s_local, n_local, d), SAME for mode0/mode1:
+          s_local = S_global / world_size (local sequence chunk), n_local = H / world_size (local
+          head chunk). Both axes are local, so there is no ambiguity over which one is global (unlike
+          the physical all_to_all input, where mode0 carries n_global and mode1 carries s_global).
+          The mode-dependent physical input is reconstructed internally (global = local * world_size).
         The number of pre-tuned shapes is bounded by initial_pool_bytes (each shape accumulates a
         scratch output in the symmetric heap).
 
@@ -108,13 +111,49 @@ class UlyssesGroup:
         one more lazy collective micro-benchmark (which must again be consistent across all ranks).
         Every rank MUST pass the SAME use_tma to tune (same hard constraint as all_to_all).
         """
-        assert len(shape) == 4, "shape must be (b,x1,x2,d)"
+        assert len(shape) == 4, "shape must be (b, s_local, n_local, d)"
         ut = -1 if use_tma is None else int(bool(use_tma))
         self._group.tune(
             int(shape[0]),
             int(shape[1]),
             int(shape[2]),
             int(shape[3]),
+            int(mode),
+            ut,
+            bool(verbose),
+        )
+
+    def tune_varlen(
+            self,
+            b: int,
+            d: int,
+            seq_lens: list[int],
+            head_splits: list[int],
+            *,
+            mode: int = 0,
+            use_tma: bool | None = None,
+            verbose: bool = False,
+    ) -> None:
+        """Warm up the launch config for a varlen (uneven splits) shape (collective; warm-up only).
+
+        Varlen counterpart of tune(). seq_lens / head_splits are the per-rank sequence lengths / head
+        counts (len == world_size), the SAME lists on every rank (as in all_to_all_single_4d). The config
+        is keyed by this rank's local total, so each rank tunes its own launch params.
+
+        COLLECTIVE SEMANTICS: every rank MUST call with the SAME (b, d, seq_lens, head_splits, mode,
+        use_tma); mutually exclusive with the lazy fallback in all_to_all (see tune).
+
+        use_tma (None=auto / True / False): auto and False -> non-TMA varlen (the tuned path); True selects
+        TMA-varlen, which has no tunable launch config (no-op warm-up). Every rank MUST pass the same value.
+        """
+        assert len(seq_lens) == self.world_size, "seq_lens length must equal world_size"
+        assert len(head_splits) == self.world_size, "head_splits length must equal world_size"
+        ut = -1 if use_tma is None else int(bool(use_tma))
+        self._group.tune_varlen(
+            int(b),
+            [int(x) for x in seq_lens],
+            [int(x) for x in head_splits],
+            int(d),
             int(mode),
             ut,
             bool(verbose),
