@@ -61,102 +61,22 @@ class UlyssesGroup:
             *,
             mode: int = 0,
             tag: str = "",
-            seq_lens: list[int] | None = None,
-            head_splits: list[int] | None = None,
             use_tma: bool | None = None,
     ) -> torch.Tensor:
-        # seq_lens/head_splits are the per-rank sequence lengths / head counts (varlen, supplied by
-        # the caller, no runtime gather); both None -> uniform path (s/n must divide world_size).
-        # COLLECTIVE SEMANTICS: the uniform path runs a collective micro-benchmark on the first
-        # (shape, mode) seen and caches it; every rank MUST issue the SAME (shape, mode) call
-        # sequence, and it is mutually exclusive with tune() (either all tune or all lazy, else the
-        # whole group hangs).
+        # COLLECTIVE SEMANTICS: s/n must divide world_size (uniform). The first (shape, mode, use_tma)
+        # seen runs a local micro-benchmark and caches the launch config; every rank MUST issue the SAME
+        # (shape, mode, use_tma) call sequence (the nvshmem symmetric alloc + cross-rank barrier are
+        # collective; all ranks miss the same entry on the first call together).
         #
-        # use_tma (None=auto / True / False): selects the kernel path. None auto-picks per arch
-        # (uniform on sm90+ -> TMA; varlen always non-TMA). True forces TMA (uniform and varlen;
-        # requires sm90+, else TORCH_CHECK fails); False forces non-TMA.
-        # HARD COLLECTIVE CONSTRAINT: every rank MUST pass the SAME use_tma value (same severity as
-        # shape/mode). A mismatch makes ranks take different kernels/barriers and diverge in the
-        # resolve_config cache key (tma bit) -> the whole group hangs.
+        # use_tma (None=auto / True / False): None=auto -> sm<9 uses non-TMA; sm90+ micro-benchmarks BOTH
+        # paths on the first call for this shape and caches the faster (runtime path selection, replacing the
+        # old static table). True forces TMA (requires sm90+, else TORCH_CHECK fails); False forces non-TMA.
+        # Every rank MUST pass the SAME use_tma (a mismatch diverges kernel/barrier + cache key -> hang).
+        #
+        # tag scopes the symmetric-heap output buffer (reused on same tag+shape+dtype). Results that
+        # must stay live together (e.g. q/k/v) MUST use distinct tags, else they alias one buffer.
         return torch.ops.ulysses.all_to_all_single_4d(
-            self._group, x.contiguous(), mode, tag, seq_lens, head_splits, use_tma
-        )
-
-    def tune(
-            self,
-            shape: tuple[int, int, int, int],
-            *,
-            mode: int = 0,
-            use_tma: bool | None = None,
-            verbose: bool = False,
-    ) -> None:
-        """Warm up the launch config for a shape (collective; warm-up only, result unchanged).
-
-        COLLECTIVE SEMANTICS: every rank MUST call this with the SAME (shape, mode, use_tma)
-        sequence; tune and the lazy fallback are mutually exclusive -- either all ranks pre-tune the
-        same shape set, or all ranks rely on the lazy fallback in the first all_to_all. Mixing
-        tune/lazy across ranks hangs the whole group.
-
-        shape is the per-rank LOCAL logical shape (b, s_local, n_local, d), SAME for mode0/mode1:
-          s_local = S_global / world_size (local sequence chunk), n_local = H / world_size (local
-          head chunk). Both axes are local, so there is no ambiguity over which one is global (unlike
-          the physical all_to_all input, where mode0 carries n_global and mode1 carries s_global).
-          The mode-dependent physical input is reconstructed internally (global = local * world_size).
-        The number of pre-tuned shapes is bounded by initial_pool_bytes (each shape accumulates a
-        scratch output in the symmetric heap).
-
-        use_tma (None=auto / True / False) is resolved to a single path (uniform: sm90+ -> TMA on
-        auto) and ONLY that path is warmed (the tma bit is part of the cache key). If a later
-        all_to_all uses the opposite use_tma for the same shape, it misses the cache and triggers
-        one more lazy collective micro-benchmark (which must again be consistent across all ranks).
-        Every rank MUST pass the SAME use_tma to tune (same hard constraint as all_to_all).
-        """
-        assert len(shape) == 4, "shape must be (b, s_local, n_local, d)"
-        ut = -1 if use_tma is None else int(bool(use_tma))
-        self._group.tune(
-            int(shape[0]),
-            int(shape[1]),
-            int(shape[2]),
-            int(shape[3]),
-            int(mode),
-            ut,
-            bool(verbose),
-        )
-
-    def tune_varlen(
-            self,
-            b: int,
-            d: int,
-            seq_lens: list[int],
-            head_splits: list[int],
-            *,
-            mode: int = 0,
-            use_tma: bool | None = None,
-            verbose: bool = False,
-    ) -> None:
-        """Warm up the launch config for a varlen (uneven splits) shape (collective; warm-up only).
-
-        Varlen counterpart of tune(). seq_lens / head_splits are the per-rank sequence lengths / head
-        counts (len == world_size), the SAME lists on every rank (as in all_to_all_single_4d). The config
-        is keyed by this rank's local total, so each rank tunes its own launch params.
-
-        COLLECTIVE SEMANTICS: every rank MUST call with the SAME (b, d, seq_lens, head_splits, mode,
-        use_tma); mutually exclusive with the lazy fallback in all_to_all (see tune).
-
-        use_tma (None=auto / True / False): auto and False -> non-TMA varlen (the tuned path); True selects
-        TMA-varlen, which has no tunable launch config (no-op warm-up). Every rank MUST pass the same value.
-        """
-        assert len(seq_lens) == self.world_size, "seq_lens length must equal world_size"
-        assert len(head_splits) == self.world_size, "head_splits length must equal world_size"
-        ut = -1 if use_tma is None else int(bool(use_tma))
-        self._group.tune_varlen(
-            int(b),
-            [int(x) for x in seq_lens],
-            [int(x) for x in head_splits],
-            int(d),
-            int(mode),
-            ut,
-            bool(verbose),
+            self._group, x.contiguous(), mode, tag, use_tma
         )
 
     def destroy(self) -> None:

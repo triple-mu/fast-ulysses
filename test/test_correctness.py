@@ -33,49 +33,6 @@ def torch_a2a(x: torch.Tensor, mode: int, ws: int, group) -> torch.Tensor:
         return out.permute(1, 2, 0, 3, 4).contiguous().view(b, s_local, ws * n_local, d)
 
 
-def torch_a2a_varlen(x, mode, me, ws, s_off, n_off, group):
-    """Varlen reference: uneven A2A via torch.distributed.all_to_all (list form)."""
-    b, d = x.shape[0], x.shape[-1]
-    if mode == 0:
-        # send to peer r: my seq x r's head block; recv from r: r's seq x my head block -> concat along seq
-        send = [x[:, :, n_off[r] : n_off[r + 1], :].contiguous() for r in range(ws)]
-        recv = [
-            torch.empty(
-                b,
-                s_off[r + 1] - s_off[r],
-                n_off[me + 1] - n_off[me],
-                d,
-                dtype=x.dtype,
-                device=x.device,
-            )
-            for r in range(ws)
-        ]
-        dist.all_to_all(recv, send, group=group)
-        return torch.cat(recv, dim=1)
-    else:
-        send = [x[:, s_off[r] : s_off[r + 1], :, :].contiguous() for r in range(ws)]
-        recv = [
-            torch.empty(
-                b,
-                s_off[me + 1] - s_off[me],
-                n_off[r + 1] - n_off[r],
-                d,
-                dtype=x.dtype,
-                device=x.device,
-            )
-            for r in range(ws)
-        ]
-        dist.all_to_all(recv, send, group=group)
-        return torch.cat(recv, dim=2)
-
-
-def _prefix(xs):
-    off = [0]
-    for v in xs:
-        off.append(off[-1] + v)
-    return off
-
-
 def main() -> None:
     dist.init_process_group("nccl")
     rank = dist.get_rank()
@@ -96,10 +53,10 @@ def main() -> None:
                 tag = f"t_{str(dtype).split('.')[-1]}_d{d}_m{mode}"
 
                 ref = torch_a2a(x, mode, ws, pg)
-                # use_tma=None (auto path) for every (dtype,d,mode); explicit True/False only at d==128
-                # (avoid blowup), covering both TMA / non-TMA uniform paths. All ranks must pass the
-                # same use_tma (hard collective invariant).
-                use_tma_list = [None] if d != 128 else [None, True, False]
+                # use_tma=None (auto path) for every (dtype,d,mode); explicit True/False at d in {64,128}
+                # to cover both forced TMA / non-TMA uniform paths (d=256 only auto, avoid blowup). All
+                # ranks must pass the same use_tma (hard collective invariant).
+                use_tma_list = [None, True, False] if d in (64, 128) else [None]
                 for use_tma in use_tma_list:
                     ours = group.all_to_all_single_4d(
                         x, mode=mode, tag=f"{tag}_ut{use_tma}", use_tma=use_tma
@@ -117,47 +74,19 @@ def main() -> None:
                         )
                     dist.barrier()
 
-    # Varlen (uneven s/n, not divisible by world_size): splits supplied by caller, no runtime gather.
-    seq_lens = [4, 6, 3, 7, 5, 2, 8, 1][:ws]
-    head_splits = [2, 3, 1, 4, 2, 5, 1, 3][:ws]
-    s_off = _prefix(seq_lens)
-    n_off = _prefix(head_splits)
-    S, N = s_off[-1], n_off[-1]
-    for dtype in (torch.float16, torch.bfloat16):
-        for d in (64, 128, 256):
-            for mode in (0, 1):
-                shape = (
-                    (b, seq_lens[rank], N, d)
-                    if mode == 0
-                    else (b, S, head_splits[rank], d)
-                )
-                x = torch.randn(shape, dtype=dtype, device=dev)
-                tag = f"v_{str(dtype).split('.')[-1]}_d{d}_m{mode}"
-
-                ref = torch_a2a_varlen(x, mode, rank, ws, s_off, n_off, pg)
-                # use_tma=None (auto -> non-TMA varlen); d==128 also runs True (TMA-varlen debug path) + False.
-                use_tma_list = [None] if d != 128 else [None, True, False]
-                for use_tma in use_tma_list:
-                    ours = group.all_to_all_single_4d(
-                        x,
-                        mode=mode,
-                        tag=f"{tag}_ut{use_tma}",
-                        seq_lens=seq_lens,
-                        head_splits=head_splits,
-                        use_tma=use_tma,
-                    )
-                    if not torch.equal(ours, ref):
-                        raise AssertionError(
-                            f"VARLEN MISMATCH rank={rank} ws={ws} dtype={dtype} d={d} "
-                            f"mode={mode} use_tma={use_tma}"
-                        )
-                    if rank == 0:
-                        print(
-                            f"OK[varlen] ws={ws} {str(dtype).split('.')[-1]} d={d} mode={mode} "
-                            f"use_tma={use_tma} shape={tuple(ours.shape)}",
-                            flush=True,
-                        )
-                    dist.barrier()
+    # Distinct-tag non-aliasing (replaces the old a2a_frame): two concurrently-live results of the SAME
+    # shape must use distinct tags and not clobber each other. Run both a2a, THEN check both -- if out_q
+    # aliased out_k's buffer, out_q would now hold k's data.
+    xq = torch.randn(b, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev)
+    xk = torch.randn(b, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev)
+    refq, refk = torch_a2a(xq, 0, ws, pg), torch_a2a(xk, 0, ws, pg)
+    outq = group.all_to_all_single_4d(xq, mode=0, tag="q")
+    outk = group.all_to_all_single_4d(xk, mode=0, tag="k")
+    if not (torch.equal(outq, refq) and torch.equal(outk, refk)):
+        raise AssertionError(f"TAG ALIAS rank={rank} ws={ws} (distinct tags clobbered each other)")
+    if rank == 0:
+        print(f"OK[distinct-tag] ws={ws} q/k live together, no alias", flush=True)
+    dist.barrier()
 
     if rank == 0:
         print("ALL PASS", flush=True)

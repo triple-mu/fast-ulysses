@@ -11,7 +11,7 @@
 //
 // The TMA / mbarrier helpers below use sm90+ only PTX (cp.async.bulk.tensor, mbarrier.*expect_tx,
 // mbarrier.try_wait.parity, cp.async.bulk.commit_group/wait_group, fence.proxy.async). They are
-// reached only on the TMA path, which the host gates to sm90+ at runtime (see decide_tma_path).
+// reached only on the TMA path, which the host gates to sm90+ at runtime (resolve_config never picks TMA on sm<9).
 // For multi-arch builds that include sm80, the sm80 device pass cannot assemble these features, so
 // we emit __trap() stubs for __CUDA_ARCH__ < 900; they are never executed on pre-Hopper GPUs. The
 // host pass (__CUDA_ARCH__ undefined) takes the real definitions but does not codegen __device__
@@ -22,36 +22,23 @@ namespace ulysses {
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 900)
 
-// --- sm80 (pre-Hopper) trap stubs: the TMA path is never selected here at runtime. ---
-__device__ __forceinline__ void mbar_init(uint32_t)
-{
-    __trap();
-}
-__device__ __forceinline__ void mbar_arrive_expect(uint32_t, uint32_t)
-{
-    __trap();
-}
-__device__ __forceinline__ void mbar_wait(uint32_t, int)
-{
-    __trap();
-}
-__device__ __forceinline__ void tma_load_4d(uint32_t, const void*, int, int, int, int, uint32_t)
-{
-    __trap();
-}
-__device__ __forceinline__ void tma_store_4d(const void*, int, int, int, int, uint32_t)
-{
-    __trap();
-}
-__device__ __forceinline__ void tma_commit_group()
-{
-    __trap();
-}
-__device__ __forceinline__ void tma_wait_group(int)
-{
-    __trap();
-}
-__device__ __forceinline__ void async_proxy_fence()
+// --- sm80 (pre-Hopper) trap stubs: the TMA path is never selected here at runtime, so every sm90+ helper
+// compiles to an unreachable __trap(). One macro covers the non-template stubs. ---
+#define ULYSSES_TMA_TRAP_STUB(name, ...)                                                                               \
+    __device__ __forceinline__ void name(__VA_ARGS__)                                                                  \
+    {                                                                                                                  \
+        __trap();                                                                                                      \
+    }
+ULYSSES_TMA_TRAP_STUB(mbar_init, uint32_t)
+ULYSSES_TMA_TRAP_STUB(mbar_arrive_expect, uint32_t, uint32_t)
+ULYSSES_TMA_TRAP_STUB(mbar_wait, uint32_t, int)
+ULYSSES_TMA_TRAP_STUB(tma_load_4d, uint32_t, const void*, int, int, int, int, uint32_t)
+ULYSSES_TMA_TRAP_STUB(tma_store_4d, const void*, int, int, int, int, uint32_t)
+ULYSSES_TMA_TRAP_STUB(tma_commit_group)
+ULYSSES_TMA_TRAP_STUB(async_proxy_fence)
+#undef ULYSSES_TMA_TRAP_STUB
+template<int N>
+__device__ __forceinline__ void tma_wait_group()
 {
     __trap();
 }
@@ -114,32 +101,13 @@ __device__ __forceinline__ void tma_commit_group()
     asm volatile("cp.async.bulk.commit_group;");
 }
 
-// Wait until at most n bulk_groups remain in flight (i.e. wait for all but the last n stores).
-// The PTX immediate must be a compile-time constant, so a switch covers {0,1,2,3,5}
-// (the stages-1 values for stages in {2,3,4,6}). Extending the stage candidates later requires
-// updating this case set.
-__device__ __forceinline__ void tma_wait_group(int n)
+// Wait until at most N bulk_groups remain in flight (wait for all but the last N stores). N is a template
+// non-type param because the PTX immediate must be a compile-time constant; the kernel (templated on STAGES)
+// calls tma_wait_group<STAGES-1>() to keep the pipeline full and tma_wait_group<0>() to drain at the end.
+template<int N>
+__device__ __forceinline__ void tma_wait_group()
 {
-    switch (n) {
-        case 0:
-            asm volatile("cp.async.bulk.wait_group 0;");
-            break;
-        case 1:
-            asm volatile("cp.async.bulk.wait_group 1;");
-            break;
-        case 2:
-            asm volatile("cp.async.bulk.wait_group 2;");
-            break;
-        case 3:
-            asm volatile("cp.async.bulk.wait_group 3;");
-            break;
-        case 5:
-            asm volatile("cp.async.bulk.wait_group 5;");
-            break;
-        default:
-            asm volatile("cp.async.bulk.wait_group 0;");
-            break;
-    }
+    asm volatile("cp.async.bulk.wait_group %0;" ::"n"(N));
 }
 
 // async-proxy visibility fence: makes subsequent generic writes visible to TMA (the async proxy).

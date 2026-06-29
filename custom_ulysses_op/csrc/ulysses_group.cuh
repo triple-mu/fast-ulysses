@@ -39,60 +39,46 @@ public:
         return team_;
     }
 
-    // Device compute capability major (cached via cudaDeviceGetAttribute at construction). decide_tma uses it for auto
-    // resolution.
+    // Device compute capability major (cached via cudaDeviceGetAttribute at construction). resolve_config uses
+    // it for the auto path choice (sm<9 has no TMA).
     int sm_major() const
     {
         return sm_major_;
     }
 
-    // Resolve the launch config for (dims,mode,use_tma): hit in cfg_cache_ returns directly; miss runs a
-    // microbenchmark to pick the best and caches it. The use_tma path is passed by the caller after
-    // decide_tma resolution (true->TMA, false->non-TMA) and must be identical across all ranks.
+    struct PathConfig {
+        bool      tma;
+        A2AConfig cfg;
+    };
+
+    // Resolve the launch path + config for (dims,mode). use_tma_i is the tri-state -1 auto / 0 non-TMA /
+    // 1 TMA (the sm<9 error for an explicit 1 is enforced by the caller). Returns the path to launch and
+    // its config; a cache hit returns directly.
     //
-    // [Collective invariant] The miss branch is a collective call: resolve_config_tma runs a lockstep
-    // microbenchmark with nvshmemx_team_sync_on_stream; the non-TMA path has no nvshmem collective of its
-    // own (pick_blocks times locally), its collective comes from the upstream symmetric allocation in
-    // pool().acquire.
-    // So all ranks must call all_to_all / tune with the exact same (shape, mode) sequence; a hit rank skips
-    // the collective while a miss rank blocks -> whole group hangs. tune() and lazy fallback are mutually
-    // exclusive: either all ranks pre-tune the same shape set, or all ranks rely on lazy; never mix tune on
-    // some ranks with lazy on others.
+    // Explicit 0/1: micro-benchmark that path's candidates, keep the fastest. Auto (-1): on sm<9 -> non-TMA;
+    // on sm90+ micro-benchmark BOTH paths and pick the faster (the runtime replacement of the old static DiT
+    // table -- "tune the best path+config and cache it"), memoised in auto_path_cache_.
+    //
+    // The microbench times the REAL per-call op (launch + quiet + fast_barrier) so its ranking matches steady
+    // state, and the two paths' times are directly comparable. The fast_barrier makes the miss branch
+    // cross-rank, but it is HANG-SAFE: pure-lazy SPMD (no tune()) means all ranks issue the same
+    // (shape,mode,use_tma) sequence and miss the same entry on the first call together -> equal barrier calls
+    // in lockstep (the candidate count is a function of rank-invariant dims, so it is identical on every rank).
+    // A cache-hit rank and a miss rank never coexist for the same call, so no rank blocks alone.
+    //
+    // The auto path choice is a per-rank local timing decision, so on a near-tie shape different ranks may pick
+    // different kernels. This is harmless: the two paths are functionally equivalent P2P writes (each rank
+    // writes its own region correctly either way), and per-call barrier counts stay equal regardless of path.
     //
     // Thread safety: resolve_config/all_to_all on the same group instance must be called serially (SPMD
-    // single-threaded; cfg_cache_ is lock-free, so concurrent multi-stream use is not thread-safe).
-    A2AConfig resolve_config(const Ulysses4DDims&         dims,
-                             int                          mode,
-                             bool                         use_tma,
-                             const void*                  src,
-                             const std::vector<uint64_t>& peers,
-                             int                          elem,
-                             cudaStream_t                 stream);
-
-    // Warm up the config for a shape (collective call): builds a temp src + symmetric output, runs the
-    // microbenchmark to pick the best and writes cfg_cache_, so later all_to_all with the same (shape,mode)
-    // hits the cache and skips the collective microbenchmark.
-    //
-    // [Collective invariant] All ranks must call with the same (b,s_local,n_local,d,mode,use_tma) sequence;
-    // mutually exclusive with lazy fallback (see resolve_config comment). Params are the per-rank LOCAL logical
-    // dims (b, s_local, n_local, d), identical for mode0/mode1 (s_local=S_global/ws, n_local=H/ws) -- no
-    // ambiguity over which middle dim is local vs global. The mode-dependent physical input shape is
-    // reconstructed inside (global = local*ws). use_tma:-1 auto/0/1, resolved by decide_tma_path into the
-    // actual path, which is the only path warmed up.
-    void tune(int64_t b, int64_t s_local, int64_t n_local, int64_t d, int64_t mode, int64_t use_tma, bool verbose);
-
-    // Varlen counterpart of tune(): warm up the non-TMA varlen launch config for the given per-rank splits
-    // (collective). seq_lens/head_splits are the per-rank sequence lengths / head counts (len == world_size),
-    // identical on every rank (as in all_to_all_single_4d). The config is keyed by this rank's local total, so
-    // each rank tunes its own launch params. use_tma:-1 auto/0/1 -> non-TMA varlen warmed (auto/false); explicit
-    // True selects TMA-varlen, which has no tunable launch config (no-op). Mutually exclusive with lazy fallback.
-    void tune_varlen(int64_t              b,
-                     std::vector<int64_t> seq_lens,
-                     std::vector<int64_t> head_splits,
-                     int64_t              d,
-                     int64_t              mode,
-                     int64_t              use_tma,
-                     bool                 verbose);
+    // single-threaded; the caches are lock-free, so concurrent multi-stream use is not thread-safe).
+    PathConfig resolve_config(const Ulysses4DDims&         dims,
+                              int                          mode,
+                              int                          use_tma_i,
+                              const void*                  src,
+                              const std::vector<uint64_t>& peers,
+                              int                          elem,
+                              cudaStream_t                 stream);
 
     // Custom single-node NVLink flag barrier: replaces the slow nvshmem sync (~280us) that falls back on
     // hardware without NVLS fabric. Call nvshmemx_quiet_on_stream first (so this rank's writes are globally
@@ -112,6 +98,9 @@ private:
     // only; the tma bit distinguishes the two paths). Lock-free std::map, must be accessed serially (see
     // resolve_config comment).
     std::map<ConfigKey, A2AConfig> cfg_cache_;
+    // auto_path_cache_ memoises the best path for the auto (use_tma=None) case per (mode,n_local,s_local,d)
+    // -- true=TMA -- so a repeat auto call skips the two-path micro-benchmark.
+    std::map<std::tuple<int, int, int, int>, bool> auto_path_cache_;
 
     // fast_barrier state: symmetric flag buffer (uint64[ws]) + monotonic epoch (incremented lockstep per rank).
     bool                  bar_ready_ = false;

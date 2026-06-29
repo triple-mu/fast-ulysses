@@ -85,9 +85,8 @@ def main() -> None:
             x = torch.randn(1, N // ws, H, D, dtype=torch.bfloat16, device=dev)
         else:
             x = torch.randn(1, N, H // ws, D, dtype=torch.bfloat16, device=dev)
-        # Pre-tune the launch config (collective) so the timed all_to_all hits the cache. tune takes the
-        # per-rank LOCAL shape (b, s_local, n_local, d), same for both modes: s_local=N/ws, n_local=H/ws.
-        group.tune((1, N // ws, H // ws, D), mode=mode, use_tma=ut, verbose=False)
+        # No explicit tune: the timed() warmup loop triggers the first-call lazy autotune, which caches
+        # the launch config so the timed iterations all hit the cache.
         remote = x.numel() * 2 * (ws - 1) / ws  # bytes leaving this rank over NVLink
         ours = timed(
             lambda: group.all_to_all_single_4d(

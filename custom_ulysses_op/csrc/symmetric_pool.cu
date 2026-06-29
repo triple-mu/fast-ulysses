@@ -6,32 +6,11 @@
 
 namespace ulysses {
 
-SymmetricHeapPool::SymmetricHeapPool(int64_t          reserved_bytes,
-                                     int              world_size,
-                                     std::vector<int> peer_global_pes,
-                                     nvshmem_team_t   team):
+SymmetricHeapPool::SymmetricHeapPool(int64_t reserved_bytes, int world_size, std::vector<int> peer_global_pes):
     reserved_(reserved_bytes),
     world_size_(world_size),
-    peer_global_pes_(std::move(peer_global_pes)),
-    team_(team)
+    peer_global_pes_(std::move(peer_global_pes))
 {
-    // Collectively allocate a small symmetric scratch for nbytes consistency checks in acquire.
-    scratch_ = static_cast<int64_t*>(nvshmem_align(256, 2 * sizeof(int64_t)));
-    TORCH_CHECK(scratch_ != nullptr, "nvshmem_align scratch failed");
-    segments_.push_back(scratch_);
-}
-
-int64_t SymmetricHeapPool::collective_max_nbytes(int64_t nbytes)
-{
-    // Max-reduce nbytes across all PEs (varlen: per-rank output sizes differ, but the symmetric
-    // heap requires a uniform size, so allocate by the global max).
-    // scratch_ is DEVICE symmetric memory from nvshmem_align and cannot be dereferenced on host,
-    // so we cudaMemcpy host<->device and run the reduce on device (host-blocking).
-    int64_t gmax = 0;
-    cudaMemcpy(scratch_, &nbytes, sizeof(int64_t), cudaMemcpyHostToDevice);
-    nvshmem_int64_max_reduce(team_, scratch_ + 1, scratch_, 1);
-    cudaMemcpy(&gmax, scratch_ + 1, sizeof(int64_t), cudaMemcpyDeviceToHost);
-    return gmax;
 }
 
 const SymmetricHeapPool::Buffer&
@@ -50,9 +29,9 @@ SymmetricHeapPool::acquire(const std::vector<int64_t>& shape, c10::ScalarType dt
     int64_t       nbytes = numel * elem;
     nbytes               = (nbytes + 15) / 16 * 16;  // uint4 alignment
 
-    // Varlen: per-rank output sizes differ, but the symmetric heap requires a uniform size, so all
-    // ranks allocate the global max and each uses only its local portion.
-    const int64_t alloc_bytes = collective_max_nbytes(nbytes);
+    // Uniform: every rank computes an identical nbytes (out_shape is rank-independent), so the
+    // collective (uniform-size) nvshmem_align below needs no max-reduce.
+    const int64_t alloc_bytes = nbytes;
     TORCH_CHECK(used_ + alloc_bytes <= reserved_,
                 "SymmetricHeapPool OOM: need ",
                 alloc_bytes,
@@ -96,7 +75,6 @@ void SymmetricHeapPool::destroy()
     for (void* p : segments_)
         nvshmem_free(p);
     segments_.clear();
-    scratch_   = nullptr;  // segments freed; null it out to avoid dangling-pointer misuse
     destroyed_ = true;
 }
 
