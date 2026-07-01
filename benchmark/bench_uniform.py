@@ -14,7 +14,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from custom_ulysses_op import UlyssesGroup
+from fast_ulysses import UlyssesGroup
 
 
 def torch_a2a_mode0(x: torch.Tensor, ws: int, group) -> torch.Tensor:

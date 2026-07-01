@@ -86,7 +86,7 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
 
 }  // namespace ulysses
 
-TORCH_LIBRARY(ulysses, m)
+TORCH_LIBRARY(fast_ulysses, m)
 {
     m.def("nvshmem_uniqueid_nbytes() -> int");
     m.impl("nvshmem_uniqueid_nbytes", &ulysses::nvshmem_uniqueid_nbytes);
@@ -100,7 +100,7 @@ TORCH_LIBRARY(ulysses, m)
         .def_static("get_uniqueid", &ulysses::UlyssesGroup::get_uniqueid)
         .def_static("init_world", &ulysses::UlyssesGroup::init_world);
 
-    m.def("all_to_all_single_4d(__torch__.torch.classes.ulysses.UlyssesGroup group, "
+    m.def("all_to_all_single_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, str tag, bool? use_tma=None) -> Tensor");
     m.impl("all_to_all_single_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d);
 }

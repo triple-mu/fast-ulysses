@@ -1,4 +1,4 @@
-# custom_ulysses_op
+# fast-ulysses
 
 基于 **NVSHMEM 对称堆 + NVLink P2P** 的 Ulysses 序列并行 all-to-all 自定义算子。
 
@@ -6,7 +6,7 @@
 
 Ulysses 序列并行（DeepSpeed-Ulysses）把超长序列切到多卡上算注意力：进注意力前用一次 all-to-all 把「按序列切分」换成「按注意力头切分」（每张卡拿到全部序列、自己那几个头），出注意力后再换回来。这次 all-to-all 是长序列 / 视频 DiT（如 Wan、HunyuanVideo）训练与推理里的关键通信，序列越长、卡越多，它越是瓶颈。
 
-`custom_ulysses_op` 把这个 4D all-to-all 实现为一个独立、可分发的 **torch custom op**（命名空间 `ulysses`，`torch.ops.ulysses.all_to_all_single_4d`），单节点内绕开 NCCL：在 NVSHMEM 对称堆上分配输出缓冲，直接用 NVLink P2P 把数据写到对端 GPU 显存，再用一个轻量的自定义 NVLink flag barrier 做跨 rank 同步——整条路径不落 host、不走 NCCL collective。
+`fast_ulysses` 把这个 4D all-to-all 实现为一个独立、可分发的 **torch custom op**（命名空间 `fast_ulysses`，`torch.ops.fast_ulysses.all_to_all_single_4d`），单节点内绕开 NCCL：在 NVSHMEM 对称堆上分配输出缓冲，直接用 NVLink P2P 把数据写到对端 GPU 显存，再用一个轻量的自定义 NVLink flag barrier 做跨 rank 同步——整条路径不落 host、不走 NCCL collective。
 
 核心特性：
 
@@ -56,7 +56,7 @@ NVSHMEM_REMOTE_TRANSPORT=none
 包导出一个类 `UlyssesGroup`：
 
 ```python
-from custom_ulysses_op import UlyssesGroup
+from fast_ulysses import UlyssesGroup
 ```
 
 ### `UlyssesGroup(process_group=None, device=None, initial_pool_bytes=2<<30)`
@@ -110,7 +110,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from custom_ulysses_op import UlyssesGroup
+from fast_ulysses import UlyssesGroup
 
 
 def main() -> None:

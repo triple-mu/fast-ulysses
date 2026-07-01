@@ -8,6 +8,7 @@
 #include <nvshmem.h>
 #include <torch/custom_class.h>
 #include <vector>
+#include <cuda_fp8.h>
 
 namespace ulysses {
 

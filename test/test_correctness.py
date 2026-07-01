@@ -1,7 +1,7 @@
-"""torchrun correctness check: custom_ulysses_op vs torch permute + all_to_all_single + permute.
+"""torchrun correctness check: fast_ulysses vs torch permute + all_to_all_single + permute.
 
 Pure data movement, so results must be bit-exact. Run on a multi-GPU host (ws in [2, 8]):
-    torchrun --nproc_per_node=8 custom_ulysses_op/test/test_correctness.py
+    torchrun --nproc_per_node=8 fast-ulysses/test/test_correctness.py
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from custom_ulysses_op import UlyssesGroup
+from fast_ulysses import UlyssesGroup
 
 
 def torch_a2a(x: torch.Tensor, mode: int, ws: int, group) -> torch.Tensor:

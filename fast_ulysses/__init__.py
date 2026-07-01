@@ -1,4 +1,4 @@
-"""custom_ulysses_op — Ulysses all-to-all custom op over the NVSHMEM symmetric heap."""
+"""fast_ulysses — Ulysses all-to-all custom op over the NVSHMEM symmetric heap."""
 
 import torch  # noqa: F401  load libtorch before dlopen of _C
 

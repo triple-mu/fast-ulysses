@@ -37,7 +37,7 @@ class UlyssesGroup:
         # (verified on H200+IB nodes: init SIGSEGVs otherwise).
         os.environ.setdefault("NVSHMEM_REMOTE_TRANSPORT", "none")
 
-        cls = torch.classes.ulysses.UlyssesGroup
+        cls = torch.classes.fast_ulysses.UlyssesGroup
         if dist.get_rank() == 0:
             uid = cls.get_uniqueid()
         else:
@@ -75,7 +75,7 @@ class UlyssesGroup:
         #
         # tag scopes the symmetric-heap output buffer (reused on same tag+shape+dtype). Results that
         # must stay live together (e.g. q/k/v) MUST use distinct tags, else they alias one buffer.
-        return torch.ops.ulysses.all_to_all_single_4d(
+        return torch.ops.fast_ulysses.all_to_all_single_4d(
             self._group, x.contiguous(), mode, tag, use_tma
         )
 
