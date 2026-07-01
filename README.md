@@ -14,7 +14,7 @@ Ulysses 序列并行（DeepSpeed-Ulysses）把超长序列切到多卡上算注�
   - **TMA 路径**（sm90+，Hopper/Blackwell）：用 `cp.async.bulk`（TMA copy engine）搬运 + 软件流水。TMA 由拷贝引擎而非 SM 执行搬运，**只占极少 SM**，给计算-通信重叠留出算力。
   - **non-TMA 路径**：SM 向量化直写（512 线程拉满在飞远端写），sm80（A100）等无 TMA 时回退于此。
   - **`use_tma=None`（自动）时按当前硬件运行时实测两条路径、缓存较快者**（取代离线静态表）；也可每次调用显式覆盖（见 `use_tma` 三态）。
-- **单节点 NVLink P2P**，`world_size ∈ {1, 2, 4, 8}`。
+- **单节点 NVLink P2P**，`world_size ∈ [1, 8]`（含奇数，如 3/5/6/7）。
 - **均匀（uniform）切分**：序列长 `s` / 头数 `n` 能被 `world_size` 整除。
 - **两个方向**：`mode=0` scatter heads / gather seq（进注意力）；`mode=1` 为其逆（出注意力）。
 - 数据类型 `float16` / `bfloat16`；要求 `d * elem_size` 16B 对齐。

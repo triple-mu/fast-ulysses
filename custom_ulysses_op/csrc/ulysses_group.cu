@@ -115,8 +115,8 @@ UlyssesGroup::UlyssesGroup(std::vector<int64_t> peer_global_pes,
     int major = 0;
     ULYSSES_CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id_));
     sm_major_ = major;
-    TORCH_CHECK(world_size_ == 1 || world_size_ == 2 || world_size_ == 4 || world_size_ == 8,
-                "world_size must be in {1,2,4,8}, got ",
+    TORCH_CHECK(world_size_ >= 1 && world_size_ <= 8,
+                "world_size must be in [1, 8] (single-node NVLink), got ",
                 world_size_);
     ULYSSES_CUDA_CHECK(cudaSetDevice(device_id_));
     peer_global_pes_.reserve(world_size_);

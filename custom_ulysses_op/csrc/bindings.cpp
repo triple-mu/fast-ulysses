@@ -29,7 +29,7 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
                 "dtype must be float16 or bfloat16");
     input        = input.contiguous();
     const int ws = static_cast<int>(group->world_size());
-    TORCH_CHECK(ws == 1 || ws == 2 || ws == 4 || ws == 8, "world_size must be 1, 2, 4, or 8");
+    TORCH_CHECK(ws >= 1 && ws <= 8, "world_size must be in [1, 8] (single-node NVLink), got ", ws);
     const int me   = static_cast<int>(group->rank());
     const int b    = static_cast<int>(input.size(0));
     const int x1   = static_cast<int>(input.size(1));

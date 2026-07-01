@@ -1,6 +1,6 @@
 """torchrun correctness check: custom_ulysses_op vs torch permute + all_to_all_single + permute.
 
-Pure data movement, so results must be bit-exact. Run on a multi-GPU host (ws in {2,4,8}):
+Pure data movement, so results must be bit-exact. Run on a multi-GPU host (ws in [2, 8]):
     torchrun --nproc_per_node=8 custom_ulysses_op/test/test_correctness.py
 """
 

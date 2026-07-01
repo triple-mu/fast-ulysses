@@ -108,7 +108,7 @@ static void launch_ws(const uint8_t*               src,
 }
 
 // Dispatch by ws to the matching launch_ws<WS> (folds the duplicated switch(ws) in launch_a2a /
-// resolve_config_nontma). Caller already TORCH_CHECKs ws in {1,2,4,8}, so default is a no-op.
+// resolve_config_nontma). Caller already TORCH_CHECKs ws in [1, 8], so default is a no-op.
 static void nontma_dispatch(int                          ws,
                             const uint8_t*               s,
                             const std::vector<uint64_t>& peers,
@@ -127,8 +127,20 @@ static void nontma_dispatch(int                          ws,
         case 2:
             launch_ws<2>(s, peers, dims, mode, elem, blocks, threads, unroll, stream);
             break;
+        case 3:
+            launch_ws<3>(s, peers, dims, mode, elem, blocks, threads, unroll, stream);
+            break;
         case 4:
             launch_ws<4>(s, peers, dims, mode, elem, blocks, threads, unroll, stream);
+            break;
+        case 5:
+            launch_ws<5>(s, peers, dims, mode, elem, blocks, threads, unroll, stream);
+            break;
+        case 6:
+            launch_ws<6>(s, peers, dims, mode, elem, blocks, threads, unroll, stream);
+            break;
+        case 7:
+            launch_ws<7>(s, peers, dims, mode, elem, blocks, threads, unroll, stream);
             break;
         case 8:
             launch_ws<8>(s, peers, dims, mode, elem, blocks, threads, unroll, stream);
