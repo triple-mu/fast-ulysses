@@ -100,6 +100,29 @@ from fast_ulysses import UlyssesGroup
 
 释放对称堆资源（内部先 `dist.barrier` 再 destroy）。所有 rank 一起调用。
 
+## 融合算子：QK RMSNorm + RoPE
+
+DiT（如 Wan）在进注意力前对 q/k 做 **RMSNorm + RoPE**，是访存密集的 elementwise。本库把它们做成融合算子，语义严格对齐 Wan：RMSNorm 在 fp32 累加、eps 在 `rsqrt` 内、per-channel 权重、无 bias；RoPE 覆盖全 `head_dim`。融合版 `norm_rope` 全程 fp32（不在 norm 后中途 round，比分开两步更准）。
+
+统一约定：`x` 形状 `(b, seq, n, d)`，`float16`/`bfloat16`，`d` 为 2 的幂且 `≤1024`；`weight`/`cos`/`sin` 为 **fp32** CUDA 张量；`cos`/`sin` 形状 `(seq, d/2)`，按每行的 seq 位置取。
+
+- `mode`：`"per_head"`（沿 `d` 归约，`weight` 形状 `[d]`）或 `"cross_head"`（沿整条 `n*d` 归约，`weight` 形状 `[n*d]`，一个 token 全部 head 共享一个 RMS 标量——Wan 默认）。
+- `interleaved`：`True`=GPT-J 相邻配对 `(x[2i],x[2i+1])`；`False`=NeoX 半分配对 `(x[i],x[i+d/2])`。
+
+独立算子（`from fast_ulysses import rms_norm, rope, norm_rope`，单卡、无需 group）：
+
+| API | 说明 |
+| --- | --- |
+| `rms_norm(x, weight, *, mode, eps=1e-6)` | 独立 RMSNorm |
+| `rope(x, cos, sin, *, interleaved=True)` | 独立 RoPE |
+| `norm_rope(x, weight, cos, sin, *, mode, interleaved=True, eps=1e-6)` | 融合 norm→rope（一趟读写） |
+
+融进 all-to-all（`UlyssesGroup` 方法）：
+
+### `all_to_all_single_4d_qk(x, weight, cos, sin, *, mode="cross_head", interleaved=True, eps=1e-6, tag="", use_tma=None) -> Tensor`
+
+mode0 Ulysses input all-to-all，**在源侧顺手做 q/k 的 norm+rope** 再 scatter，省去 q/k 的额外显存往返。输入 `(b, s_local, n_global, d)`（本 rank 持有其序列分片的全部 head），输出 `(b, s_global, n_local, d)`。`cos`/`sin` 形状 `(s_local, d/2)`，需由调用方**预切为本 rank 的全局位置**。`v` 不做 norm/rope，继续用 `all_to_all_single_4d`。集体约束与 `all_to_all_single_4d` 相同。
+
 ## 使用方式
 
 最小可运行示例（保存为 `example.py`，用 `torchrun --nproc_per_node=2 example.py` 运行）：

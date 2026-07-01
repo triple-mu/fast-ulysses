@@ -79,6 +79,27 @@ class UlyssesGroup:
             self._group, x.contiguous(), mode, tag, use_tma
         )
 
+    def all_to_all_single_4d_qk(
+            self,
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+            *,
+            mode: str = "cross_head",
+            interleaved: bool = True,
+            eps: float = 1e-6,
+            tag: str = "",
+            use_tma: bool | None = None,
+    ) -> torch.Tensor:
+        # mode0 Ulysses input a2a with fused source-side QK RMSNorm + RoPE (for q/k; v uses the plain op).
+        # x: [b, s_local, n_global, d]; weight fp32 ([d] per_head / [n_global*d] cross_head); cos/sin fp32
+        # [s_local, d/2] at this rank's GLOBAL positions; interleaved=GPT-J vs NeoX. Out [b, s_global, n_local, d].
+        m = {"per_head": 0, "cross_head": 1}[mode]
+        return torch.ops.fast_ulysses.all_to_all_single_4d_qk(
+            self._group, x.contiguous(), weight, cos, sin, m, interleaved, eps, tag, use_tma
+        )
+
     def destroy(self) -> None:
         dist.barrier(group=self.pg)
         self._group.destroy()
