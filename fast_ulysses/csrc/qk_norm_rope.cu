@@ -275,9 +275,4 @@ at::Tensor norm_rope(at::Tensor x, at::Tensor weight, at::Tensor cos, at::Tensor
     return out;
 }
 
-void norm_rope_out(const void* x, void* out, const float* weight, const float* cosb, const float* sinb, int b, int seq, int n, int d, int mode, bool interleaved, float eps, at::ScalarType dtype, cudaStream_t stream)
-{
-    run_qk(x, out, weight, cosb, sinb, b, seq, n, d, true, true, mode, interleaved, eps, dtype, stream);
-}
-
 }  // namespace ulysses

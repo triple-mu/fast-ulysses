@@ -1,4 +1,5 @@
 #pragma once
+#include "ulysses_common.cuh"  // Ulysses4DDims
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -18,10 +19,14 @@ at::Tensor rope(at::Tensor x, at::Tensor cos, at::Tensor sin, bool interleaved);
 at::Tensor norm_rope(at::Tensor x, at::Tensor weight, at::Tensor cos, at::Tensor sin, int64_t mode,
                      bool interleaved, double eps);
 
-// In-place variant used by the a2a-fused op: apply norm+rope to `x` writing into `out` (may alias x).
-// Same semantics as norm_rope; separated so the a2a path can target a caller-provided buffer + stream.
-void norm_rope_out(const void* x, void* out, const float* weight, const float* cos, const float* sin, int b,
-                   int seq, int n, int d, int mode, bool interleaved, float eps, at::ScalarType dtype,
-                   cudaStream_t stream);
+// mode0 all-to-all with QK RMSNorm+RoPE fused into the scatter (all_to_all_qk.cu). inv_rms is the per-token
+// cross-head inverse RMS ([b*s_local]) when cross_head, else null (per-head reduces inside the scatter).
+void launch_a2a_qk(const void* src, const float* inv_rms, const std::vector<uint64_t>& peer_ptrs,
+                   const float* weight, const float* cosb, const float* sinb, const Ulysses4DDims& dims,
+                   bool cross_head, bool interleaved, float eps, at::ScalarType dtype, cudaStream_t stream);
+
+// cross-head pre-pass: fill inv_rms[b*s_local] from source [b,s_local,n_global,d].
+void launch_token_inv_rms(const void* x, float* inv_rms, const Ulysses4DDims& dims, float eps,
+                          at::ScalarType dtype, cudaStream_t stream);
 
 }  // namespace ulysses

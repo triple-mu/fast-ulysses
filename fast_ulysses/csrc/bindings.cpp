@@ -123,14 +123,9 @@ at::Tensor all_to_all_single_4d_qk(const c10::intrusive_ptr<UlyssesGroup>& group
                     sin.is_cuda() && sin.scalar_type() == at::kFloat && sin.is_contiguous() && sin.size(-1) == d / 2,
                 "cos/sin must be contiguous fp32 with last dim d/2");
 
+    (void)use_tma;  // fused path always uses the direct-write scatter kernel; TMA-fused is future work
     const at::cuda::CUDAGuard guard(input.device());
     cudaStream_t              stream = at::cuda::getCurrentCUDAStream();
-
-    // Source-side fuse: norm+rope on [b, s_local, n_global, d] into a scratch, then the plain mode0 scatter.
-    at::Tensor xt = at::empty_like(input);
-    norm_rope_out(input.data_ptr(), xt.data_ptr(), weight.data_ptr<float>(), cos.data_ptr<float>(),
-                  sin.data_ptr<float>(), b, x1, x2, d, static_cast<int>(norm_mode), interleaved,
-                  static_cast<float>(eps), input.scalar_type(), stream);
 
     Ulysses4DDims dims;
     dims.b        = b;
@@ -141,19 +136,25 @@ at::Tensor all_to_all_single_4d_qk(const c10::intrusive_ptr<UlyssesGroup>& group
     dims.s_global = x1 * ws;
     dims.n_local  = x2 / ws;
     const std::vector<int64_t> out_shape = {b, dims.s_global, dims.n_local, d};
+    const auto&                buf = group->pool().acquire(out_shape, input.scalar_type(), tag);
 
-    const auto& buf       = group->pool().acquire(out_shape, input.scalar_type(), tag);
-    int         use_tma_i = use_tma.has_value() ? (*use_tma ? 1 : 0) : -1;
-    if (use_tma_i > 0)
-        TORCH_CHECK(group->sm_major() >= 9, "use_tma=True requires sm90+ (TMA unavailable on this GPU)");
-    const auto pc = group->resolve_config(dims, 0, use_tma_i, xt.data_ptr(), buf.peer_ptrs, elem, stream);
-    if (pc.tma)
-        launch_a2a_tma(xt.data_ptr(), buf.peer_ptrs, dims, 0, elem, pc.cfg, stream);
-    else
-        launch_a2a(xt.data_ptr(), buf.peer_ptrs, dims, 0, elem, pc.cfg, stream);
+    // Fuse norm+rope INTO the scatter: each source d-row is normed+roped then P2P-written to its peer.
+    // cross-head needs the whole-token RMS, so a tiny [b*s_local] inv-rms pre-pass runs first.
+    const bool   cross   = (norm_mode == 1);
+    at::Tensor   inv_rms;
+    const float* inv_ptr = nullptr;
+    if (cross) {
+        inv_rms = at::empty({static_cast<int64_t>(b) * x1}, input.options().dtype(at::kFloat));
+        launch_token_inv_rms(input.data_ptr(), inv_rms.data_ptr<float>(), dims, static_cast<float>(eps),
+                             input.scalar_type(), stream);
+        inv_ptr = inv_rms.data_ptr<float>();
+    }
+    launch_a2a_qk(input.data_ptr(), inv_ptr, buf.peer_ptrs, weight.data_ptr<float>(), cos.data_ptr<float>(),
+                  sin.data_ptr<float>(), dims, cross, interleaved, static_cast<float>(eps), input.scalar_type(),
+                  stream);
     ULYSSES_CUDA_CHECK(cudaGetLastError());
-    nvshmemx_quiet_on_stream(stream);
-    group->fast_barrier(stream);
+    nvshmemx_quiet_on_stream(stream);  // complete this rank's P2P writes (globally visible)
+    group->fast_barrier(stream);       // cross-rank sync
     return buf.view;
 }
 

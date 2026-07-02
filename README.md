@@ -121,7 +121,7 @@ DiT（如 Wan）在进注意力前对 q/k 做 **RMSNorm + RoPE**，是访存密�
 
 ### `all_to_all_single_4d_qk(x, weight, cos, sin, *, mode="cross_head", interleaved=True, eps=1e-6, tag="", use_tma=None) -> Tensor`
 
-mode0 Ulysses input all-to-all，**在源侧顺手做 q/k 的 norm+rope** 再 scatter，省去 q/k 的额外显存往返。输入 `(b, s_local, n_global, d)`（本 rank 持有其序列分片的全部 head），输出 `(b, s_global, n_local, d)`。`cos`/`sin` 形状 `(s_local, d/2)`，需由调用方**预切为本 rank 的全局位置**。`v` 不做 norm/rope，继续用 `all_to_all_single_4d`。集体约束与 `all_to_all_single_4d` 相同。
+mode0 Ulysses input all-to-all，**把 q/k 的 norm+rope 融进 scatter kernel 本身**——每条源 d-row 在被 P2P 写到对端 GPU 前就地完成 norm+rope（单 kernel，边搬边算，省掉一趟独立的 norm/rope 读写）。per-head 归约在 kernel 内完成；cross-head 需整 token 的 RMS，先跑一个极小的 `[b·s_local]` inv-rms 预归约再在 scatter 内 scale。输入 `(b, s_local, n_global, d)`（本 rank 持有其序列分片的全部 head），输出 `(b, s_global, n_local, d)`。`cos`/`sin` 形状 `(s_local, d/2)`，需由调用方**预切为本 rank 的全局位置**。`v` 不做 norm/rope，继续用 `all_to_all_single_4d`。集体约束与 `all_to_all_single_4d` 相同。（当前融合路径走直写内核，不含 TMA；`use_tma` 暂被忽略。）
 
 ## 使用方式
 
