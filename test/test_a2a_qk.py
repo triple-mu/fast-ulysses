@@ -88,6 +88,24 @@ def main():
                         print(f"{'OK ' if ok else 'FAIL'} ws={ws} {str(dtype).split('.')[-1]:>8} d={d:<3} {mode:<10} il={il!s:<5} out={tuple(got.shape)} maxdiff={md:.4e}", flush=True)
                     dist.barrier()
 
+    # qk2: q+k in one call (shared barrier) must bitwise-match two single fused calls.
+    d = 128
+    n_global = 4 * ws
+    q = torch.randn(b, s_local, n_global, d, device=dev, dtype=torch.bfloat16)
+    k = torch.randn(b, s_local, n_global, d, device=dev, dtype=torch.bfloat16)
+    wq = torch.randn(n_global * d, device=dev, dtype=torch.float32)
+    wk = torch.randn(n_global * d, device=dev, dtype=torch.float32)
+    theta = torch.randn(s_local, d // 2, device=dev, dtype=torch.float32)
+    cos, sin = theta.cos().contiguous(), theta.sin().contiguous()
+    oq, ok = group.all_to_all_single_4d_qk2(q, k, wq, wk, cos, sin, mode="cross_head", interleaved=True, tag="qk2")
+    rq = group.all_to_all_single_4d_qk(q, wq, cos, sin, mode="cross_head", interleaved=True, tag="rq")
+    rk = group.all_to_all_single_4d_qk(k, wk, cos, sin, mode="cross_head", interleaved=True, tag="rk")
+    ok2 = torch.equal(oq, rq) and torch.equal(ok, rk)
+    fails += not ok2
+    if rank == 0:
+        print(f"{'OK ' if ok2 else 'FAIL'} ws={ws} qk2 == 2x single fused (bitwise)", flush=True)
+    dist.barrier()
+
     nfail = torch.tensor([fails], device=dev)
     dist.all_reduce(nfail)
     if rank == 0:

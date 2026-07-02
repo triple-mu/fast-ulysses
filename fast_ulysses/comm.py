@@ -100,6 +100,31 @@ class UlyssesGroup:
             self._group, x.contiguous(), weight, cos, sin, m, interleaved, eps, tag, use_tma
         )
 
+    def all_to_all_single_4d_qk2(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            weight_q: torch.Tensor,
+            weight_k: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+            *,
+            mode: str = "cross_head",
+            interleaved: bool = True,
+            eps: float = 1e-6,
+            tag: str = "",
+            use_tma: bool | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # q + k in ONE collective call: two fused scatters back-to-back, then a SINGLE shared
+        # quiet+fast_barrier (half the sync latency of two all_to_all_single_4d_qk calls). q/k share
+        # shape/dtype/cos/sin; weight_q/weight_k are their respective norm weights. Outputs land in
+        # distinct buffers (tag::q / tag::k). Collective constraints are the same as the single op.
+        m = {"per_head": 0, "cross_head": 1}[mode]
+        oq, ok = torch.ops.fast_ulysses.all_to_all_single_4d_qk2(
+            self._group, q.contiguous(), k.contiguous(), weight_q, weight_k, cos, sin, m, interleaved, eps, tag, use_tma
+        )
+        return oq, ok
+
     def destroy(self) -> None:
         dist.barrier(group=self.pg)
         self._group.destroy()

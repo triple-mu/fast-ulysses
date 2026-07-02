@@ -121,7 +121,17 @@ DiT（如 Wan）在进注意力前对 q/k 做 **RMSNorm + RoPE**，是访存密�
 
 ### `all_to_all_single_4d_qk(x, weight, cos, sin, *, mode="cross_head", interleaved=True, eps=1e-6, tag="", use_tma=None) -> Tensor`
 
-mode0 Ulysses input all-to-all，**把 q/k 的 norm+rope 融进 scatter kernel 本身**——每条源 d-row 在被 P2P 写到对端 GPU 前就地完成 norm+rope（单 kernel，边搬边算，省掉一趟独立的 norm/rope 读写）。per-head 归约在 kernel 内完成；cross-head 需整 token 的 RMS，先跑一个极小的 `[b·s_local]` inv-rms 预归约再在 scatter 内 scale。输入 `(b, s_local, n_global, d)`（本 rank 持有其序列分片的全部 head），输出 `(b, s_global, n_local, d)`。`cos`/`sin` 形状 `(s_local, d/2)`，需由调用方**预切为本 rank 的全局位置**。`v` 不做 norm/rope，继续用 `all_to_all_single_4d`。集体约束与 `all_to_all_single_4d` 相同。（当前融合路径走直写内核，不含 TMA；`use_tma` 暂被忽略。）
+mode0 Ulysses input all-to-all，**把 q/k 的 norm+rope 融进 scatter kernel 本身**——norm+rope 作为寄存器内 epilogue，在数据被 P2P 写到对端 GPU 前就地完成（边搬边算，省掉独立 norm/rope 的两趟全量 HBM 读写）。融合 kernel 与非 TMA 快速 a2a kernel **访存结构同构**：grid-stride + uint4 向量化 + UNROLL 寄存器预取流水 + threads×unroll×blocks 运行时 autotune（首调按 shape 微基准并缓存，与 a2a 相同的 hang-safe 论证）。
+
+- **cross-head（Wan 默认）**：先跑一个极小的向量化 `[b·s_local]` inv-rms 预归约（读一遍源，~占 a2a 时长 10%），scatter 走纯 elementwise 快速路径（interleaved 时与 plain a2a 完全同构，每线程一个 uint4）。
+- **per-head**：无预归约；d-row 的 Σx² 在 kernel 内由 `vecs/2` 个相邻 lane 的段内 warp shuffle 完成（无 smem、无 `__syncthreads`）。
+- 约束：`d` 为 2 的幂且 `d·elem_size ≥ 32B`（bf16/fp16 即 d≥16）；per-head 另需 `d·elem_size ≤ 1024B`（行规约须在一个 warp 内）。
+
+输入 `(b, s_local, n_global, d)`（本 rank 持有其序列分片的全部 head），输出 `(b, s_global, n_local, d)`。`cos`/`sin` 形状 `(s_local, d/2)`，需由调用方**预切为本 rank 的全局位置**。`v` 不做 norm/rope，继续用 `all_to_all_single_4d`。集体约束与 `all_to_all_single_4d` 相同。（融合路径走直写内核，不含 TMA——TMA 拷贝引擎无法做搬运途中的变换；`use_tma` 被忽略。）调试：`FAST_ULYSSES_QK_TUNE_VERBOSE=1` 打印每 rank 的 autotune 选择。
+
+### `all_to_all_single_4d_qk2(q, k, weight_q, weight_k, cos, sin, *, mode="cross_head", interleaved=True, eps=1e-6, tag="", use_tma=None) -> (Tensor, Tensor)`
+
+**q、k 一次集体调用**：两次融合 scatter 背靠背 + **一次共享的 quiet + NVLink flag barrier**（对比两次 `all_to_all_single_4d_qk` 省一半同步时延——barrier 是纯时延，共享是净赚）。q/k 同 shape/dtype、共享 cos/sin，各用自己的 norm weight；输出落在 `tag::q` / `tag::k` 两块独立缓冲。结果与两次单调用**逐位一致**。作为单个 op 暴露以保证全 rank 的 barrier 计数 lockstep。
 
 ## 使用方式
 
@@ -212,3 +222,16 @@ PROF_MODE=0 torchrun --nproc_per_node=8 benchmark/bench_uniform.py
 
 - 吞吐 = **per-rank remote bytes / 时间** = `numel * 2 * (ws-1) / ws` ÷ 耗时（与 ThunderKittens benchmark 口径一致，见 `benchmark/bench_uniform.py`）；时延为 20 次迭代的 CUDA event 中位数。
 - 复现：`PROF_N=75600 PROF_H=40 PROF_D=128 PROF_MODE=0 torchrun --nproc_per_node=8 benchmark/bench_uniform.py`。
+
+### QK 融合算子（8×H200，bf16，Wan n_global=40 / d=128，cross-head + interleaved）
+
+`benchmark/bench_qk_fused.py`（ws=8，ms/iter）：`a2a` 为纯搬运下界；`unfused` = 独立 rms_norm + rope + a2a（Wan 现状）；`fused` = `all_to_all_single_4d_qk`；`qk2` = q、k 一次调用（共享 barrier）。
+
+| seq_global | a2a | unfused | fused | fused/unfused | qk2 | qk2 vs 2×fused |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20480 | 0.109 | 0.216 | 0.150 | **1.44×** | 0.281 | 0.94× |
+| 46080 | 0.199 | 0.420 | 0.288 | **1.46×** | 0.523 | 0.91× |
+
+- 融合把 norm+rope 的额外开销（相对纯 a2a）从 unfused 的 ~0.11/0.22 ms 压到 ~0.04/0.09 ms。
+- 对 Wan 实际的 q+k 场景：`qk2` 0.523 ms vs unfused 的 2×0.420=0.840 ms → **1.61×**。
+- 复现：`torchrun --nproc_per_node=8 benchmark/bench_qk_fused.py`。
