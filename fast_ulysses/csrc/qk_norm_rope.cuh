@@ -1,5 +1,5 @@
 #pragma once
-#include "ulysses_common.cuh"  // Ulysses4DDims
+#include "a2a_config.cuh"  // Ulysses4DDims (via ulysses_common.cuh) + A2AConfig
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -21,12 +21,24 @@ at::Tensor norm_rope(at::Tensor x, at::Tensor weight, at::Tensor cos, at::Tensor
 
 // mode0 all-to-all with QK RMSNorm+RoPE fused into the scatter (all_to_all_qk.cu). inv_rms is the per-token
 // cross-head inverse RMS ([b*s_local]) when cross_head, else null (per-head reduces inside the scatter).
+// cfg: threads/unroll/blocks from resolve_config_qk (tile_n/tile_s unused).
 void launch_a2a_qk(const void* src, const float* inv_rms, const std::vector<uint64_t>& peer_ptrs,
                    const float* weight, const float* cosb, const float* sinb, const Ulysses4DDims& dims,
-                   bool cross_head, bool interleaved, float eps, at::ScalarType dtype, cudaStream_t stream);
+                   bool cross_head, bool interleaved, float eps, at::ScalarType dtype,
+                   const A2AConfig& cfg, cudaStream_t stream);
 
 // cross-head pre-pass: fill inv_rms[b*s_local] from source [b,s_local,n_global,d].
 void launch_token_inv_rms(const void* x, float* inv_rms, const Ulysses4DDims& dims, float eps,
                           at::ScalarType dtype, cudaStream_t stream);
+
+// Fused-scatter autotune sweep (threads x unroll x blocks microbench; mirrors resolve_config_nontma).
+// Each timed run is the REAL per-call op: (cross-head pre-pass +) scatter + finish(quiet+barrier).
+// inv_rms must already be allocated AND filled when cross_head (probe launches dereference it).
+// Result is cached by the caller via UlyssesGroup::resolve_config_cached.
+A2AConfig resolve_config_qk(const void* src, const float* inv_rms, const std::vector<uint64_t>& peer_ptrs,
+                            const float* weight, const float* cosb, const float* sinb,
+                            const Ulysses4DDims& dims, bool cross_head, bool interleaved, float eps,
+                            at::ScalarType dtype, cudaStream_t stream, bool verbose,
+                            const std::function<void()>& finish);
 
 }  // namespace ulysses

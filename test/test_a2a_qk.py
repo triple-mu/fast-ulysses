@@ -60,32 +60,33 @@ def main():
     pg = dist.group.WORLD
     group = UlyssesGroup(process_group=pg, initial_pool_bytes=1 << 30)
 
-    b, s_local, n_global, d, eps = 2, 16, 8, 128, 1e-6
-    n_local = n_global // ws
+    b, s_local, eps = 2, 16, 1e-6
+    n_global = 4 * ws  # divisible by any ws (incl odd 3/5/6/7)
     atol = {torch.float16: 2e-3, torch.bfloat16: 1e-2}
     rtol = {torch.float16: 2e-3, torch.bfloat16: 1.6e-2}
     torch.manual_seed(100 + rank)  # per-rank distinct data
     fails = 0
     for dtype in (torch.float16, torch.bfloat16):
-        x = torch.randn(b, s_local, n_global, d, device=dev, dtype=dtype)
-        theta = torch.randn(s_local, d // 2, device=dev, dtype=torch.float32)
-        cos, sin = theta.cos().contiguous(), theta.sin().contiguous()
-        w_ph = torch.randn(d, device=dev, dtype=torch.float32)
-        w_ch = torch.randn(n_global * d, device=dev, dtype=torch.float32)
-        for mode, w in (("per_head", w_ph), ("cross_head", w_ch)):
-            for il in (True, False):
-                ref_src = rope_ref_f32(rms_ref_f32(x, w, mode, eps), cos, sin, il).to(dtype)
-                ref = torch_a2a_mode0(ref_src, ws, pg)
-                got = group.all_to_all_single_4d_qk(
-                    x, w, cos, sin, mode=mode, interleaved=il, eps=eps,
-                    tag=f"{str(dtype).split('.')[-1]}_{mode}_{il}",
-                )
-                ok = torch.allclose(got.float(), ref.float(), atol=atol[dtype], rtol=rtol[dtype])
-                md = (got.float() - ref.float()).abs().max().item()
-                fails += not ok
-                if rank == 0:
-                    print(f"{'OK ' if ok else 'FAIL'} ws={ws} {str(dtype).split('.')[-1]:>8} {mode:<10} il={il!s:<5} out={tuple(got.shape)} maxdiff={md:.4e}", flush=True)
-                dist.barrier()
+        for d in (64, 128):
+            x = torch.randn(b, s_local, n_global, d, device=dev, dtype=dtype)
+            theta = torch.randn(s_local, d // 2, device=dev, dtype=torch.float32)
+            cos, sin = theta.cos().contiguous(), theta.sin().contiguous()
+            w_ph = torch.randn(d, device=dev, dtype=torch.float32)
+            w_ch = torch.randn(n_global * d, device=dev, dtype=torch.float32)
+            for mode, w in (("per_head", w_ph), ("cross_head", w_ch)):
+                for il in (True, False):
+                    ref_src = rope_ref_f32(rms_ref_f32(x, w, mode, eps), cos, sin, il).to(dtype)
+                    ref = torch_a2a_mode0(ref_src, ws, pg)
+                    got = group.all_to_all_single_4d_qk(
+                        x, w, cos, sin, mode=mode, interleaved=il, eps=eps,
+                        tag=f"{str(dtype).split('.')[-1]}_d{d}_{mode}_{il}",
+                    )
+                    ok = torch.allclose(got.float(), ref.float(), atol=atol[dtype], rtol=rtol[dtype])
+                    md = (got.float() - ref.float()).abs().max().item()
+                    fails += not ok
+                    if rank == 0:
+                        print(f"{'OK ' if ok else 'FAIL'} ws={ws} {str(dtype).split('.')[-1]:>8} d={d:<3} {mode:<10} il={il!s:<5} out={tuple(got.shape)} maxdiff={md:.4e}", flush=True)
+                    dist.barrier()
 
     nfail = torch.tensor([fails], device=dev)
     dist.all_reduce(nfail)

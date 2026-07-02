@@ -151,7 +151,8 @@ static void nontma_dispatch(int                          ws,
 }
 
 // SM count of the current device: queried once per process and cached (one device bound per process).
-static int sm_count_cached()
+// Shared with the QK-fused sweep (all_to_all_qk.cu); declared in ulysses_common.cuh.
+int sm_count_cached()
 {
     static const int sm = [] {
         int d = 0, s = 0;

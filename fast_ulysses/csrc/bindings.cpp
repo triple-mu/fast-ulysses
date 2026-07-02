@@ -112,10 +112,14 @@ at::Tensor all_to_all_single_4d_qk(const c10::intrusive_ptr<UlyssesGroup>& group
     const int x2   = static_cast<int>(input.size(2));  // n_global
     const int d    = static_cast<int>(input.size(3));
     const int elem = static_cast<int>(input.element_size());
-    TORCH_CHECK((static_cast<int64_t>(d) * elem) % 16 == 0, "d*elem_size must be 16B-aligned");
     TORCH_CHECK(d > 0 && d <= 1024 && (d & (d - 1)) == 0, "d must be a power of two in (0,1024]");
+    // The fused scatter works on (vec j, vec j+vecs/2) uint4 pairs of a d-row -> needs >= 2 vecs/row.
+    TORCH_CHECK(static_cast<int64_t>(d) * elem >= 32, "fused a2a needs d*elem_size >= 32B, got d=", d);
     TORCH_CHECK(x2 % ws == 0, "n_global must be divisible by world_size");
     TORCH_CHECK(norm_mode == 0 || norm_mode == 1, "norm_mode must be 0 (per-head) or 1 (cross-head)");
+    // per-head reduces a d-row over its vecs/2 lanes with warp shuffles -> the row must fit in a warp.
+    TORCH_CHECK(norm_mode == 1 || static_cast<int64_t>(d) * elem <= 1024,
+                "per-head fused a2a needs d*elem_size <= 1024B (row reduction within one warp), got d=", d);
     TORCH_CHECK(weight.is_cuda() && weight.scalar_type() == at::kFloat && weight.is_contiguous() &&
                     weight.numel() == (norm_mode == 0 ? d : x2 * d),
                 "weight must be contiguous fp32 with numel d (per-head) or n_global*d (cross-head)");
@@ -138,8 +142,9 @@ at::Tensor all_to_all_single_4d_qk(const c10::intrusive_ptr<UlyssesGroup>& group
     const std::vector<int64_t> out_shape = {b, dims.s_global, dims.n_local, d};
     const auto&                buf = group->pool().acquire(out_shape, input.scalar_type(), tag);
 
-    // Fuse norm+rope INTO the scatter: each source d-row is normed+roped then P2P-written to its peer.
-    // cross-head needs the whole-token RMS, so a tiny [b*s_local] inv-rms pre-pass runs first.
+    // Fuse norm+rope INTO the scatter: each source d-row is normed+roped in registers then P2P-written
+    // to its peer. cross-head needs the whole-token RMS, so a tiny [b*s_local] inv-rms pre-pass runs
+    // first -- and MUST run before resolve_config_cached (the autotune probes dereference it).
     const bool   cross   = (norm_mode == 1);
     at::Tensor   inv_rms;
     const float* inv_ptr = nullptr;
@@ -149,10 +154,24 @@ at::Tensor all_to_all_single_4d_qk(const c10::intrusive_ptr<UlyssesGroup>& group
                              input.scalar_type(), stream);
         inv_ptr = inv_rms.data_ptr<float>();
     }
+    auto finish = [&group, stream] {
+        nvshmemx_quiet_on_stream(stream);
+        group->fast_barrier(stream);
+    };
+    // FAST_ULYSSES_QK_TUNE_VERBOSE=1: rank0 prints the tuned config (diagnostics only).
+    static const bool tune_verbose = [] {
+        const char* e = std::getenv("FAST_ULYSSES_QK_TUNE_VERBOSE");
+        return e && e[0] == '1';
+    }();
+    const A2AConfig cfg = group->resolve_config_cached(
+        config_key_qk(ws, static_cast<int>(norm_mode), dims), [&]() -> A2AConfig {
+            return resolve_config_qk(input.data_ptr(), inv_ptr, buf.peer_ptrs, weight.data_ptr<float>(),
+                                     cos.data_ptr<float>(), sin.data_ptr<float>(), dims, cross, interleaved,
+                                     static_cast<float>(eps), input.scalar_type(), stream, tune_verbose, finish);
+        });
     launch_a2a_qk(input.data_ptr(), inv_ptr, buf.peer_ptrs, weight.data_ptr<float>(), cos.data_ptr<float>(),
                   sin.data_ptr<float>(), dims, cross, interleaved, static_cast<float>(eps), input.scalar_type(),
-                  stream);
-    ULYSSES_CUDA_CHECK(cudaGetLastError());
+                  cfg, stream);
     nvshmemx_quiet_on_stream(stream);  // complete this rank's P2P writes (globally visible)
     group->fast_barrier(stream);       // cross-rank sync
     return buf.view;

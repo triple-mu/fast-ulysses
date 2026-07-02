@@ -209,6 +209,16 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
     return {tma, tma ? cfg_t : cfg_n};
 }
 
+A2AConfig UlyssesGroup::resolve_config_cached(const ConfigKey& key, const std::function<A2AConfig()>& tune)
+{
+    auto it = cfg_cache_.find(key);
+    if (it != cfg_cache_.end())
+        return it->second;
+    const A2AConfig cfg = tune();
+    cfg_cache_[key]     = cfg;
+    return cfg;
+}
+
 void UlyssesGroup::destroy()
 {
     if (destroyed_)

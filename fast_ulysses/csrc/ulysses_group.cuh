@@ -81,6 +81,12 @@ public:
                               int                          elem,
                               cudaStream_t                 stream);
 
+    // Generic cfg_cache_ front for extra paths (e.g. the QK-fused scatter): hit returns the cached
+    // config, miss runs tune() once and caches. Same hang-safety contract as resolve_config: under
+    // SPMD all ranks miss the same key on the first call together (tune's microbench barriers stay
+    // in lockstep). Serial access only (see resolve_config comment).
+    A2AConfig resolve_config_cached(const ConfigKey& key, const std::function<A2AConfig()>& tune);
+
     // Custom single-node NVLink flag barrier: replaces the slow nvshmem sync (~280us) that falls back on
     // hardware without NVLS fabric. Call nvshmemx_quiet_on_stream first (so this rank's writes are globally
     // visible). No-op when world_size==1.
