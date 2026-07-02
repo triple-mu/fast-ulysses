@@ -96,6 +96,14 @@ from fast_ulysses import UlyssesGroup
 - 所有 rank 必须以**相同的 `(shape, mode, use_tma)` 序列**调用本方法。`use_tma` 与 `shape`/`mode` 同等严格——不一致会让各 rank 走不同 kernel/barrier、在内部缓存 key 上分叉而 hang。
 - 首次见到某 `(shape, mode, use_tma)` 时跑一次**懒惰微基准**选最优 launch 配置（自动路径还会比较两条路径）并缓存（之后命中零额外集体开销）。严格 SPMD 下所有 rank 在首次调用一起 miss、一起跑微基准，故 hang-free。
 
+### `all_to_all_single_4d_async(x, *, mode=0, tag="", use_tma=None) -> AsyncA2AHandle`
+
+异步变体：集合操作提交到 group 专属的高优先级 comm stream 后立即返回；此后提交到调用方 stream 的 kernel 可与 a2a 重叠，`handle.wait()`（GPU 侧 event 等待，host 不阻塞）后返回输出。集体约束与同步版相同（同步与异步调用共同计入全 rank 一致的调用序列）。
+
+**与同步调用混用的顺序约束**：`fast_barrier` 的 epoch 是 group 级单调计数，barrier kernel 必须按提交顺序执行——在发起本 group 的下一次同步集合之前，必须先 `wait()` 掉所有未决的 async handle（数据依赖会强制 comm stream 的 barrier 先完成）。
+
+**重叠的现实约束（8×H200 实测）**：直写 scatter 是 SM-resident 大 grid，与 cooperative launch 的 GEMM（如 cuBLAS nvjet coop kernel）互斥——GEMM 运行期间不释放任何 SM slot，a2a 只能等其排空（nsys 实测零重叠）。异步 API 的收益要在非 cooperative 计算窗口或未来 copy-engine/SM-carveout 搬运路径上兑现。
+
 ### `destroy() -> None`
 
 释放对称堆资源（内部先 `dist.barrier` 再 destroy）。所有 rank 一起调用。

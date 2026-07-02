@@ -3,7 +3,7 @@
 import torch  # noqa: F401  load libtorch before dlopen of _C
 
 from . import _C  # noqa: F401,E402  trigger TORCH_LIBRARY registration
-from .comm import UlyssesGroup  # noqa: E402
+from .comm import AsyncA2AHandle, UlyssesGroup  # noqa: E402
 from .ops import norm_rope, rms_norm, rope  # noqa: E402
 
-__all__ = ["UlyssesGroup", "_C", "rms_norm", "rope", "norm_rope"]
+__all__ = ["UlyssesGroup", "AsyncA2AHandle", "_C", "rms_norm", "rope", "norm_rope"]
