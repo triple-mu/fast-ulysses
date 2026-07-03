@@ -115,9 +115,8 @@ UlyssesGroup::UlyssesGroup(std::vector<int64_t> peer_global_pes,
     int major = 0;
     ULYSSES_CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id_));
     sm_major_ = major;
-    TORCH_CHECK(world_size_ == 1 || world_size_ == 2 || world_size_ == 4 || world_size_ == 8,
-                "world_size must be in {1,2,4,8}, got ",
-                world_size_);
+    TORCH_CHECK(
+        world_size_ >= 1 && world_size_ <= 8, "world_size must be in [1, 8] (single-node NVLink), got ", world_size_);
     ULYSSES_CUDA_CHECK(cudaSetDevice(device_id_));
     peer_global_pes_.reserve(world_size_);
     for (auto pe : peer_global_pes)
@@ -207,6 +206,16 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
     const bool tma         = t_t <= t_n;
     auto_path_cache_[akey] = tma;
     return {tma, tma ? cfg_t : cfg_n};
+}
+
+A2AConfig UlyssesGroup::resolve_config_cached(const ConfigKey& key, const std::function<A2AConfig()>& tune)
+{
+    auto it = cfg_cache_.find(key);
+    if (it != cfg_cache_.end())
+        return it->second;
+    const A2AConfig cfg = tune();
+    cfg_cache_[key]     = cfg;
+    return cfg;
 }
 
 void UlyssesGroup::destroy()

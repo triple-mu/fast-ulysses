@@ -50,6 +50,9 @@ void launch_a2a(const void*                  src,
 // ranks miss the same (shape,mode,tma) on the first call together, so they call equal barriers in lockstep.
 float microbench_us(const std::function<void()>& run_once, cudaStream_t stream);
 
+// SM count of the current device, queried once per process and cached. Defined in all_to_all.cu.
+int sm_count_cached();
+
 // non-TMA config resolution: micro-benchmark sweep over threads x unroll x blocks, keep the fastest (result
 // held by the group's cfg_cache_). finish: the per-call quiet+barrier, appended to each timed run so the
 // measurement reflects real per-call cost. verbose: print the chosen config (rank 0 only).

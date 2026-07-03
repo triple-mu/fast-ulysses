@@ -1,7 +1,7 @@
 """Minimal profiling driver (for nsys/ncu). Single config, few iterations, easy to capture a timeline.
 
     PROF_MODE=0 nsys profile --trace=cuda -o /tmp/a2a \
-        torchrun --nproc_per_node=8 custom_ulysses_op/benchmark/profile.py
+        torchrun --nproc_per_node=8 fast-ulysses/benchmark/profile.py
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from custom_ulysses_op import UlyssesGroup
+from fast_ulysses import UlyssesGroup
 
 
 def main() -> None:

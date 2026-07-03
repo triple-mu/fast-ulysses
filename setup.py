@@ -60,9 +60,9 @@ class CMakeBuild(build_ext):
 
 
 setup(
-    name="custom_ulysses_op",
+    name="fast-ulysses",
     version="0.0.1",
-    packages=["custom_ulysses_op"],
-    ext_modules=[CMakeExtension("custom_ulysses_op._C")],
+    packages=["fast_ulysses"],
+    ext_modules=[CMakeExtension("fast_ulysses._C")],
     cmdclass={"build_ext": CMakeBuild},
 )
