@@ -175,9 +175,13 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
         return cfg;
     };
 
-    // Explicit path: force it.
-    if (use_tma_i == 1)
-        return {true, resolve_path(true)};
+    // Explicit path: force it. tile_n=0 is the resolve_config_tma sentinel for "no config fits the
+    // device's dynamic-smem cap" (e.g. sm_120's ~99KB) -- forced TMA must fail loudly, not corrupt.
+    if (use_tma_i == 1) {
+        const A2AConfig cfg = resolve_path(true);
+        TORCH_CHECK(cfg.tile_n > 0, "use_tma=True: no TMA config fits this device's dynamic-smem cap");
+        return {true, cfg};
+    }
     if (use_tma_i == 0)
         return {false, resolve_path(false)};
 
@@ -189,8 +193,12 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
     if (ap != auto_path_cache_.end())
         return {ap->second, resolve_path(ap->second)};
     // First auto call for this shape: tune both paths, time each real per-call, keep the faster.
-    const A2AConfig cfg_n = resolve_path(false);
     const A2AConfig cfg_t = resolve_path(true);
+    if (cfg_t.tile_n == 0) {  // TMA infeasible on this device: only the non-TMA path remains
+        auto_path_cache_[akey] = false;
+        return {false, resolve_path(false)};
+    }
+    const A2AConfig cfg_n = resolve_path(false);
     const float     t_n   = microbench_us(
         [&] {
             launch_a2a(src, peers, dims, mode, elem, cfg_n, stream);

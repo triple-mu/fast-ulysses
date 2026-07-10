@@ -34,7 +34,7 @@ class CMakeBuild(build_ext):
         builddir = _HERE / "build"
         builddir.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
-        arch = env.get("CUSTOM_ULYSSES_CUDA_ARCH", "80;90;100")
+        arch = env.get("CUSTOM_ULYSSES_CUDA_ARCH", "80;90;100;120")
         # Torch expects dotted arch (e.g. 86 -> 8.6, 100 -> 10.0); insert the
         # decimal point before the last digit of each ";"-separated token.
         env["TORCH_CUDA_ARCH_LIST"] = " ".join(

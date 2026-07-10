@@ -178,6 +178,31 @@ static void build_tma_maps(int                          mode,
     }
 }
 
+// Fixed pipeline depth (measured DiT optimum; keeps tma_wait_group at {3,0}).
+constexpr int kTmaStages = 4;
+
+// Device max opt-in dynamic smem, cached (one device per process). Hopper allows 227KB but
+// sm_120 (consumer Blackwell) only ~99KB, so the cap must come from the device, not a constant.
+static int tma_max_dyn_smem()
+{
+    static int v = [] {
+        int dev = 0, m = 0;
+        ULYSSES_CUDA_CHECK(cudaGetDevice(&dev));
+        ULYSSES_CUDA_CHECK(cudaDeviceGetAttribute(&m, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev));
+        return m;
+    }();
+    return v;
+}
+
+// Dynamic smem a config needs after launch-time tile clamping: kTmaStages buffers + align pad + mbars.
+static int tma_smem_bytes(const A2AConfig& cfg, const Ulysses4DDims& dims, int elem_size)
+{
+    const int      tile_n = std::min({cfg.tile_n, dims.n_local, 256});
+    const int      tile_s = std::min({cfg.tile_s, dims.s_local, 256});
+    const uint32_t tb_al  = ((uint32_t)tile_s * tile_n * dims.d * elem_size + 127u) & ~127u;
+    return (int)(tb_al * (uint32_t)kTmaStages) + 128 + 8 * kTmaStages;
+}
+
 // Launch the TMA kernel for a given config (build maps + launch only). mode0/mode1 use different src/dst tensormap
 // layouts.
 void launch_a2a_tma(const void*                  src,
@@ -193,15 +218,19 @@ void launch_a2a_tma(const void*                  src,
     const int      s_local = dims.s_local, n_local = dims.n_local;
     const int      tile_n     = std::min({cfg.tile_n, n_local, 256});
     const int      tile_s     = std::min({cfg.tile_s, s_local, 256});
-    constexpr int  stages     = 4;  // fixed (measured DiT optimum; keeps tma_wait_group at {3,0})
     const uint32_t tile_bytes = (uint32_t)tile_s * tile_n * d * elem_size;
-    const uint32_t tb_al      = (tile_bytes + 127u) & ~127u;
-    const int      smem       = (int)(tb_al * (uint32_t)stages) + 128 + 8 * stages;
+    const int      smem       = tma_smem_bytes(cfg, dims, elem_size);
+    TORCH_CHECK(smem <= tma_max_dyn_smem(),
+                "a2a_tma: config needs ",
+                smem,
+                " B dynamic smem > device cap ",
+                tma_max_dyn_smem(),
+                " B");
 
     static bool attr_set = false;
     if (!attr_set) {
-        ULYSSES_CUDA_CHECK(
-            cudaFuncSetAttribute(a2a_tma_kernel<stages>, cudaFuncAttributeMaxDynamicSharedMemorySize, 200 * 1024));
+        ULYSSES_CUDA_CHECK(cudaFuncSetAttribute(
+            a2a_tma_kernel<kTmaStages>, cudaFuncAttributeMaxDynamicSharedMemorySize, tma_max_dyn_smem()));
         attr_set = true;
     }
 
@@ -214,7 +243,7 @@ void launch_a2a_tma(const void*                  src,
     CUtensorMap src_map;
     TmaMaps     dst;
     build_tma_maps(mode, dims, src, peer_ptrs, elem_size, tile_n, tile_s, src_map, dst);
-    a2a_tma_kernel<stages>
+    a2a_tma_kernel<kTmaStages>
         <<<blocks, 1, smem, stream>>>(src_map, dst, ws, mode, rank, s_local, n_local, b, tile_s, tile_n, tile_bytes);
 }
 
@@ -265,6 +294,8 @@ static std::vector<A2AConfig> tma_candidates(int mode, int n_local, int s_local)
 // unaffected). No collective primitive of its own -- under SPMD all ranks miss the same (shape,mode)
 // on the first call and run this concurrently (contention captured); the cache lives in the caller
 // (UlyssesGroup::cfg_cache_). verbose: rank-0 debug print.
+// Candidates that exceed the device's dynamic-smem cap are dropped; if none fit (e.g. large d on
+// sm_120's ~99KB), returns the tile_n=0 sentinel and the caller must fall back to non-TMA.
 A2AConfig resolve_config_tma(const void*                  src,
                              const std::vector<uint64_t>& peer_ptrs,
                              const Ulysses4DDims&         dims,
@@ -274,8 +305,13 @@ A2AConfig resolve_config_tma(const void*                  src,
                              cudaStream_t                 stream,
                              const std::function<void()>& finish)
 {
-    const int  n_local = dims.n_local, s_local = dims.s_local, ws = (int)peer_ptrs.size();
-    const auto cands = tma_candidates(mode, n_local, s_local);
+    const int              n_local = dims.n_local, s_local = dims.s_local, ws = (int)peer_ptrs.size();
+    std::vector<A2AConfig> cands;
+    for (const auto& c : tma_candidates(mode, n_local, s_local))
+        if (tma_smem_bytes(c, dims, elem_size) <= tma_max_dyn_smem())
+            cands.push_back(c);
+    if (cands.empty())
+        return A2AConfig{};  // tile_n=0 sentinel: no TMA config fits this device
 
     A2AConfig best   = cands[0];
     float     best_t = 1e30f;

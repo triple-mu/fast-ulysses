@@ -4,7 +4,7 @@ project(fast_ulysses LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
-    set(CMAKE_CUDA_ARCHITECTURES "80;90;100")
+    set(CMAKE_CUDA_ARCHITECTURES "80;90;100;120")
 endif ()
 
 # ccache: wrap CXX/CUDA compilers to cache objects and skip recompiling unchanged TUs (skipped if not installed)
