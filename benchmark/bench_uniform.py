@@ -3,8 +3,8 @@
 mode0: shape (1, N/ws, H=128, D=128); metric per_rank_comm=(N/ws)*(H/ws)*D*2*(ws-1)/time (matches TK).
 mode1: shape (1, N, H/ws, D=128), input (b, s_global, n_local, d); matches bindings mode1 semantics.
 
-Reports our throughput (CUSTOM_ULYSSES_USE_TMA selects non-TMA/TMA) plus an NCCL reference.
-Run: PROF_MODE=0|1 CUSTOM_ULYSSES_USE_TMA=0|1 torchrun --nproc_per_node=8 bench_uniform.py
+Reports our throughput (FAST_ULYSSES_USE_TMA selects non-TMA/TMA) plus an NCCL reference.
+Run: PROF_MODE=0|1 FAST_ULYSSES_USE_TMA=0|1 torchrun --nproc_per_node=8 bench_uniform.py
 """
 
 from __future__ import annotations
@@ -60,8 +60,8 @@ def main() -> None:
     torch.cuda.set_device(lr)
     dev = torch.device("cuda", lr)
     pg = dist.group.WORLD
-    # CUSTOM_ULYSSES_USE_TMA: unset -> auto (None), "0" -> non-TMA (False), else -> TMA (True).
-    _t = os.environ.get("CUSTOM_ULYSSES_USE_TMA")
+    # FAST_ULYSSES_USE_TMA: unset -> auto (None), "0" -> non-TMA (False), else -> TMA (True).
+    _t = os.environ.get("FAST_ULYSSES_USE_TMA")
     ut = None if _t is None else (_t != "0")
     group = UlyssesGroup(process_group=pg, initial_pool_bytes=12 << 30)
 

@@ -22,12 +22,14 @@ def _mode_int(mode: str) -> int:
 def rms_norm(
     x: torch.Tensor, weight: torch.Tensor, *, mode: str = "per_head", eps: float = 1e-6
 ) -> torch.Tensor:
+    """Standalone RMSNorm (fp32 accumulation, eps inside rsqrt; conventions in module docstring)."""
     return torch.ops.fast_ulysses.rms_norm(x, weight, _mode_int(mode), eps)
 
 
 def rope(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, *, interleaved: bool = True
 ) -> torch.Tensor:
+    """Standalone RoPE over the full head dim (conventions in module docstring)."""
     return torch.ops.fast_ulysses.rope(x, cos, sin, interleaved)
 
 
@@ -41,4 +43,5 @@ def norm_rope(
     interleaved: bool = True,
     eps: float = 1e-6,
 ) -> torch.Tensor:
+    """Fused RMSNorm -> RoPE in one pass, fp32 throughout (no rounding between the two steps)."""
     return torch.ops.fast_ulysses.norm_rope(x, weight, cos, sin, _mode_int(mode), interleaved, eps)
