@@ -1,0 +1,5 @@
+include LICENSE
+include CMakeLists.txt
+include .clang-format
+graft fast_ulysses/csrc
+global-exclude __pycache__ *.so *.o

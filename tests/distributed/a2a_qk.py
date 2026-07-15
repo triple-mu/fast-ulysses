@@ -1,6 +1,6 @@
 """torchrun correctness check for the fused mode0 a2a + QK RMSNorm/RoPE op.
 
-    torchrun --nproc_per_node=8 fast-ulysses/test/test_a2a_qk.py
+    torchrun --nproc_per_node=8 tests/distributed/a2a_qk.py
 
 Compares group.all_to_all_single_4d_qk(x, w, cos, sin, ...) against a reference that applies the same
 fp32 RMSNorm + RoPE to the source [b, s_local, n_global, d] and then the reference permute+all_to_all
@@ -78,14 +78,25 @@ def main():
                     ref_src = rope_ref_f32(rms_ref_f32(x, w, mode, eps), cos, sin, il).to(dtype)
                     ref = torch_a2a_mode0(ref_src, ws, pg)
                     got = group.all_to_all_single_4d_qk(
-                        x, w, cos, sin, mode=mode, interleaved=il, eps=eps,
+                        x,
+                        w,
+                        cos,
+                        sin,
+                        mode=mode,
+                        interleaved=il,
+                        eps=eps,
                         tag=f"{str(dtype).split('.')[-1]}_d{d}_{mode}_{il}",
                     )
-                    ok = torch.allclose(got.float(), ref.float(), atol=atol[dtype], rtol=rtol[dtype])
+                    ok = torch.allclose(
+                        got.float(), ref.float(), atol=atol[dtype], rtol=rtol[dtype]
+                    )
                     md = (got.float() - ref.float()).abs().max().item()
                     fails += not ok
                     if rank == 0:
-                        print(f"{'OK ' if ok else 'FAIL'} ws={ws} {str(dtype).split('.')[-1]:>8} d={d:<3} {mode:<10} il={il!s:<5} out={tuple(got.shape)} maxdiff={md:.4e}", flush=True)
+                        print(
+                            f"{'OK ' if ok else 'FAIL'} ws={ws} {str(dtype).split('.')[-1]:>8} d={d:<3} {mode:<10} il={il!s:<5} out={tuple(got.shape)} maxdiff={md:.4e}",
+                            flush=True,
+                        )
                     dist.barrier()
 
     # qk2: q+k in one call (shared barrier) must bitwise-match two single fused calls.
@@ -97,9 +108,15 @@ def main():
     wk = torch.randn(n_global * d, device=dev, dtype=torch.float32)
     theta = torch.randn(s_local, d // 2, device=dev, dtype=torch.float32)
     cos, sin = theta.cos().contiguous(), theta.sin().contiguous()
-    oq, ok = group.all_to_all_single_4d_qk2(q, k, wq, wk, cos, sin, mode="cross_head", interleaved=True, tag="qk2")
-    rq = group.all_to_all_single_4d_qk(q, wq, cos, sin, mode="cross_head", interleaved=True, tag="rq")
-    rk = group.all_to_all_single_4d_qk(k, wk, cos, sin, mode="cross_head", interleaved=True, tag="rk")
+    oq, ok = group.all_to_all_single_4d_qk2(
+        q, k, wq, wk, cos, sin, mode="cross_head", interleaved=True, tag="qk2"
+    )
+    rq = group.all_to_all_single_4d_qk(
+        q, wq, cos, sin, mode="cross_head", interleaved=True, tag="rq"
+    )
+    rk = group.all_to_all_single_4d_qk(
+        k, wk, cos, sin, mode="cross_head", interleaved=True, tag="rk"
+    )
     ok2 = torch.equal(oq, rq) and torch.equal(ok, rk)
     fails += not ok2
     if rank == 0:
@@ -109,7 +126,10 @@ def main():
     nfail = torch.tensor([fails], device=dev)
     dist.all_reduce(nfail)
     if rank == 0:
-        print("ALL PASS" if nfail.item() == 0 else f"FAILED {int(nfail.item())} (summed over ranks)", flush=True)
+        print(
+            "ALL PASS" if nfail.item() == 0 else f"FAILED {int(nfail.item())} (summed over ranks)",
+            flush=True,
+        )
     group.destroy()
     dist.destroy_process_group()
     if nfail.item():

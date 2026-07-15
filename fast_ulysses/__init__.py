@@ -6,4 +6,6 @@ from . import _C  # noqa: F401,E402  trigger TORCH_LIBRARY registration
 from .comm import AsyncA2AHandle, UlyssesGroup  # noqa: E402
 from .ops import norm_rope, rms_norm, rope  # noqa: E402
 
-__all__ = ["UlyssesGroup", "AsyncA2AHandle", "_C", "rms_norm", "rope", "norm_rope"]
+__version__ = "0.1.0"
+
+__all__ = ["UlyssesGroup", "AsyncA2AHandle", "rms_norm", "rope", "norm_rope"]

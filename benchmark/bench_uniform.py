@@ -3,8 +3,8 @@
 mode0: shape (1, N/ws, H=128, D=128); metric per_rank_comm=(N/ws)*(H/ws)*D*2*(ws-1)/time (matches TK).
 mode1: shape (1, N, H/ws, D=128), input (b, s_global, n_local, d); matches bindings mode1 semantics.
 
-Reports our throughput (CUSTOM_ULYSSES_USE_TMA selects non-TMA/TMA) plus an NCCL reference.
-Run: PROF_MODE=0|1 CUSTOM_ULYSSES_USE_TMA=0|1 torchrun --nproc_per_node=8 bench_uniform.py
+Reports our throughput (FAST_ULYSSES_USE_TMA selects non-TMA/TMA) plus an NCCL reference.
+Run: PROF_MODE=0|1 FAST_ULYSSES_USE_TMA=0|1 torchrun --nproc_per_node=8 bench_uniform.py
 """
 
 from __future__ import annotations
@@ -60,8 +60,8 @@ def main() -> None:
     torch.cuda.set_device(lr)
     dev = torch.device("cuda", lr)
     pg = dist.group.WORLD
-    # CUSTOM_ULYSSES_USE_TMA: unset -> auto (None), "0" -> non-TMA (False), else -> TMA (True).
-    _t = os.environ.get("CUSTOM_ULYSSES_USE_TMA")
+    # FAST_ULYSSES_USE_TMA: unset -> auto (None), "0" -> non-TMA (False), else -> TMA (True).
+    _t = os.environ.get("FAST_ULYSSES_USE_TMA")
     ut = None if _t is None else (_t != "0")
     group = UlyssesGroup(process_group=pg, initial_pool_bytes=12 << 30)
 
@@ -76,8 +76,7 @@ def main() -> None:
             flush=True,
         )
     n_list = [
-        int(x)
-        for x in os.environ.get("PROF_N", "16384,32768,65536,131072,262144").split(",")
+        int(x) for x in os.environ.get("PROF_N", "16384,32768,65536,131072,262144").split(",")
     ]
     for N in n_list:
         # mode0 input (1, N/ws, H, D); mode1 input (1, N, H/ws, D).
@@ -89,9 +88,7 @@ def main() -> None:
         # the launch config so the timed iterations all hit the cache.
         remote = x.numel() * 2 * (ws - 1) / ws  # bytes leaving this rank over NVLink
         ours = timed(
-            lambda: group.all_to_all_single_4d(
-                x, mode=mode, tag=f"tk{mode}_{N}", use_tma=ut
-            )
+            lambda: group.all_to_all_single_4d(x, mode=mode, tag=f"tk{mode}_{N}", use_tma=ut)
         )
         nccl = timed(lambda: oracle(x, ws, pg))
         if rank == 0:

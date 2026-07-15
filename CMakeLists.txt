@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.18)
-set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
+# Fall back to the conventional CUDA location when the caller did not pick a compiler
+# (override via -DCMAKE_CUDA_COMPILER=... or the CUDACXX env var).
+if (NOT DEFINED CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX} AND EXISTS /usr/local/cuda/bin/nvcc)
+    set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
+endif ()
 project(fast_ulysses LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)

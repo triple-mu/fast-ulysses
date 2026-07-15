@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fast-ulysses"
+description = "Ulysses sequence-parallel all-to-all over the NVSHMEM symmetric heap with NVLink P2P"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "fast-ulysses Authors" }]
+dependencies = ["torch"]
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Repository = "https://github.com/triple-mu/custom_ulysses_op"
+
+[project.optional-dependencies]
+dev = ["pre-commit", "pytest", "ruff"]
+
+[tool.setuptools]
+packages = ["fast_ulysses"]
+
+[tool.setuptools.dynamic]
+version = { attr = "fast_ulysses.__version__" }
+
+[tool.setuptools.package-data]
+fast_ulysses = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "multigpu: multi-GPU tests launched via torchrun (skipped when fewer than 2 GPUs)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["3rdparty", "profile", "cmake-build-debug"]
+
+[tool.ruff.lint]
+extend-select = ["I"]

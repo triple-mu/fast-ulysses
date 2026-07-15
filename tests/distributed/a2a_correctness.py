@@ -1,7 +1,8 @@
 """torchrun correctness check: fast_ulysses vs torch permute + all_to_all_single + permute.
 
 Pure data movement, so results must be bit-exact. Run on a multi-GPU host (ws in [2, 8]):
-    torchrun --nproc_per_node=8 fast-ulysses/test/test_correctness.py
+    torchrun --nproc_per_node=8 tests/distributed/a2a_correctness.py
+(or via pytest: tests/test_multigpu.py)
 """
 
 from __future__ import annotations
@@ -55,8 +56,11 @@ def main() -> None:
                 ref = torch_a2a(x, mode, ws, pg)
                 # use_tma=None (auto path) for every (dtype,d,mode); explicit True/False at d in {64,128}
                 # to cover both forced TMA / non-TMA uniform paths (d=256 only auto, avoid blowup). All
-                # ranks must pass the same use_tma (hard collective invariant).
+                # ranks must pass the same use_tma (hard collective invariant). Forced TMA needs sm90+,
+                # so drop it on older GPUs (e.g. A100) where use_tma=True is a documented TORCH_CHECK error.
                 use_tma_list = [None, True, False] if d in (64, 128) else [None]
+                if torch.cuda.get_device_capability()[0] < 9:
+                    use_tma_list = [ut for ut in use_tma_list if ut is not True]
                 for use_tma in use_tma_list:
                     ours = group.all_to_all_single_4d(
                         x, mode=mode, tag=f"{tag}_ut{use_tma}", use_tma=use_tma
