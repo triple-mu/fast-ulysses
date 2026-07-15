@@ -1,6 +1,6 @@
 """torchrun correctness check for the async a2a API (comm-stream execution + overlap).
 
-    torchrun --nproc_per_node=8 fast-ulysses/test/test_a2a_async.py
+    torchrun --nproc_per_node=8 tests/distributed/a2a_async.py
 
 Checks that (1) async results bitwise-match the sync op, (2) compute submitted between launch and
 wait() (the overlap window) does not corrupt the result, (3) sync and async calls interleave safely

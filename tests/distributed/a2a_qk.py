@@ -1,6 +1,6 @@
 """torchrun correctness check for the fused mode0 a2a + QK RMSNorm/RoPE op.
 
-    torchrun --nproc_per_node=8 fast-ulysses/test/test_a2a_qk.py
+    torchrun --nproc_per_node=8 tests/distributed/a2a_qk.py
 
 Compares group.all_to_all_single_4d_qk(x, w, cos, sin, ...) against a reference that applies the same
 fp32 RMSNorm + RoPE to the source [b, s_local, n_global, d] and then the reference permute+all_to_all
