@@ -20,7 +20,7 @@ pip install -e . --no-build-isolation
 | --- | --- | --- |
 | `NVSHMEM_HOME` | yes | NVSHMEM install root; must contain `include/nvshmem.h` and `lib/cmake/nvshmem`. |
 | `FAST_ULYSSES_CUDA_ARCH` | no | Target compute capabilities, `;`-separated (e.g. `90` for H100/H200, `100` for B200, `80;90;100;120` multi-target). Default `80;90;100;120`. Building only your actual arch is much faster. |
-| `CUDACXX` / `-DCMAKE_CUDA_COMPILER` | no | Override the CUDA compiler; defaults to `/usr/local/cuda/bin/nvcc` when present. |
+| `CUDACXX` | no | Override the CUDA compiler; defaults to `/usr/local/cuda/bin/nvcc` when present. |
 
 Notes:
 

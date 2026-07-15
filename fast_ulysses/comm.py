@@ -124,7 +124,7 @@ class UlyssesGroup:
         seen runs a local micro-benchmark and caches the launch config; every rank MUST issue the
         SAME (shape, mode, use_tma) call sequence (the nvshmem symmetric alloc + cross-rank barrier
         are collective; all ranks miss the same entry on the first call together). Sync AND async
-        calls count in that sequence (both run on the same comm stream).
+        calls count in that sequence (both advance the same per-group barrier epoch).
 
         use_tma (None=auto / True / False): None=auto -> sm<9 uses non-TMA; sm90+ micro-benchmarks
         BOTH paths on the first call for this shape and caches the faster (runtime path selection,

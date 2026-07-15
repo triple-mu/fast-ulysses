@@ -54,8 +54,8 @@ itself collective).
   best launch config (the auto path additionally compares both kernels) and caches it (later hits
   add zero collective overhead). Under strict SPMD all ranks miss the same entry on the first call
   together, hence hang-free.
-- Sync and async calls **both count** in the rank-uniform call sequence (they share the comm
-  stream).
+- Sync and async calls **both count** in the rank-uniform call sequence (both advance the same
+  per-group barrier epoch; sync calls run on the caller's stream, async on the comm stream).
 
 ## `all_to_all_single_4d_async(x, *, mode=0, tag="", use_tma=None) -> AsyncA2AHandle`
 

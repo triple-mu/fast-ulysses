@@ -18,7 +18,7 @@ Ulysses sequence parallelism (DeepSpeed-Ulysses) shards very long sequences acro
 
 - **Two kernel paths, picked at runtime**:
   - **TMA path** (sm90+, Hopper/Blackwell): `cp.async.bulk` (the TMA copy engine) moves the data with a software pipeline. TMA copies run on the copy engine rather than the SMs, **occupying almost no SM**, leaving compute capacity for communication/computation overlap.
-  - **non-TMA path**: SM-resident vectorized direct writes (512 threads keeping remote writes in flight); the fallback for sm80 (A100) and anything without TMA.
+  - **non-TMA path**: SM-resident vectorized direct writes with a per-shape autotuned launch config; the fallback for sm80 (A100) and anything without TMA.
   - With `use_tma=None` (auto), **both paths are micro-benchmarked on the actual hardware at first call and the faster one is cached** (replacing any offline static table); it can also be forced per call (see the `use_tma` tri-state in [docs/API.md](docs/API.md)).
 - **Fused QK RMSNorm + RoPE**: standalone single-GPU ops (`rms_norm` / `rope` / `norm_rope`) plus an all-to-all variant that fuses the q/k norm+rope into the scatter kernel itself — see [docs/API.md](docs/API.md).
 - **Single-node NVLink P2P**, `world_size ∈ [1, 8]` (odd sizes such as 3/5/6/7 included).
