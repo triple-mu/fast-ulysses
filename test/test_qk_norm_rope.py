@@ -65,11 +65,29 @@ def main():
 
             cases = []
             # rms_norm
-            cases.append(("rms per_head", fast_ulysses.rms_norm(x, w_ph, mode="per_head", eps=eps), rms_ref_f32(x, w_ph, "per_head", eps).to(dtype)))
-            cases.append(("rms cross_head", fast_ulysses.rms_norm(x, w_ch, mode="cross_head", eps=eps), rms_ref_f32(x, w_ch, "cross_head", eps).to(dtype)))
+            cases.append(
+                (
+                    "rms per_head",
+                    fast_ulysses.rms_norm(x, w_ph, mode="per_head", eps=eps),
+                    rms_ref_f32(x, w_ph, "per_head", eps).to(dtype),
+                )
+            )
+            cases.append(
+                (
+                    "rms cross_head",
+                    fast_ulysses.rms_norm(x, w_ch, mode="cross_head", eps=eps),
+                    rms_ref_f32(x, w_ch, "cross_head", eps).to(dtype),
+                )
+            )
             # rope
             for il in (True, False):
-                cases.append((f"rope il={il}", fast_ulysses.rope(x, cos, sin, interleaved=il), rope_ref_f32(x.float(), cos, sin, il).to(dtype)))
+                cases.append(
+                    (
+                        f"rope il={il}",
+                        fast_ulysses.rope(x, cos, sin, interleaved=il),
+                        rope_ref_f32(x.float(), cos, sin, il).to(dtype),
+                    )
+                )
             # norm_rope (fused; fp32 throughout, round once)
             for mode, w in (("per_head", w_ph), ("cross_head", w_ch)):
                 for il in (True, False):
@@ -81,7 +99,9 @@ def main():
                 md = maxdiff(got, ref)
                 ok = torch.allclose(got.float(), ref.float(), atol=atol[dtype], rtol=rtol[dtype])
                 fails += not ok
-                print(f"{'OK ' if ok else 'FAIL'} {str(dtype).split('.')[-1]:>8} n={n:>2} {name:<24} maxdiff={md:.4e}")
+                print(
+                    f"{'OK ' if ok else 'FAIL'} {str(dtype).split('.')[-1]:>8} n={n:>2} {name:<24} maxdiff={md:.4e}"
+                )
     print("ALL PASS" if fails == 0 else f"FAILED {fails} cases")
     raise SystemExit(1 if fails else 0)
 

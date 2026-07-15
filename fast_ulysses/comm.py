@@ -26,10 +26,10 @@ class AsyncA2AHandle:
 
 class UlyssesGroup:
     def __init__(
-            self,
-            process_group: Optional[dist.ProcessGroup] = None,
-            device: Optional[torch.device] = None,
-            initial_pool_bytes: int = 2 << 30,
+        self,
+        process_group: Optional[dist.ProcessGroup] = None,
+        device: Optional[torch.device] = None,
+        initial_pool_bytes: int = 2 << 30,
     ) -> None:
         pg = process_group if process_group is not None else dist.group.WORLD
         self.pg = pg
@@ -96,12 +96,12 @@ class UlyssesGroup:
         return out, ev_done
 
     def all_to_all_single_4d(
-            self,
-            x: torch.Tensor,
-            *,
-            mode: int = 0,
-            tag: str = "",
-            use_tma: bool | None = None,
+        self,
+        x: torch.Tensor,
+        *,
+        mode: int = 0,
+        tag: str = "",
+        use_tma: bool | None = None,
     ) -> torch.Tensor:
         # COLLECTIVE SEMANTICS: s/n must divide world_size (uniform). The first (shape, mode, use_tma)
         # seen runs a local micro-benchmark and caches the launch config; every rank MUST issue the SAME
@@ -121,12 +121,12 @@ class UlyssesGroup:
         )
 
     def all_to_all_single_4d_async(
-            self,
-            x: torch.Tensor,
-            *,
-            mode: int = 0,
-            tag: str = "",
-            use_tma: bool | None = None,
+        self,
+        x: torch.Tensor,
+        *,
+        mode: int = 0,
+        tag: str = "",
+        use_tma: bool | None = None,
     ) -> AsyncA2AHandle:
         # Async variant: launches on the group's comm stream and returns immediately; kernels submitted
         # to the caller's stream afterwards overlap with the a2a until handle.wait(). Collective
@@ -142,24 +142,22 @@ class UlyssesGroup:
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
             [x],
-            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(
-                self._group, x, mode, tag, use_tma
-            ),
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(self._group, x, mode, tag, use_tma),
         )
         return AsyncA2AHandle(out, ev_done)
 
     def all_to_all_single_4d_qk(
-            self,
-            x: torch.Tensor,
-            weight: torch.Tensor,
-            cos: torch.Tensor,
-            sin: torch.Tensor,
-            *,
-            mode: str = "cross_head",
-            interleaved: bool = True,
-            eps: float = 1e-6,
-            tag: str = "",
-            use_tma: bool | None = None,
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        mode: str = "cross_head",
+        interleaved: bool = True,
+        eps: float = 1e-6,
+        tag: str = "",
+        use_tma: bool | None = None,
     ) -> torch.Tensor:
         # mode0 Ulysses input a2a with fused source-side QK RMSNorm + RoPE (for q/k; v uses the plain op).
         # x: [b, s_local, n_global, d]; weight fp32 ([d] per_head / [n_global*d] cross_head); cos/sin fp32
@@ -170,19 +168,19 @@ class UlyssesGroup:
         )
 
     def all_to_all_single_4d_qk2(
-            self,
-            q: torch.Tensor,
-            k: torch.Tensor,
-            weight_q: torch.Tensor,
-            weight_k: torch.Tensor,
-            cos: torch.Tensor,
-            sin: torch.Tensor,
-            *,
-            mode: str = "cross_head",
-            interleaved: bool = True,
-            eps: float = 1e-6,
-            tag: str = "",
-            use_tma: bool | None = None,
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        weight_q: torch.Tensor,
+        weight_k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        mode: str = "cross_head",
+        interleaved: bool = True,
+        eps: float = 1e-6,
+        tag: str = "",
+        use_tma: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q + k in ONE collective call: two fused scatters back-to-back, then a SINGLE shared
         # quiet+fast_barrier (half the sync latency of two all_to_all_single_4d_qk calls). q/k share
@@ -190,7 +188,18 @@ class UlyssesGroup:
         # distinct buffers (tag::q / tag::k). Collective constraints are the same as the single op.
         m = {"per_head": 0, "cross_head": 1}[mode]
         oq, ok = torch.ops.fast_ulysses.all_to_all_single_4d_qk2(
-            self._group, q.contiguous(), k.contiguous(), weight_q, weight_k, cos, sin, m, interleaved, eps, tag, use_tma
+            self._group,
+            q.contiguous(),
+            k.contiguous(),
+            weight_q,
+            weight_k,
+            cos,
+            sin,
+            m,
+            interleaved,
+            eps,
+            tag,
+            use_tma,
         )
         return oq, ok
 

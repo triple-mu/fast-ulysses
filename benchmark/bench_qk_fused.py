@@ -51,7 +51,10 @@ def main():
     wk = torch.randn(n_global * d, device=dev, dtype=torch.float32)
     if rank == 0:
         print(f"# ws={ws} dtype=bf16 n_global={n_global} d={d}", flush=True)
-        print(f"{'seq_global':>10} {'a2a':>9} {'unfused':>9} {'fused':>9} {'fused/unfused':>14} {'nr_unfused':>11} {'nr_fused':>10} {'qk2':>9} {'qk2/2fused':>11}", flush=True)
+        print(
+            f"{'seq_global':>10} {'a2a':>9} {'unfused':>9} {'fused':>9} {'fused/unfused':>14} {'nr_unfused':>11} {'nr_fused':>10} {'qk2':>9} {'qk2/2fused':>11}",
+            flush=True,
+        )
 
     for s_global in (20480, 46080):  # ~480p and ~720p Wan latent token counts
         if s_global % ws:
@@ -71,10 +74,14 @@ def main():
             return group.all_to_all_single_4d(xr, mode=0, tag="u")
 
         def run_fused():
-            return group.all_to_all_single_4d_qk(x, w, cos, sin, mode="cross_head", interleaved=True, eps=eps, tag="f")
+            return group.all_to_all_single_4d_qk(
+                x, w, cos, sin, mode="cross_head", interleaved=True, eps=eps, tag="f"
+            )
 
         def run_qk2():
-            return group.all_to_all_single_4d_qk2(x, xk, w, wk, cos, sin, mode="cross_head", interleaved=True, eps=eps, tag="f2")
+            return group.all_to_all_single_4d_qk2(
+                x, xk, w, wk, cos, sin, mode="cross_head", interleaved=True, eps=eps, tag="f2"
+            )
 
         t_a = bench(run_a2a)
         t_u = bench(run_unfused)
@@ -83,11 +90,17 @@ def main():
         if rank == 0:
             sp = t_u / t_f if t_f else 0.0
             r2 = t_2 / (2 * t_f) if t_f else 0.0
-            print(f"{s_global:>10} {t_a:>9.3f} {t_u:>9.3f} {t_f:>9.3f} {sp:>13.3f}x {t_u - t_a:>11.3f} {t_f - t_a:>10.3f} {t_2:>9.3f} {r2:>10.3f}x", flush=True)
+            print(
+                f"{s_global:>10} {t_a:>9.3f} {t_u:>9.3f} {t_f:>9.3f} {sp:>13.3f}x {t_u - t_a:>11.3f} {t_f - t_a:>10.3f} {t_2:>9.3f} {r2:>10.3f}x",
+                flush=True,
+            )
         dist.barrier()
 
     if rank == 0:
-        print("# ms/iter; nr_* = norm+rope overhead over plain a2a; qk2 = q+k in one call (1 barrier)", flush=True)
+        print(
+            "# ms/iter; nr_* = norm+rope overhead over plain a2a; qk2 = q+k in one call (1 barrier)",
+            flush=True,
+        )
     group.destroy()
     dist.destroy_process_group()
 

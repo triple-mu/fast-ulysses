@@ -63,7 +63,10 @@ def main():
     hv = group.all_to_all_single_4d_async(v, mode=0, tag="av")
     oq, ok_, ov = hq.wait(), hk.wait(), hv.wait()
     torch.cuda.synchronize()
-    check("3 in-flight async q/k/v", torch.equal(oq, rq) and torch.equal(ok_, rk) and torch.equal(ov, rv))
+    check(
+        "3 in-flight async q/k/v",
+        torch.equal(oq, rq) and torch.equal(ok_, rk) and torch.equal(ov, rv),
+    )
 
     # 3) mode1 roundtrip through async: a2a(mode0) then async a2a(mode1) restores the input
     y = group.all_to_all_single_4d(x, mode=0, tag="rt0")
