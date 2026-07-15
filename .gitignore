@@ -1,4 +1,4 @@
-# 构建产物 / 临时目录（本包是独立可分发工程，源外的一律不入库）
+# Build artifacts / temp dirs (standalone distributable package; out-of-tree files stay out of git)
 build/
 cmake-build-*/
 dist/
@@ -7,10 +7,10 @@ __pycache__/
 *.so
 *.o
 
-# vendored 第三方参考（含各自 .git），不入库
+# Vendored third-party references (each with its own .git); never committed
 3rdparty/
 
-# IDE / pytest 缓存
+# IDE / pytest caches
 .idea/
 .pytest_cache/
 

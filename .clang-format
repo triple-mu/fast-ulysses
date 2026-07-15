@@ -1,5 +1,5 @@
-# custom_ulysses_op 的 C++/CUDA 统一风格（独立、框架无关的自定义算子包）。
-# clang-format 向上查找此文件，使本包 csrc/ 下的源不受外层仓库风格影响。
+# Unified C++/CUDA style for fast_ulysses (a standalone, framework-agnostic custom-op package).
+# clang-format finds this file by upward search, keeping csrc/ independent of any outer repo style.
 Language: Cpp
 Standard: c++17
 ColumnLimit: 120
