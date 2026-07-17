@@ -4,6 +4,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <iostream>
 #include <nvshmem.h>
 #include <nvshmemx.h>
 #include <torch/torch.h>
@@ -175,11 +176,14 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
         return cfg;
     };
 
-    // Explicit path: force it. tile_n=0 is the resolve_config_tma sentinel for "no config fits the
-    // device's dynamic-smem cap" (e.g. sm_120's ~99KB) -- forced TMA must fail loudly, not corrupt.
+    // Explicit path: force it. tile_n=0 is the resolve_config_tma sentinel for "TMA infeasible": d > 256
+    // (tensormap boxDim cap) or no config fits the device's dynamic-smem cap (e.g. sm_120's ~99KB) --
+    // forced TMA must fail loudly, not corrupt.
     if (use_tma_i == 1) {
         const A2AConfig cfg = resolve_path(true);
-        TORCH_CHECK(cfg.tile_n > 0, "use_tma=True: no TMA config fits this device's dynamic-smem cap");
+        TORCH_CHECK(cfg.tile_n > 0,
+                    "use_tma=True: TMA infeasible for this shape/device (needs d <= 256 and a config that "
+                    "fits the dynamic-smem cap)");
         return {true, cfg};
     }
     if (use_tma_i == 0)
@@ -245,7 +249,14 @@ void UlyssesGroup::destroy()
 
 UlyssesGroup::~UlyssesGroup()
 {
-    destroy();
+    // No collective teardown from the destructor: destroy() calls nvshmem_free / team_destroy /
+    // hostlib_finalize, all collective, while GC / interpreter-exit timing differs across ranks --
+    // a rank destructing alone would hang the group. Leak and warn instead; explicit destroy()
+    // (the Python wrapper guards it with dist.barrier) is the supported path.
+    if (!destroyed_)
+        std::cerr << "[fast_ulysses] UlyssesGroup dropped without destroy(); leaking symmetric-heap "
+                     "resources (call group.destroy() on all ranks)"
+                  << std::endl;
 }
 
 }  // namespace ulysses

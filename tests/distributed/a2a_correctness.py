@@ -46,8 +46,10 @@ def main() -> None:
     group = UlyssesGroup(process_group=pg, initial_pool_bytes=1 << 30)
 
     b = 2
+    # d=512 exceeds the TMA tensormap boxDim cap (256): auto must fall back to non-TMA and still
+    # be bit-exact (explicit True/False stay restricted to d in {64,128} below).
     for dtype in (torch.float16, torch.bfloat16):
-        for d in (64, 128, 256):
+        for d in (64, 128, 256, 512):
             for mode in (0, 1):
                 shape = (b, 16, 4 * ws, d) if mode == 0 else (b, 16 * ws, 4, d)
                 x = torch.randn(shape, dtype=dtype, device=dev)
@@ -77,6 +79,19 @@ def main() -> None:
                             flush=True,
                         )
                     dist.barrier()
+
+    # Forcing TMA at d=512 must raise (tensormap boxDim cap), not corrupt. The check fires before any
+    # barrier/launch, so all ranks raise together and stay in lockstep.
+    if torch.cuda.get_device_capability()[0] >= 9:
+        x = torch.randn(b, 16, 4 * ws, 512, dtype=torch.bfloat16, device=dev)
+        try:
+            group.all_to_all_single_4d(x, mode=0, tag="tma_d512", use_tma=True)
+        except RuntimeError:
+            if rank == 0:
+                print(f"OK[forced-tma-d512-raises] ws={ws}", flush=True)
+        else:
+            raise AssertionError(f"use_tma=True with d=512 should raise, rank={rank}")
+        dist.barrier()
 
     # Distinct-tag non-aliasing (replaces the old a2a_frame): two concurrently-live results of the SAME
     # shape must use distinct tags and not clobber each other. Run both a2a, THEN check both -- if out_q

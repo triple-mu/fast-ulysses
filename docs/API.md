@@ -13,9 +13,9 @@ Shape conventions used throughout: `b` batch, `d` head dim, `ws = world_size`,
 
 | Parameter | Type | Meaning |
 | --- | --- | --- |
-| `process_group` | `torch.distributed.ProcessGroup` or `None` | Bootstrap process group; `None` uses `dist.group.WORLD`. |
+| `process_group` | `torch.distributed.ProcessGroup` or `None` | Bootstrap process group; `None` uses `dist.group.WORLD`. **Must span all ranks** — the NVSHMEM bootstrap is world-collective, so a subgroup raises `NotImplementedError`. |
 | `device` | `torch.device` or `None` | This rank's CUDA device; `None` uses the current device. |
-| `initial_pool_bytes` | `int` | NVSHMEM symmetric-heap reservation, default `2<<30` (2 GiB). Every collective's output buffer is carved from this pool (reused per `tag`). |
+| `initial_pool_bytes` | `int` | NVSHMEM symmetric-heap reservation, default `2<<30` (2 GiB). Every collective's output buffer is carved from this pool (reused per `tag`). NVSHMEM sizes the heap when it (re)initializes — i.e. from the first **live** group; while any group is alive, a later group's larger request may not be backed (it warns). Destroying all groups finalizes NVSHMEM, so the next group re-initializes with its own size. |
 
 Construction broadcasts the NVSHMEM unique id with `dist.broadcast`, runs `init_world`, and wraps
 the sequence in `dist.barrier`s — **all ranks must construct the group together** (construction is
@@ -42,7 +42,9 @@ itself collective).
 - `None` (auto): sm<9 → non-TMA; **sm90+ → on first sight of a shape, both paths are
   micro-benchmarked at runtime and the faster one is cached**; later calls hit the cache directly.
   This replaces any offline static table and adapts to the actual hardware.
-- `True`: force TMA (requires sm90+, otherwise a `TORCH_CHECK` error).
+- `True`: force TMA. `TORCH_CHECK` error when TMA is unavailable or infeasible: sm<9, `d > 256`
+  (tensormap boxDim cap), or no tile config fits the device's dynamic-smem cap (e.g. sm_120's
+  ~99KB). The auto path treats these cases as "non-TMA only" instead of erroring.
 - `False`: force non-TMA.
 
 **Collective hard constraints (violating them hangs the whole group)**
@@ -76,8 +78,9 @@ non-cooperative compute windows, or with a future copy-engine / SM-carveout tran
 
 ## `destroy() -> None`
 
-Releases the symmetric-heap resources (internally `dist.barrier` first, then destroy). All ranks
-must call it together.
+Releases the symmetric-heap resources (internally: drain the comm stream, `dist.barrier`, then
+destroy). All ranks must call it together. Dropping a group without calling `destroy()` leaks the
+symmetric heap (with a warning) — the teardown is collective, so it cannot run from GC.
 
 ---
 

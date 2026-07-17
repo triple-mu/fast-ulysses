@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Callable
 
 import torch
 import torch.distributed as dist
+
+# NVSHMEM reads NVSHMEM_SYMMETRIC_SIZE when it (re)initializes -- i.e. when the first LIVE group is
+# constructed (destroying the last group finalizes NVSHMEM, so the next group re-initializes with a
+# fresh size). While any group is alive the heap keeps its size; track that to warn instead of
+# failing at some later nvshmem_align. destroy() keeps the count in step with the C++ group count.
+_live_groups = 0
+_heap_bytes = 0
 
 
 class AsyncA2AHandle:
@@ -51,13 +59,31 @@ class UlyssesGroup:
         self.rank = dist.get_rank(pg)
         self.world_size = dist.get_world_size(pg)
         self.peer_global_ranks = list(dist.get_process_group_ranks(pg))
+        if self.world_size != dist.get_world_size():
+            # The uid broadcast below runs on WORLD and nvshmem_team_split_strided is a
+            # world-collective -- a subgroup-only construction would hang, so reject it up front.
+            raise NotImplementedError(
+                "process_group must span all ranks (NVSHMEM bootstrap is world-collective); "
+                f"got a subgroup of {self.world_size}/{dist.get_world_size()} ranks"
+            )
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
         self.device = device
         torch.cuda.set_device(device)
 
-        # Reservation must be set via env before NVSHMEM init.
-        os.environ["NVSHMEM_SYMMETRIC_SIZE"] = str(int(initial_pool_bytes))
+        # Reservation must be set via env before NVSHMEM init; it takes effect only when NVSHMEM
+        # (re)initializes, which happens while no other group is alive.
+        global _live_groups, _heap_bytes
+        if _live_groups == 0:
+            os.environ["NVSHMEM_SYMMETRIC_SIZE"] = str(int(initial_pool_bytes))
+            _heap_bytes = int(initial_pool_bytes)
+        elif int(initial_pool_bytes) > _heap_bytes:
+            warnings.warn(
+                f"initial_pool_bytes={int(initial_pool_bytes)} exceeds the NVSHMEM heap sized by "
+                f"the first live UlyssesGroup ({_heap_bytes} B); the extra bytes may not be backed "
+                "(size the first group's pool for all concurrently-live groups)",
+                stacklevel=2,
+            )
         # P2P direct writes do not need NVLS (NVLink SHARP multicast); on some nodes its
         # multicast heap mapping fails and segfaults, so disable by default for cross-node
         # robustness (overridable via env).
@@ -84,6 +110,8 @@ class UlyssesGroup:
             int(initial_pool_bytes),
         )
         dist.barrier(group=pg)
+        _live_groups += 1
+        self._destroyed = False
 
         # Dedicated high-priority stream for the ASYNC collectives (sync calls run directly on the
         # caller's stream -- routing them through here costs two event hops per call, ~0.27 ms
@@ -120,7 +148,7 @@ class UlyssesGroup:
     ) -> torch.Tensor:
         """Uniform 4D all-to-all: mode0 scatters heads / gathers sequence; mode1 is its inverse.
 
-        COLLECTIVE SEMANTICS: s/n must divide world_size (uniform). The first (shape, mode, use_tma)
+        COLLECTIVE SEMANTICS: s/n must be divisible by world_size (uniform). The first (shape, mode, use_tma)
         seen runs a local micro-benchmark and caches the launch config; every rank MUST issue the
         SAME (shape, mode, use_tma) call sequence (the nvshmem symmetric alloc + cross-rank barrier
         are collective; all ranks miss the same entry on the first call together). Sync AND async
@@ -230,5 +258,13 @@ class UlyssesGroup:
 
     def destroy(self) -> None:
         """Release the symmetric-heap resources (collective: ALL ranks must call together)."""
+        if self._destroyed:
+            return
+        # Drain the comm stream first: dist.barrier only syncs the caller's current stream, so an
+        # unwaited async a2a could still be writing the buffers nvshmem_free is about to release.
+        self._comm_stream.synchronize()
         dist.barrier(group=self.pg)
         self._group.destroy()
+        self._destroyed = True
+        global _live_groups
+        _live_groups -= 1

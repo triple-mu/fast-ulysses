@@ -25,6 +25,19 @@ RTOL = {torch.float16: 2e-3, torch.bfloat16: 1.6e-2}
 
 DTYPES = [torch.float16, torch.bfloat16]
 N_HEADS = [8, 40]
+# d sweeps the supported power-of-two range up to the documented max 1024 (warp-reduction and
+# shared-memory paths have size-dependent branches, so the boundaries matter).
+D_HEAD = [64, 128, 256, 512, 1024]
+
+
+def _skip_if_cross_head_rope_exceeds_smem(mode, n, d):
+    """cross_head + RoPE stages n*d fp32 in dynamic smem; skip combos over this device's cap."""
+    if mode != "cross_head":
+        return
+    props = torch.cuda.get_device_properties(0)
+    cap = getattr(props, "shared_memory_per_block_optin", 48 * 1024) - 128  # 128B static smem
+    if n * d * 4 > cap:
+        pytest.skip(f"cross_head rope needs {n * d * 4} B smem > device cap {cap} B")
 
 
 def rms_ref_f32(x, w, mode, eps):  # returns fp32
@@ -52,9 +65,9 @@ def rope_ref_f32(xf, cos, sin, interleaved):  # xf fp32 in, fp32 out
     return torch.cat([o1, o2], dim=-1)
 
 
-def _make_inputs(dtype, n):
+def _make_inputs(dtype, n, d=128):
     torch.manual_seed(0)
-    b, s, d = 2, 16, 128
+    b, s = 2, 16
     dev = torch.device("cuda")
     x = torch.randn(b, s, n, d, device=dev, dtype=dtype)
     theta = torch.randn(s, d // 2, device=dev, dtype=torch.float32)
@@ -75,9 +88,10 @@ def _assert_close(got, ref, dtype):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("n", N_HEADS)
+@pytest.mark.parametrize("d", D_HEAD)
 @pytest.mark.parametrize("mode", ["per_head", "cross_head"])
-def test_rms_norm(dtype, n, mode):
-    x, _, _, weights = _make_inputs(dtype, n)
+def test_rms_norm(dtype, n, d, mode):
+    x, _, _, weights = _make_inputs(dtype, n, d)
     got = fast_ulysses.rms_norm(x, weights[mode], mode=mode, eps=EPS)
     ref = rms_ref_f32(x, weights[mode], mode, EPS).to(dtype)
     _assert_close(got, ref, dtype)
@@ -85,9 +99,10 @@ def test_rms_norm(dtype, n, mode):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("n", N_HEADS)
+@pytest.mark.parametrize("d", D_HEAD)
 @pytest.mark.parametrize("interleaved", [True, False])
-def test_rope(dtype, n, interleaved):
-    x, cos, sin, _ = _make_inputs(dtype, n)
+def test_rope(dtype, n, d, interleaved):
+    x, cos, sin, _ = _make_inputs(dtype, n, d)
     got = fast_ulysses.rope(x, cos, sin, interleaved=interleaved)
     ref = rope_ref_f32(x.float(), cos, sin, interleaved).to(dtype)
     _assert_close(got, ref, dtype)
@@ -95,10 +110,12 @@ def test_rope(dtype, n, interleaved):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("n", N_HEADS)
+@pytest.mark.parametrize("d", D_HEAD)
 @pytest.mark.parametrize("mode", ["per_head", "cross_head"])
 @pytest.mark.parametrize("interleaved", [True, False])
-def test_norm_rope(dtype, n, mode, interleaved):
-    x, cos, sin, weights = _make_inputs(dtype, n)
+def test_norm_rope(dtype, n, d, mode, interleaved):
+    _skip_if_cross_head_rope_exceeds_smem(mode, n, d)
+    x, cos, sin, weights = _make_inputs(dtype, n, d)
     got = fast_ulysses.norm_rope(
         x, weights[mode], cos, sin, mode=mode, interleaved=interleaved, eps=EPS
     )

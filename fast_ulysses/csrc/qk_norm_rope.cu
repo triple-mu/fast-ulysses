@@ -5,6 +5,7 @@
 #include "ulysses_common.cuh"
 #include <ATen/Dispatch.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <algorithm>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 
@@ -171,9 +172,36 @@ static void launch_typed(const scalar_t* x,
 {
     if (mode == 1) {
         // cross-head always normalizes (reduce over n*d). Pure cross-head RoPE is meaningless.
-        const int  threads = 256;
-        const long blocks  = static_cast<long>(b) * seq;
-        const int  smem    = do_rope ? n * d * static_cast<int>(sizeof(float)) : 0;
+        const int     threads = 256;
+        const long    blocks  = static_cast<long>(b) * seq;
+        const int64_t smem =
+            do_rope ? static_cast<int64_t>(n) * d * sizeof(float) : 0;  // int64: n*d*4 can overflow int
+        if (do_rope) {
+            // The n*d fp32 staging exceeds the default 48KB dynamic-smem limit for larger n*d: opt the
+            // two RoPE instantiations in up to the device cap (once per scalar_t), fail loudly beyond it.
+            // The settable dynamic max is the opt-in cap MINUS the kernel's static smem (wsum[32]).
+            static const int smem_cap = [] {
+                int dev = 0, m = 0;
+                ULYSSES_CUDA_CHECK(cudaGetDevice(&dev));
+                ULYSSES_CUDA_CHECK(cudaDeviceGetAttribute(&m, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev));
+                int cap = m;
+                for (const void* fn : {reinterpret_cast<const void*>(cross_head_kernel<scalar_t, true, true>),
+                                       reinterpret_cast<const void*>(cross_head_kernel<scalar_t, true, false>)}) {
+                    cudaFuncAttributes fa{};
+                    ULYSSES_CUDA_CHECK(cudaFuncGetAttributes(&fa, fn));
+                    const int dyn = m - static_cast<int>(fa.sharedSizeBytes);
+                    ULYSSES_CUDA_CHECK(cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, dyn));
+                    cap = std::min(cap, dyn);
+                }
+                return cap;
+            }();
+            TORCH_CHECK(smem <= smem_cap,
+                        "cross_head norm+rope stages n*d fp32 in shared memory: needs ",
+                        smem,
+                        " B > device cap ",
+                        smem_cap,
+                        " B (n*d too large)");
+        }
         if (do_rope && interleaved)
             cross_head_kernel<scalar_t, true, true>
                 <<<blocks, threads, smem, stream>>>(x, out, weight, cosb, sinb, seq, n, d, eps);
@@ -302,11 +330,20 @@ at::Tensor rms_norm(at::Tensor x, at::Tensor weight, int64_t mode, double eps)
     return out;
 }
 
+// Kernels index cos/sin by row up to seq-1 -- an under-sized table is a GPU OOB read.
+static void check_cos_sin(const at::Tensor& cos, const at::Tensor& sin, int seq, int d)
+{
+    TORCH_CHECK(cos.size(-1) == d / 2 && sin.size(-1) == d / 2, "cos/sin last dim must be d/2");
+    TORCH_CHECK(cos.numel() >= static_cast<int64_t>(seq) * (d / 2)
+                    && sin.numel() >= static_cast<int64_t>(seq) * (d / 2),
+                "cos/sin must cover seq rows: numel >= seq*d/2");
+}
+
 at::Tensor rope(at::Tensor x, at::Tensor cos, at::Tensor sin, bool interleaved)
 {
     int b, seq, n, d;
     check_x(x, b, seq, n, d);
-    TORCH_CHECK(cos.size(-1) == d / 2 && sin.size(-1) == d / 2, "cos/sin last dim must be d/2");
+    check_cos_sin(cos, sin, seq, d);
     x                             = x.contiguous();
     at::Tensor                out = at::empty_like(x);
     const at::cuda::CUDAGuard guard(x.device());
@@ -336,7 +373,7 @@ norm_rope(at::Tensor x, at::Tensor weight, at::Tensor cos, at::Tensor sin, int64
     check_x(x, b, seq, n, d);
     TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 (per-head) or 1 (cross-head)");
     TORCH_CHECK(weight.numel() == (mode == 0 ? d : n * d), "weight numel mismatch for the chosen mode");
-    TORCH_CHECK(cos.size(-1) == d / 2 && sin.size(-1) == d / 2, "cos/sin last dim must be d/2");
+    check_cos_sin(cos, sin, seq, d);
     x                             = x.contiguous();
     at::Tensor                out = at::empty_like(x);
     const at::cuda::CUDAGuard guard(x.device());

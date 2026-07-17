@@ -2,8 +2,9 @@
 
 Each worker under tests/distributed/ is a standalone torchrun script and can also be run directly:
     torchrun --nproc_per_node=8 tests/distributed/a2a_correctness.py
-Needs >=2 GPUs (skipped otherwise). FAST_ULYSSES_TEST_NPROC overrides the process count, e.g. to
-exercise odd world sizes.
+Needs >=2 GPUs (skipped otherwise). By default each worker runs at min(ngpu, 8) processes plus, when
+>=3 GPUs are present, an odd world size (different kernel template instantiations).
+FAST_ULYSSES_TEST_NPROC overrides the process count list with a single value.
 """
 
 from __future__ import annotations
@@ -23,12 +24,23 @@ _DISTRIBUTED = Path(__file__).parent / "distributed"
 pytestmark = pytest.mark.multigpu
 
 
-@pytest.mark.parametrize("worker", ["a2a_correctness.py", "a2a_async.py", "a2a_qk.py"])
-def test_multigpu_worker(worker):
+def _nprocs() -> list[int]:
+    env = os.environ.get("FAST_ULYSSES_TEST_NPROC")
+    if env:
+        return [int(env)]
     ngpu = torch.cuda.device_count()
-    if ngpu < 2:
-        pytest.skip(f"needs >=2 GPUs, found {ngpu}")
-    nproc = int(os.environ.get("FAST_ULYSSES_TEST_NPROC", min(ngpu, 8)))
+    out = {min(max(ngpu, 2), 8)}
+    if ngpu >= 3:
+        out.add(3)  # odd world size: exercises the odd-WS launch_ws template instantiations
+    return sorted(out)
+
+
+@pytest.mark.parametrize("nproc", _nprocs())
+@pytest.mark.parametrize("worker", ["a2a_correctness.py", "a2a_async.py", "a2a_qk.py"])
+def test_multigpu_worker(worker, nproc):
+    ngpu = torch.cuda.device_count()
+    if ngpu < max(nproc, 2):
+        pytest.skip(f"needs >={max(nproc, 2)} GPUs, found {ngpu}")
     proc = subprocess.run(
         [
             sys.executable,

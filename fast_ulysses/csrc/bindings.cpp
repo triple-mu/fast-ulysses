@@ -124,6 +124,9 @@ void check_qk_args(const at::Tensor& input,
     TORCH_CHECK(cos.is_cuda() && cos.scalar_type() == at::kFloat && cos.is_contiguous() && cos.size(-1) == d / 2
                     && sin.is_cuda() && sin.scalar_type() == at::kFloat && sin.is_contiguous() && sin.size(-1) == d / 2,
                 "cos/sin must be contiguous fp32 with last dim d/2");
+    // Kernels index cos/sin by row up to s_local-1 -- an under-sized table is a GPU OOB read.
+    TORCH_CHECK(cos.numel() >= static_cast<int64_t>(x1) * (d / 2) && sin.numel() >= static_cast<int64_t>(x1) * (d / 2),
+                "cos/sin must cover s_local rows: numel >= s_local*d/2");
     dims.b        = b;
     dims.d        = d;
     dims.s_local  = x1;
@@ -253,8 +256,8 @@ std::vector<at::Tensor> all_to_all_single_4d_qk2(const c10::intrusive_ptr<Ulysse
     k            = k.contiguous();
     const int ws = static_cast<int>(group->world_size());
     TORCH_CHECK(ws >= 1 && ws <= 8, "world_size must be in [1, 8] (single-node NVLink), got ", ws);
-    TORCH_CHECK(q.sizes() == k.sizes() && q.scalar_type() == k.scalar_type(),
-                "q and k must have the same shape and dtype");
+    TORCH_CHECK(k.is_cuda() && q.sizes() == k.sizes() && q.scalar_type() == k.scalar_type(),
+                "k must be a CUDA tensor with the same shape and dtype as q");
     Ulysses4DDims dims;
     check_qk_args(q, weight_q, cos, sin, norm_mode, ws, dims);
     TORCH_CHECK(weight_k.is_cuda() && weight_k.scalar_type() == at::kFloat && weight_k.is_contiguous()
