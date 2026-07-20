@@ -17,7 +17,7 @@ import torch.distributed as dist
 from fast_ulysses import UlyssesGroup
 
 S_GLOBAL, H, D = 75600, 40, 128  # Wan2.1 14B 720p/81f
-K, N = 5120, 5120                # to_q GEMM: [S_GLOBAL/ws, K] x [K, N]
+K, N = 5120, 5120  # to_q GEMM: [S_GLOBAL/ws, K] x [K, N]
 GEMMS = 3
 ITERS = 30
 

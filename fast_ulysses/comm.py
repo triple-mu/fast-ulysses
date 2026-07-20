@@ -215,7 +215,9 @@ class UlyssesGroup:
         call sequence; sync and async calls advance the same barrier epoch), except
         there is no autotune micro-benchmark on first call.
         """
-        return torch.ops.fast_ulysses.all_to_all_single_4d_ce(self._group, x.contiguous(), mode, tag)
+        return torch.ops.fast_ulysses.all_to_all_single_4d_ce(
+            self._group, x.contiguous(), mode, tag
+        )
 
     def all_to_all_single_4d_ce_async(
         self,

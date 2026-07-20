@@ -22,11 +22,8 @@ namespace {
 
 // Shared validation + dims for the uniform (non-fused) 4D a2a entry points. The input
 // must already be contiguous.
-void check_uniform_args(const at::Tensor&     input,
-                        int64_t               mode,
-                        int                   ws,
-                        Ulysses4DDims&        dims,
-                        std::vector<int64_t>& out_shape)
+void check_uniform_args(
+    const at::Tensor& input, int64_t mode, int ws, Ulysses4DDims& dims, std::vector<int64_t>& out_shape)
 {
     TORCH_CHECK(input.is_cuda() && input.dim() == 4, "input must be a 4D CUDA tensor");
     TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
@@ -103,10 +100,8 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
 // launch config, no autotune. This is the third path next to the SM scatter and TMA: pick
 // it when the a2a must overlap concurrent compute (the kernel paths cannot get an SM block
 // slot while e.g. nvjet GEMMs hold them all).
-at::Tensor all_to_all_single_4d_ce(const c10::intrusive_ptr<UlyssesGroup>& group,
-                                   at::Tensor                              input,
-                                   int64_t                                 mode,
-                                   std::string                             tag)
+at::Tensor
+all_to_all_single_4d_ce(const c10::intrusive_ptr<UlyssesGroup>& group, at::Tensor input, int64_t mode, std::string tag)
 {
     input        = input.contiguous();
     const int ws = static_cast<int>(group->world_size());
@@ -159,7 +154,6 @@ TORCH_LIBRARY(fast_ulysses, m)
     m.def("all_to_all_single_4d_ce(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, str tag) -> Tensor");
     m.impl("all_to_all_single_4d_ce", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d_ce);
-
 }
 
 // Python `import _C` needs PyInit__C; TORCH_LIBRARY already registered at dlopen time.
