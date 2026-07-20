@@ -19,19 +19,19 @@ int64_t nvshmem_uniqueid_nbytes()
     return static_cast<int64_t>(sizeof(nvshmemx_uniqueid_t));
 }
 
-at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
-                                at::Tensor                              input,
-                                int64_t                                 mode,
-                                std::string                             tag,
-                                c10::optional<bool>                     use_tma)
+namespace {
+
+// Shared validation + dims for the uniform (non-fused) 4D a2a entry points. The input
+// must already be contiguous.
+void check_uniform_args(const at::Tensor&     input,
+                        int64_t               mode,
+                        int                   ws,
+                        Ulysses4DDims&        dims,
+                        std::vector<int64_t>& out_shape)
 {
     TORCH_CHECK(input.is_cuda() && input.dim() == 4, "input must be a 4D CUDA tensor");
     TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
                 "dtype must be float16 or bfloat16");
-    input        = input.contiguous();
-    const int ws = static_cast<int>(group->world_size());
-    TORCH_CHECK(ws >= 1 && ws <= 8, "world_size must be in [1, 8] (single-node NVLink), got ", ws);
-    const int me   = static_cast<int>(group->rank());
     const int b    = static_cast<int>(input.size(0));
     const int x1   = static_cast<int>(input.size(1));
     const int x2   = static_cast<int>(input.size(2));
@@ -39,16 +39,8 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
     const int elem = static_cast<int>(input.element_size());
     TORCH_CHECK((static_cast<int64_t>(d) * elem) % 16 == 0, "d*elem_size must be 16B-aligned");
     TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 or 1");
-
-    const at::cuda::CUDAGuard guard(input.device());
-    cudaStream_t              stream = at::cuda::getCurrentCUDAStream();
-
-    // ---- Uniform path (s/n divisible by world_size) ----
-    Ulysses4DDims dims;
-    dims.b    = b;
-    dims.d    = d;
-    dims.rank = me;
-    std::vector<int64_t> out_shape;
+    dims.b = b;
+    dims.d = d;
     if (mode == 0) {
         TORCH_CHECK(x2 % ws == 0, "n_global must be divisible by world_size");
         dims.s_local  = x1;
@@ -65,6 +57,27 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
         dims.n_global = x2 * ws;
         out_shape     = {b, dims.s_local, dims.n_global, d};
     }
+}
+
+}  // namespace
+
+at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
+                                at::Tensor                              input,
+                                int64_t                                 mode,
+                                std::string                             tag,
+                                c10::optional<bool>                     use_tma)
+{
+    input        = input.contiguous();
+    const int ws = static_cast<int>(group->world_size());
+    TORCH_CHECK(ws >= 1 && ws <= 8, "world_size must be in [1, 8] (single-node NVLink), got ", ws);
+    Ulysses4DDims        dims;
+    std::vector<int64_t> out_shape;
+    check_uniform_args(input, mode, ws, dims, out_shape);
+    dims.rank      = static_cast<int>(group->rank());
+    const int elem = static_cast<int>(input.element_size());
+
+    const at::cuda::CUDAGuard guard(input.device());
+    cudaStream_t              stream = at::cuda::getCurrentCUDAStream();
 
     const auto& buf = group->pool().acquire(out_shape, input.scalar_type(), tag);
     // Tri-state use_tma: -1 auto / 0 non-TMA / 1 TMA. resolve_config picks the path (auto -> runtime-faster
@@ -82,6 +95,44 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
     ULYSSES_CUDA_CHECK(cudaGetLastError());  // catch an a2a kernel launch failure
     nvshmemx_quiet_on_stream(stream);        // complete this rank's P2P writes (globally visible)
     group->fast_barrier(stream);             // custom NVLink flag barrier (cross-rank sync)
+    return buf.view;
+}
+
+// CE (copy-engine) transfer path: same collective semantics, layouts, tag-scoped output
+// buffers and barrier epochs as all_to_all_single_4d, but the data movement is a per-peer
+// cudaMemcpy2DAsync fan-out on DMA engines (see all_to_all_ce.cu) -- zero SM usage, no
+// launch config, no autotune. This is the third path next to the SM scatter and TMA: pick
+// it when the a2a must overlap concurrent compute (the kernel paths cannot get an SM block
+// slot while e.g. nvjet GEMMs hold them all).
+at::Tensor all_to_all_single_4d_ce(const c10::intrusive_ptr<UlyssesGroup>& group,
+                                   at::Tensor                              input,
+                                   int64_t                                 mode,
+                                   std::string                             tag)
+{
+    input        = input.contiguous();
+    const int ws = static_cast<int>(group->world_size());
+    TORCH_CHECK(ws >= 1 && ws <= 8, "world_size must be in [1, 8] (single-node NVLink), got ", ws);
+    Ulysses4DDims        dims;
+    std::vector<int64_t> out_shape;
+    check_uniform_args(input, mode, ws, dims, out_shape);
+    dims.rank = static_cast<int>(group->rank());
+
+    const at::cuda::CUDAGuard guard(input.device());
+    cudaStream_t              stream = at::cuda::getCurrentCUDAStream();
+
+    const auto& buf = group->pool().acquire(out_shape, input.scalar_type(), tag);
+    launch_a2a_ce(input.data_ptr(),
+                  buf.peer_ptrs,
+                  dims,
+                  static_cast<int>(mode),
+                  static_cast<int>(input.element_size()),
+                  group->ce_resources(),
+                  stream);
+    // No nvshmemx_quiet: the transfers are CE memcpy operations, not NVSHMEM proxy writes.
+    // Their completion is already joined onto `stream` inside launch_a2a_ce (stream-ordered
+    // completion of a P2P memcpy implies global visibility -- the same contract NVSHMEM's
+    // own host-issued P2P puts rely on), so the flag barrier can publish directly.
+    group->fast_barrier(stream);
     return buf.view;
 }
 
@@ -296,6 +347,11 @@ TORCH_LIBRARY(fast_ulysses, m)
     m.def("all_to_all_single_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, str tag, bool? use_tma=None) -> Tensor");
     m.impl("all_to_all_single_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d);
+
+    // CE (copy-engine) transfer path: zero-SM DMA fan-out, overlaps concurrent compute.
+    m.def("all_to_all_single_4d_ce(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
+          "Tensor input, int mode, str tag) -> Tensor");
+    m.impl("all_to_all_single_4d_ce", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d_ce);
 
     // Standalone fused QK RMSNorm / RoPE building blocks (no group; single-GPU elementwise).
     m.def("rms_norm(Tensor x, Tensor weight, int mode, float eps) -> Tensor");

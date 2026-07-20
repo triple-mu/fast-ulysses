@@ -74,7 +74,35 @@ dependency forces the comm-stream barriers to complete first.
 **Overlap in practice (measured on 8×H200)**: the direct-write scatter is an SM-resident large
 grid; cooperative-launch GEMMs (e.g. cuBLAS nvjet) release no SM slots while running, so the a2a
 can only wait for them to drain (nsys shows zero overlap). The async API pays off in
-non-cooperative compute windows, or with a future copy-engine / SM-carveout transfer path.
+non-cooperative compute windows — or use the CE path below, which overlaps by construction.
+
+## `all_to_all_single_4d_ce(x, *, mode=0, tag="") -> Tensor`
+
+CE (**copy-engine**) transfer path — the third path next to the SM scatter (`use_tma=False`) and
+TMA (`use_tma=True`). Identical collective semantics, layouts, tag-scoped output buffers and
+barrier epochs, but the transfer is a per-peer `cudaMemcpy2DAsync` fan-out on the GPU's DMA
+engines (one pitched 2D copy per `(peer, b)`; internal per-peer streams joined back with events,
+then the usual flag barrier).
+
+Why it exists: the DMA engines use **no SMs at all**, so the transfer keeps running at full NVLink
+bandwidth while compute kernels hold every SM block slot. Measured on 4×H200: 385 GB/s per peer,
+pitched rows of `n_local*d*2B` at zero throughput loss, **unaffected by a full-SM spin kernel** —
+whereas both kernel paths serialize behind nvjet GEMMs. Pair it with
+`all_to_all_single_4d_ce_async` to actually hide the a2a behind concurrent compute.
+
+Notes:
+- Path choice is explicit; the `use_tma=None` auto-tune does **not** consider CE.
+- No autotune micro-benchmark, no launch config — first calls are collective-safe by construction.
+- Per call it issues ~`world_size` memcpy launches (a few µs each): prefer the kernel paths for
+  tiny shapes or latency-bound regimes.
+- Same rank-uniform call-sequence constraint as every other collective (sync and async advance the
+  same barrier epoch).
+
+## `all_to_all_single_4d_ce_async(x, *, mode=0, tag="") -> AsyncA2AHandle`
+
+Async CE variant (same comm-stream launch and ordering constraint as
+`all_to_all_single_4d_async`). Because the transfer rides the DMA engines, the in-flight window
+overlaps concurrent GEMMs/attention instead of time-slicing with them.
 
 ## `destroy() -> None`
 

@@ -37,28 +37,44 @@ __global__ void ulysses_barrier_kernel(uint64_t* local, BarPeers peers, int ws, 
     } while (v < epoch);
 }
 
-void UlyssesGroup::fast_barrier(cudaStream_t stream)
+void UlyssesGroup::ensure_bar_init_(cudaStream_t stream)
 {
-    if (world_size_ == 1)
+    if (bar_ready_)
         return;
-    if (!bar_ready_) {
-        const auto& buf = pool_->acquire({static_cast<int64_t>(world_size_)}, at::kLong, "__ulysses_sync__");
-        bar_local_      = buf.sym_base;
-        bar_peers_      = buf.peer_ptrs;
-        ULYSSES_CUDA_CHECK(
-            cudaMemsetAsync(bar_local_, 0, world_size_ * sizeof(uint64_t), stream));  // init 0; epoch starts at 1
-        // One slow sync: ensure all ranks finish clearing before anyone writes a flag (otherwise the
-        // clear could overwrite an already-written epoch).
-        nvshmemx_barrier_on_stream(team_, stream);
-        bar_ready_ = true;
-    }
-    ++bar_epoch_;
+    const auto& buf = pool_->acquire({static_cast<int64_t>(world_size_)}, at::kLong, "__ulysses_sync__");
+    bar_local_      = buf.sym_base;
+    bar_peers_      = buf.peer_ptrs;
+    ULYSSES_CUDA_CHECK(
+        cudaMemsetAsync(bar_local_, 0, world_size_ * sizeof(uint64_t), stream));  // init 0; epoch starts at 1
+    // One slow sync: ensure all ranks finish clearing before anyone writes a flag (otherwise the
+    // clear could overwrite an already-written epoch).
+    nvshmemx_barrier_on_stream(team_, stream);
+    bar_ready_ = true;
+}
+
+void UlyssesGroup::fast_barrier_kernel_(cudaStream_t stream)
+{
     BarPeers peers;
     for (int i = 0; i < world_size_; ++i)
         peers.p[i] = bar_peers_[i];
     ulysses_barrier_kernel<<<1, 32, 0, stream>>>(
         reinterpret_cast<uint64_t*>(bar_local_), peers, world_size_, my_rank_, bar_epoch_);
     ULYSSES_CUDA_CHECK(cudaGetLastError());  // catch a barrier-kernel launch failure
+}
+
+void UlyssesGroup::fast_barrier(cudaStream_t stream)
+{
+    if (world_size_ == 1)
+        return;
+    ensure_bar_init_(stream);
+    ++bar_epoch_;
+    // NOTE (measured on 4xH200, CUDA 13.3): a cuStreamWriteValue64/WaitValue64 variant of
+    // this barrier -- attractive on paper because the CE a2a path would then never need an
+    // SM slot -- was tried and REVERTED: stream memops interfered with concurrent GEMMs
+    // (overlap hidden% dropped from +34% to -28% with WRITE_VALUE_DEFAULT and -15% with
+    // NO_MEMORY_BARRIER). The 1-block spin kernel only needs an SM slot at a kernel
+    // boundary and empirically wins under compute pressure.
+    fast_barrier_kernel_(stream);
 }
 
 int64_t UlyssesGroup::uniqueid_nints()
@@ -220,6 +236,21 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
     return {tma, tma ? cfg_t : cfg_n};
 }
 
+const CEResources& UlyssesGroup::ce_resources()
+{
+    if (!ce_ready_) {
+        ce_.streams.resize(world_size_);
+        ce_.done.resize(world_size_);
+        for (int i = 0; i < world_size_; ++i) {
+            ULYSSES_CUDA_CHECK(cudaStreamCreateWithFlags(&ce_.streams[i], cudaStreamNonBlocking));
+            ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ce_.done[i], cudaEventDisableTiming));
+        }
+        ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ce_.ready, cudaEventDisableTiming));
+        ce_ready_ = true;
+    }
+    return ce_;
+}
+
 A2AConfig UlyssesGroup::resolve_config_cached(const ConfigKey& key, const std::function<A2AConfig()>& tune)
 {
     auto it = cfg_cache_.find(key);
@@ -234,6 +265,19 @@ void UlyssesGroup::destroy()
 {
     if (destroyed_)
         return;
+    if (ce_ready_) {
+        // Unchecked teardown calls, matching the rest of destroy(): the caller already
+        // guarantees quiescence (comm.py drains the comm stream + dist.barrier first).
+        for (auto s : ce_.streams) {
+            cudaStreamSynchronize(s);
+            cudaStreamDestroy(s);
+        }
+        for (auto e : ce_.done)
+            cudaEventDestroy(e);
+        cudaEventDestroy(ce_.ready);
+        ce_       = {};
+        ce_ready_ = false;
+    }
     if (pool_)
         pool_->destroy();
     if (owns_team_)

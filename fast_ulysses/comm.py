@@ -194,6 +194,50 @@ class UlyssesGroup:
         )
         return AsyncA2AHandle(out, ev_done)
 
+    def all_to_all_single_4d_ce(
+        self,
+        x: torch.Tensor,
+        *,
+        mode: int = 0,
+        tag: str = "",
+    ) -> torch.Tensor:
+        """CE (copy-engine) variant of all_to_all_single_4d: identical collective
+        semantics, layouts, tag-scoped output buffers and barrier epochs, but the
+        transfer is a per-peer cudaMemcpy2DAsync fan-out on DMA engines instead of an
+        SM/TMA kernel. It uses no SMs (flag barrier aside), so it keeps running at full
+        NVLink bandwidth while compute kernels hold every SM slot -- the
+        overlap-friendly third path next to the SM scatter (use_tma=False) and TMA
+        (use_tma=True). Path choice is explicit: the auto-tune of
+        all_to_all_single_4d does not consider CE. Per call it adds ~world_size memcpy
+        launches (a few us each), so prefer the kernel paths for tiny shapes.
+
+        Collective constraints are identical to all_to_all_single_4d (rank-uniform
+        call sequence; sync and async calls advance the same barrier epoch), except
+        there is no autotune micro-benchmark on first call.
+        """
+        return torch.ops.fast_ulysses.all_to_all_single_4d_ce(self._group, x.contiguous(), mode, tag)
+
+    def all_to_all_single_4d_ce_async(
+        self,
+        x: torch.Tensor,
+        *,
+        mode: int = 0,
+        tag: str = "",
+    ) -> AsyncA2AHandle:
+        """Async CE variant: launches on the group's comm stream and returns
+        immediately (ordering constraint as in all_to_all_single_4d_async: wait()
+        every handle before the next sync collective on the main stream). Because the
+        transfer rides the DMA engines, this is the variant whose in-flight window
+        actually overlaps concurrent GEMMs/attention instead of time-slicing with
+        them.
+        """
+        x = x.contiguous()
+        out, ev_done = self._launch_on_comm_stream(
+            [x],
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d_ce(self._group, x, mode, tag),
+        )
+        return AsyncA2AHandle(out, ev_done)
+
     def all_to_all_single_4d_qk(
         self,
         x: torch.Tensor,
