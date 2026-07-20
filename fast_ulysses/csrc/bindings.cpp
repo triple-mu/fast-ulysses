@@ -61,7 +61,8 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
                                 at::Tensor                              input,
                                 int64_t                                 mode,
                                 std::string                             tag,
-                                c10::optional<bool>                     use_tma)
+                                c10::optional<bool>                     use_tma,
+                                bool                                    barrier)
 {
     input        = input.contiguous();
     const int ws = static_cast<int>(group->world_size());
@@ -89,8 +90,13 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
     else
         launch_a2a(input.data_ptr(), buf.peer_ptrs, dims, static_cast<int>(mode), elem, pc.cfg, stream);
     ULYSSES_CUDA_CHECK(cudaGetLastError());  // catch an a2a kernel launch failure
-    nvshmemx_quiet_on_stream(stream);        // complete this rank's P2P writes (globally visible)
-    group->fast_barrier(stream);             // custom NVLink flag barrier (cross-rank sync)
+    // barrier=false defers the completion handshake to a later barrier=true call on the
+    // same stream (quiet is per-PE global, so the final quiet+barrier covers every prior
+    // deferred call's writes). Until then the output views are NOT safe to read.
+    if (barrier) {
+        nvshmemx_quiet_on_stream(stream);  // complete this rank's P2P writes (globally visible)
+        group->fast_barrier(stream);       // custom NVLink flag barrier (cross-rank sync)
+    }
     return buf.view;
 }
 
@@ -100,8 +106,8 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
 // launch config, no autotune. This is the third path next to the SM scatter and TMA: pick
 // it when the a2a must overlap concurrent compute (the kernel paths cannot get an SM block
 // slot while e.g. nvjet GEMMs hold them all).
-at::Tensor
-all_to_all_single_4d_ce(const c10::intrusive_ptr<UlyssesGroup>& group, at::Tensor input, int64_t mode, std::string tag)
+at::Tensor all_to_all_single_4d_ce(
+    const c10::intrusive_ptr<UlyssesGroup>& group, at::Tensor input, int64_t mode, std::string tag, bool barrier)
 {
     input        = input.contiguous();
     const int ws = static_cast<int>(group->world_size());
@@ -126,7 +132,11 @@ all_to_all_single_4d_ce(const c10::intrusive_ptr<UlyssesGroup>& group, at::Tenso
     // Their completion is already joined onto `stream` inside launch_a2a_ce (stream-ordered
     // completion of a P2P memcpy implies global visibility -- the same contract NVSHMEM's
     // own host-issued P2P puts rely on), so the flag barrier can publish directly.
-    group->fast_barrier(stream);
+    // barrier=false defers the handshake to a later barrier=true call on the same stream
+    // (its flag write is stream-ordered after these copies); until then the output views
+    // are NOT safe to read.
+    if (barrier)
+        group->fast_barrier(stream);
     return buf.view;
 }
 
@@ -147,12 +157,12 @@ TORCH_LIBRARY(fast_ulysses, m)
         .def_static("init_world", &ulysses::UlyssesGroup::init_world);
 
     m.def("all_to_all_single_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
-          "Tensor input, int mode, str tag, bool? use_tma=None) -> Tensor");
+          "Tensor input, int mode, str tag, bool? use_tma=None, bool barrier=True) -> Tensor");
     m.impl("all_to_all_single_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d);
 
     // CE (copy-engine) transfer path: zero-SM DMA fan-out, overlaps concurrent compute.
     m.def("all_to_all_single_4d_ce(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
-          "Tensor input, int mode, str tag) -> Tensor");
+          "Tensor input, int mode, str tag, bool barrier=True) -> Tensor");
     m.impl("all_to_all_single_4d_ce", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d_ce);
 }
 

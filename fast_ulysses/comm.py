@@ -174,6 +174,7 @@ class UlyssesGroup:
         mode: int = 0,
         tag: str = "",
         use_tma: bool | None = None,
+        barrier: bool = True,
     ) -> AsyncA2AHandle:
         """Async variant: launches on the group's comm stream and returns immediately; kernels
         submitted to the caller's stream afterwards overlap with the a2a until handle.wait().
@@ -183,14 +184,20 @@ class UlyssesGroup:
         ORDERING CONSTRAINT when mixing with sync calls: the fast_barrier epoch is one per-group
         monotonic counter, so barrier kernels must EXECUTE in submission order. wait() every async
         handle of this group before issuing the next sync collective on the main stream -- that
-        data dependency forces the comm-stream barriers to complete first. (Sync calls run directly
+        data dependency forces the comm-stream barriers to complete first.
+
+        barrier=False groups several calls under ONE handshake: only copies are issued, and a later
+        barrier=True call on the same stream publishes them all (its flag write is stream-ordered
+        after every prior deferred copy). A barrier=False handle's wait() orders only THIS rank's
+        work -- peers' writes into the local output are guaranteed only after the barrier-carrying
+        handle's wait(). All ranks must use the identical barrier pattern (epoch lockstep). (Sync calls run directly
         on the caller's stream: routing them through the comm stream costs two event hops per call,
         measured ~0.27 ms/call on H200 -- comparable to the a2a itself.)
         """
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
             [x],
-            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(self._group, x, mode, tag, use_tma),
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(self._group, x, mode, tag, use_tma, barrier),
         )
         return AsyncA2AHandle(out, ev_done)
 
@@ -225,6 +232,7 @@ class UlyssesGroup:
         *,
         mode: int = 0,
         tag: str = "",
+        barrier: bool = True,
     ) -> AsyncA2AHandle:
         """Async CE variant: launches on the group's comm stream and returns
         immediately (ordering constraint as in all_to_all_single_4d_async: wait()
@@ -236,7 +244,7 @@ class UlyssesGroup:
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
             [x],
-            lambda: torch.ops.fast_ulysses.all_to_all_single_4d_ce(self._group, x, mode, tag),
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d_ce(self._group, x, mode, tag, barrier),
         )
         return AsyncA2AHandle(out, ev_done)
 
