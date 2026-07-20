@@ -44,27 +44,6 @@ PROF_N=75600 PROF_H=40 PROF_D=128 PROF_MODE=0 torchrun --nproc_per_node=8 benchm
 # PROF_MODE=0|1 selects direction; FAST_ULYSSES_USE_TMA (unset=auto, 0=non-TMA, 1=TMA) forces the path
 ```
 
-## Fused QK ops — 8×H200, bf16, Wan `n_global=40` / `d=128`, cross-head + interleaved
-
-`benchmark/bench_qk_fused.py` (ws=8, ms/iter). `a2a` is the pure-transfer lower bound; `unfused` =
-standalone rms_norm + rope + a2a (Wan status quo); `fused` = `all_to_all_single_4d_qk`; `qk2` =
-q and k in one call (shared barrier).
-
-| seq_global | a2a | unfused | fused | fused/unfused | qk2 | qk2 vs 2×fused |
-| --- | --- | --- | --- | --- | --- | --- |
-| 20480 | 0.109 | 0.216 | 0.150 | **1.44×** | 0.281 | 0.94× |
-| 46080 | 0.199 | 0.420 | 0.288 | **1.46×** | 0.523 | 0.91× |
-
-- Fusion cuts the norm+rope overhead on top of the pure a2a from ~0.11/0.22 ms (unfused) down to
-  ~0.04/0.09 ms.
-- For Wan's real q+k pattern: `qk2` at 0.523 ms vs unfused 2×0.420 = 0.840 ms → **1.61×**.
-
-Reproduce:
-
-```bash
-torchrun --nproc_per_node=8 benchmark/bench_qk_fused.py
-```
-
 ## Profiling
 
 `benchmark/profile.py` is a minimal nsys/ncu driver (NVTX ranges, fixed shape).

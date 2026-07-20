@@ -20,7 +20,7 @@ Ulysses sequence parallelism (DeepSpeed-Ulysses) shards very long sequences acro
   - **TMA path** (sm90+, Hopper/Blackwell): `cp.async.bulk` (the TMA copy engine) moves the data with a software pipeline. TMA copies run on the copy engine rather than the SMs, **occupying almost no SM**, leaving compute capacity for communication/computation overlap.
   - **non-TMA path**: SM-resident vectorized direct writes with a per-shape autotuned launch config; the fallback for sm80 (A100) and anything without TMA.
   - With `use_tma=None` (auto), **both paths are micro-benchmarked on the actual hardware at first call and the faster one is cached** (replacing any offline static table); it can also be forced per call (see the `use_tma` tri-state in [docs/API.md](docs/API.md)).
-- **Fused QK RMSNorm + RoPE**: standalone single-GPU ops (`rms_norm` / `rope` / `norm_rope`) plus an all-to-all variant that fuses the q/k norm+rope into the scatter kernel itself — see [docs/API.md](docs/API.md).
+- **Compute-communication fusion examples** (fused QK RMSNorm + RoPE into the scatter kernel, standalone `rms_norm` / `rope` / `norm_rope` ops) live on the `examples/qk-norm-rope-fusion` branch — this branch keeps the pure all-to-all core.
 - **Single-node NVLink P2P**, `world_size ∈ [1, 8]` (odd sizes such as 3/5/6/7 included).
 - **Uniform splits**: sequence length `s` and head count `n` divisible by `world_size`.
 - **Both directions**: `mode=0` scatters heads / gathers sequence (entering attention); `mode=1` is its inverse (leaving attention).
@@ -99,10 +99,7 @@ if __name__ == "__main__":
 | `UlyssesGroup(process_group=None, device=None, initial_pool_bytes=2<<30)` | Collective group construction: NVSHMEM init + symmetric-heap pool. |
 | `group.all_to_all_single_4d(x, *, mode=0, tag="", use_tma=None)` | Uniform 4D all-to-all (mode0 / mode1). |
 | `group.all_to_all_single_4d_async(...) -> AsyncA2AHandle` | Same op on a high-priority comm stream; overlap until `handle.wait()`. |
-| `group.all_to_all_single_4d_qk(x, weight, cos, sin, ...)` | mode0 a2a with source-side fused QK RMSNorm + RoPE. |
-| `group.all_to_all_single_4d_qk2(q, k, ...)` | q + k in one collective call (shared barrier). |
 | `group.destroy()` | Release symmetric-heap resources (collective). |
-| `rms_norm` / `rope` / `norm_rope` | Standalone single-GPU fused elementwise ops. |
 
 Shapes, the `use_tma` tri-state, tag semantics, and the **collective hard constraints** (call-sequence uniformity across ranks — violating them hangs the whole group) are documented in [docs/API.md](docs/API.md).
 

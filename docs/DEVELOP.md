@@ -35,8 +35,6 @@ pytest -m "not multigpu"    # only the single-GPU op tests (fast)
 pytest -m multigpu          # only the torchrun-wrapped multi-GPU suites
 ```
 
-- `tests/test_ops.py` — single-GPU correctness of `rms_norm` / `rope` / `norm_rope` against an
-  fp32 torch reference (skips when the extension is not built or CUDA is unavailable).
 - `tests/test_multigpu.py` — launches each worker under `tests/distributed/` as a
   `torch.distributed.run` subprocess; skips below 2 GPUs. `FAST_ULYSSES_TEST_NPROC` overrides the
   process count (e.g. `=3` to exercise odd world sizes).
@@ -45,11 +43,10 @@ pytest -m multigpu          # only the torchrun-wrapped multi-GPU suites
 ```bash
 torchrun --nproc_per_node=8 tests/distributed/a2a_correctness.py
 torchrun --nproc_per_node=8 tests/distributed/a2a_async.py
-torchrun --nproc_per_node=8 tests/distributed/a2a_qk.py
 ```
 
 All a2a checks are bit-exact comparisons against `torch.distributed` references (pure data
-movement); the fused qk paths compare against an fp32 reference at ~1 dtype ULP.
+movement).
 
 ## Layout
 

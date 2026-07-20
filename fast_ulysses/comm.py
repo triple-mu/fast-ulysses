@@ -238,68 +238,6 @@ class UlyssesGroup:
         )
         return AsyncA2AHandle(out, ev_done)
 
-    def all_to_all_single_4d_qk(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        *,
-        mode: str = "cross_head",
-        interleaved: bool = True,
-        eps: float = 1e-6,
-        tag: str = "",
-        use_tma: bool | None = None,
-    ) -> torch.Tensor:
-        """Mode0 Ulysses input a2a with fused source-side QK RMSNorm + RoPE (for q/k; v uses the
-        plain op).
-
-        x: [b, s_local, n_global, d]; weight fp32 ([d] per_head / [n_global*d] cross_head);
-        cos/sin fp32 [s_local, d/2] at this rank's GLOBAL positions; interleaved=GPT-J vs NeoX.
-        Out [b, s_global, n_local, d].
-        """
-        m = {"per_head": 0, "cross_head": 1}[mode]
-        return torch.ops.fast_ulysses.all_to_all_single_4d_qk(
-            self._group, x.contiguous(), weight, cos, sin, m, interleaved, eps, tag, use_tma
-        )
-
-    def all_to_all_single_4d_qk2(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        weight_q: torch.Tensor,
-        weight_k: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        *,
-        mode: str = "cross_head",
-        interleaved: bool = True,
-        eps: float = 1e-6,
-        tag: str = "",
-        use_tma: bool | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """q + k in ONE collective call: two fused scatters back-to-back, then a SINGLE shared
-        quiet+fast_barrier (half the sync latency of two all_to_all_single_4d_qk calls). q/k share
-        shape/dtype/cos/sin; weight_q/weight_k are their respective norm weights. Outputs land in
-        distinct buffers (tag::q / tag::k). Collective constraints are the same as the single op.
-        """
-        m = {"per_head": 0, "cross_head": 1}[mode]
-        oq, ok = torch.ops.fast_ulysses.all_to_all_single_4d_qk2(
-            self._group,
-            q.contiguous(),
-            k.contiguous(),
-            weight_q,
-            weight_k,
-            cos,
-            sin,
-            m,
-            interleaved,
-            eps,
-            tag,
-            use_tma,
-        )
-        return oq, ok
-
     def destroy(self) -> None:
         """Release the symmetric-heap resources (collective: ALL ranks must call together)."""
         if self._destroyed:

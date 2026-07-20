@@ -3,7 +3,7 @@
 Everything is exposed from the top-level package:
 
 ```python
-from fast_ulysses import UlyssesGroup, AsyncA2AHandle, rms_norm, rope, norm_rope
+from fast_ulysses import UlyssesGroup, AsyncA2AHandle
 ```
 
 Shape conventions used throughout: `b` batch, `d` head dim, `ws = world_size`,
@@ -112,69 +112,6 @@ symmetric heap (with a warning) — the teardown is collective, so it cannot run
 
 ---
 
-# Fused QK RMSNorm + RoPE
-
-DiT models (e.g. Wan) apply **RMSNorm + RoPE** to q/k right before attention — memory-bound
-elementwise work. This library provides them as fused ops with semantics strictly matching Wan:
-RMSNorm accumulates in fp32, eps inside `rsqrt`, per-channel weight, no bias; RoPE covers the full
-`head_dim`. The fused `norm_rope` stays in fp32 throughout (no intermediate rounding after the
-norm), which is more accurate than two separate steps.
-
-Shared conventions: `x` is `(b, seq, n, d)`, `float16`/`bfloat16`, `d` a power of two and `≤1024`;
-`weight`/`cos`/`sin` are **fp32** CUDA tensors; `cos`/`sin` are `(seq, d/2)`, indexed by each row's
-sequence position.
-
-- `mode`: `"per_head"` (reduce over `d`, `weight` shaped `[d]`) or `"cross_head"` (reduce over the
-  whole `n*d` row, `weight` shaped `[n*d]`, one RMS scalar shared by all heads of a token — Wan's
-  default).
-- `interleaved`: `True` = GPT-J adjacent pairs `(x[2i], x[2i+1])`; `False` = NeoX half-split pairs
-  `(x[i], x[i+d/2])`.
-
-## Standalone ops (single-GPU, no group required)
-
-| API | Summary |
-| --- | --- |
-| `rms_norm(x, weight, *, mode="per_head", eps=1e-6)` | Standalone RMSNorm. |
-| `rope(x, cos, sin, *, interleaved=True)` | Standalone RoPE. |
-| `norm_rope(x, weight, cos, sin, *, mode="per_head", interleaved=True, eps=1e-6)` | Fused norm → rope (one read/write pass). |
-
-## `all_to_all_single_4d_qk(x, weight, cos, sin, *, mode="cross_head", interleaved=True, eps=1e-6, tag="", use_tma=None) -> Tensor`
-
-mode0 Ulysses input all-to-all that **fuses the q/k norm+rope into the scatter kernel itself** —
-norm+rope runs as an in-register epilogue right before the data is P2P-written to the peer GPU
-(compute-while-moving, saving the two extra full HBM read/write passes of standalone norm/rope).
-The fused kernel shares the memory-access structure of the non-TMA fast a2a kernel: grid-stride +
-`uint4` vectorization + UNROLL register-prefetch pipeline + runtime `threads×unroll×blocks`
-autotune (first call per shape micro-benchmarks and caches, with the same hang-safety argument as
-the plain a2a).
-
-- **cross-head (Wan default)**: a tiny vectorized `[b·s_local]` inv-rms pre-reduction runs first
-  (one extra read of the source, ~10% of the a2a time); the scatter then takes a pure elementwise
-  fast path (with `interleaved=True` it is fully isomorphic to the plain a2a — one `uint4` per
-  thread).
-- **per-head**: no pre-reduction; each d-row's `Σx²` is computed in-kernel by segmented warp
-  shuffles across `vecs/2` adjacent lanes (no smem, no `__syncthreads`).
-- Constraints: `d` a power of two with `d·elem_size ≥ 32B` (i.e. `d ≥ 16` for fp16/bf16); per-head
-  additionally needs `d·elem_size ≤ 1024B` (the row reduction must fit one warp).
-
-Input `(b, s_local, n_global, d)` (this rank holds all heads of its sequence shard), output
-`(b, s_global, n_local, d)`. `cos`/`sin` are `(s_local, d/2)` and must be **pre-sliced by the
-caller to this rank's global positions**. `v` takes no norm/rope — keep using
-`all_to_all_single_4d` for it. Collective constraints are the same as `all_to_all_single_4d`.
-(The fused path uses the direct-write kernel only — the TMA copy engine cannot transform data in
-flight, so `use_tma` is ignored.)
-
-## `all_to_all_single_4d_qk2(q, k, weight_q, weight_k, cos, sin, *, mode="cross_head", interleaved=True, eps=1e-6, tag="", use_tma=None) -> (Tensor, Tensor)`
-
-**q and k in one collective call**: two fused scatters back-to-back, then a **single shared
-quiet + NVLink flag barrier** (half the synchronization latency of two `all_to_all_single_4d_qk`
-calls — the barrier is pure latency, so sharing it is a net win). q/k share shape/dtype/`cos`/`sin`
-and use their own norm weights; outputs land in distinct buffers (`tag::q` / `tag::k`). Results are
-**bitwise identical** to two single fused calls. Exposed as one op so the per-group barrier count
-stays in lockstep across ranks.
-
----
-
 # Environment variables
 
 Set by `UlyssesGroup.__init__` (before NVSHMEM init):
@@ -190,6 +127,5 @@ Read by the library / build / tests:
 | Variable | Where | Meaning |
 | --- | --- | --- |
 | `FAST_ULYSSES_CUDA_ARCH` | build (`setup.py`) | Target compute capabilities, `;`-separated. Default `80;90;100;120`. |
-| `FAST_ULYSSES_QK_TUNE_VERBOSE` | runtime (fused qk ops) | `1` prints each rank's autotune choice. |
 | `FAST_ULYSSES_USE_TMA` | `benchmark/bench_uniform.py` | Unset → auto, `0` → non-TMA, else → TMA. |
 | `FAST_ULYSSES_TEST_NPROC` | `tests/test_multigpu.py` | Overrides the torchrun process count (e.g. odd world sizes). |

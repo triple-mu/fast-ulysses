@@ -36,7 +36,7 @@ def _nprocs() -> list[int]:
 
 
 @pytest.mark.parametrize("nproc", _nprocs())
-@pytest.mark.parametrize("worker", ["a2a_correctness.py", "a2a_async.py", "a2a_qk.py"])
+@pytest.mark.parametrize("worker", ["a2a_correctness.py", "a2a_async.py"])
 def test_multigpu_worker(worker, nproc):
     ngpu = torch.cuda.device_count()
     if ngpu < max(nproc, 2):
