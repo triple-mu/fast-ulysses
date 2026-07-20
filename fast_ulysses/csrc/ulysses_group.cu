@@ -62,6 +62,62 @@ void UlyssesGroup::fast_barrier_kernel_(cudaStream_t stream)
     ULYSSES_CUDA_CHECK(cudaGetLastError());  // catch a barrier-kernel launch failure
 }
 
+// Consumer-signal poll: one lane ld.acquire-spins on the 8-byte flag word until every
+// rank's byte equals the expected epoch byte. ws <= 8 so one aligned u64 load covers all
+// ranks; acquire orders the subsequent data reads of the consumer stream.
+__global__ void ulysses_signal_wait_kernel(const uint64_t* flags, int ws, uint64_t expected_byte)
+{
+    if (threadIdx.x != 0)
+        return;
+    uint64_t want = 0;
+    for (int i = 0; i < ws; ++i)
+        want |= expected_byte << (8 * i);
+    uint64_t mask = (ws == 8) ? ~0ULL : ((1ULL << (8 * ws)) - 1);
+    uint64_t v;
+    do {
+        v = ld_acquire_sys_u64(const_cast<uint64_t*>(flags));
+    } while ((v & mask) != want);
+}
+
+void UlyssesGroup::ensure_csig_init_(cudaStream_t stream)
+{
+    if (csig_ready_)
+        return;
+    // 8 bytes (uint8[ws], ws <= 8) so the poll kernel reads one aligned u64.
+    const auto& buf = pool_->acquire({8}, at::kByte, "__ulysses_csignal__");
+    csig_local_     = buf.sym_base;
+    csig_peers_     = buf.peer_ptrs;
+    ULYSSES_CUDA_CHECK(cudaMemsetAsync(csig_local_, 0, 8, stream));
+    // One slow sync: all ranks finish clearing before anyone writes a signal byte.
+    nvshmemx_barrier_on_stream(team_, stream);
+    csig_ready_ = true;
+}
+
+void UlyssesGroup::signal_arrive(cudaStream_t stream)
+{
+    if (world_size_ == 1)
+        return;
+    ensure_csig_init_(stream);
+    if ((++csig_epoch_ & 0xFF) == 0)  // byte 0 means "unset"; skip it (identical on all ranks)
+        ++csig_epoch_;
+    const int value = static_cast<int>(csig_epoch_ & 0xFF);
+    // One 1-byte CE memset into every rank's flags[my_rank] (self included): the arrival
+    // signal departs without any SM work, stream-ordered after the group's data copies.
+    for (int r = 0; r < world_size_; ++r)
+        ULYSSES_CUDA_CHECK(
+            cudaMemsetAsync(reinterpret_cast<uint8_t*>(csig_peers_[r]) + my_rank_, value, 1, stream));
+}
+
+void UlyssesGroup::signal_wait(cudaStream_t stream)
+{
+    if (world_size_ == 1)
+        return;
+    TORCH_CHECK(csig_ready_, "signal_wait without a prior signal_arrive");
+    ulysses_signal_wait_kernel<<<1, 32, 0, stream>>>(
+        reinterpret_cast<const uint64_t*>(csig_local_), world_size_, csig_epoch_ & 0xFF);
+    ULYSSES_CUDA_CHECK(cudaGetLastError());
+}
+
 void UlyssesGroup::fast_barrier(cudaStream_t stream)
 {
     if (world_size_ == 1)

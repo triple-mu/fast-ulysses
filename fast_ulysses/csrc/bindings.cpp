@@ -140,6 +140,19 @@ at::Tensor all_to_all_single_4d_ce(
     return buf.view;
 }
 
+// Consumer-signal handshake for grouped CE collectives (see ulysses_group.cuh):
+// signal_arrive on the transfer stream after barrier=False copies; signal_wait on the
+// consumer stream before reading any of the group's outputs.
+void signal_arrive(const c10::intrusive_ptr<UlyssesGroup>& group)
+{
+    group->signal_arrive(at::cuda::getCurrentCUDAStream());
+}
+
+void signal_wait(const c10::intrusive_ptr<UlyssesGroup>& group)
+{
+    group->signal_wait(at::cuda::getCurrentCUDAStream());
+}
+
 }  // namespace ulysses
 
 TORCH_LIBRARY(fast_ulysses, m)
@@ -164,6 +177,12 @@ TORCH_LIBRARY(fast_ulysses, m)
     m.def("all_to_all_single_4d_ce(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, str tag, bool barrier=True) -> Tensor");
     m.impl("all_to_all_single_4d_ce", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d_ce);
+
+    // Consumer-signal handshake: CE-written arrival flags + a consumer-stream poll kernel.
+    m.def("signal_arrive(__torch__.torch.classes.fast_ulysses.UlyssesGroup group) -> ()");
+    m.impl("signal_arrive", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::signal_arrive);
+    m.def("signal_wait(__torch__.torch.classes.fast_ulysses.UlyssesGroup group) -> ()");
+    m.impl("signal_wait", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::signal_wait);
 }
 
 // Python `import _C` needs PyInit__C; TORCH_LIBRARY already registered at dlopen time.
