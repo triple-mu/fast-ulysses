@@ -51,9 +51,9 @@ movement).
 ## Layout
 
 ```
-fast_ulysses/          Python package (comm.py: UlyssesGroup; ops.py: standalone ops)
+fast_ulysses/          Python package (comm.py: UlyssesGroup + async handles)
 fast_ulysses/csrc/     C++/CUDA sources (bindings.cpp registers the torch library)
 tests/                 pytest suites; tests/distributed/ holds the torchrun workers
-benchmark/             throughput / fusion benchmarks and a minimal nsys/ncu driver
-docs/                  this documentation
+benchmark/             throughput / overlap benchmarks and a minimal nsys/ncu driver
+docs/                  this documentation; docs/experiments/ holds archived studies
 ```

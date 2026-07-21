@@ -59,7 +59,7 @@ itself collective).
 - Sync and async calls **both count** in the rank-uniform call sequence (both advance the same
   per-group barrier epoch; sync calls run on the caller's stream, async on the comm stream).
 
-## `all_to_all_single_4d_async(x, *, mode=0, tag="", use_tma=None) -> AsyncA2AHandle`
+## `all_to_all_single_4d_async(x, *, mode=0, tag="", use_tma=None, barrier=True) -> AsyncA2AHandle`
 
 Async variant: the collective is submitted to the group's dedicated high-priority comm stream and
 the call returns immediately; kernels submitted to the caller's stream afterwards overlap with the
@@ -105,11 +105,44 @@ Notes:
 - Same rank-uniform call-sequence constraint as every other collective (sync and async advance the
   same barrier epoch).
 
-## `all_to_all_single_4d_ce_async(x, *, mode=0, tag="") -> AsyncA2AHandle`
+## `all_to_all_single_4d_ce_async(x, *, mode=0, tag="", barrier=True) -> AsyncA2AHandle`
 
 Async CE variant (same comm-stream launch and ordering constraint as
 `all_to_all_single_4d_async`). Because the transfer rides the DMA engines, the in-flight window
-overlaps concurrent GEMMs/attention instead of time-slicing with them.
+overlaps concurrent GEMMs/attention instead of time-slicing with them. `barrier=False` grouping
+works exactly as on the kernel path — and for CE groups the barrier can be replaced entirely by
+the consumer-signal handshake below. (The sync `all_to_all_single_4d_ce` deliberately has no
+`barrier` parameter: a deferred sync result would be an unreadable view with nothing left to
+publish it.)
+
+## `signal_arrive_async() / signal_wait()`
+
+Consumer-signal handshake (a DeepEP-style split of arrive and wait) for **`barrier=False` CE
+groups**: it replaces the group's one remaining `fast_barrier` with an arrival flag written by the
+copy engine and a poll kernel on the consumer stream.
+
+```python
+hq = group.all_to_all_single_4d_ce_async(q, tag="q", barrier=False)
+hk = group.all_to_all_single_4d_ce_async(k, tag="k", barrier=False)
+hv = group.all_to_all_single_4d_ce_async(v, tag="v", barrier=False)
+group.signal_arrive_async()   # comm stream: 1-byte CE memset per rank, after the copies
+group.signal_wait()           # caller's stream: poll kernel; then q/k/v outputs are readable
+```
+
+- `signal_arrive_async()` enqueues, on the group's comm stream, one 1-byte `cudaMemsetAsync` of
+  the epoch byte into every rank's signal slot — stream-ordered after the group's data copies and
+  executed by the copy engine, so the arrival departs with **zero SM work** (it can neither be
+  starved of an SM slot by concurrent GEMMs nor delay peers while a barrier kernel sits
+  descheduled).
+- `signal_wait()` launches a 1-block poll kernel on the **caller's** current stream that
+  `ld.acquire`-spins until every rank's byte matches the epoch: the consumer proceeds the moment
+  the last peer's data lands, with no barrier-exit → event → stream-wait hop.
+- Byte **equality** (not `>=`) makes the protocol reset- and wrap-free; epochs whose low byte is 0
+  are skipped identically on every rank.
+- `signal_wait()` before any `signal_arrive_async()` is a `TORCH_CHECK` error; both are no-ops at
+  `world_size == 1`.
+- Same rank-uniform call-sequence contract as `fast_barrier`; arrive/wait pairs and barrier calls
+  may be mixed across call sites as long as the pattern is identical on all ranks.
 
 ## `destroy() -> None`
 
