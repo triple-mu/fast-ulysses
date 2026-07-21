@@ -254,25 +254,6 @@ class UlyssesGroup:
         )
         return AsyncA2AHandle(out, ev_done)
 
-    def signal_arrive_async(self) -> None:
-        """Enqueue the consumer-signal ARRIVE on the group's comm stream: one 1-byte CE
-        memset of the epoch byte into every rank's signal slot, stream-ordered after any
-        prior async copies (use with barrier=False groups). Zero SM work -- the arrival
-        departs even while compute holds every SM. Pair with signal_wait() on the
-        consumer stream; identical call pattern required on all ranks."""
-        with torch.cuda.stream(self._comm_stream):
-            torch.ops.fast_ulysses.signal_arrive(self._group)
-
-    def signal_wait(self) -> None:
-        """Launch the consumer-signal WAIT poll kernel on the CALLER's current stream:
-        a 1-block kernel that ld.acquire-spins until every rank's signal byte matches
-        the epoch of the last signal_arrive_async. The caller's subsequent kernels may
-        then read every output of the signalled group. Replaces the comm-stream
-        fast_barrier for grouped CE collectives: no SM-slot contention with concurrent
-        compute, no event hop -- the consumer proceeds the moment the last peer's data
-        lands."""
-        torch.ops.fast_ulysses.signal_wait(self._group)
-
     def destroy(self) -> None:
         """Release the symmetric-heap resources (collective: ALL ranks must call together)."""
         if self._destroyed:

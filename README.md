@@ -21,7 +21,7 @@ Ulysses sequence parallelism (DeepSpeed-Ulysses) shards very long sequences acro
   - **TMA path** (sm90+, Hopper/Blackwell): `cp.async.bulk` (the TMA unit) moves the data with a software pipeline, occupying almost no SM.
   - With `use_tma=None` (auto), **both kernel paths are micro-benchmarked on the actual hardware at first call and the faster one is cached** (replacing any offline static table); it can also be forced per call (see the `use_tma` tri-state in [docs/API.md](docs/API.md)).
   - **CE path** (`all_to_all_single_4d_ce`, chosen explicitly): a per-peer `cudaMemcpy2DAsync` fan-out on the DMA engines — **zero SM usage**, so the transfer keeps running at full NVLink bandwidth while compute kernels (e.g. cuBLAS nvjet GEMMs) hold every SM slot. The overlap path: 93–98% of the CE a2a hides under a concurrent GEMM chain vs 25–39% for the kernel paths (4×H100/H200, Wan shapes).
-- **Grouped handshakes for async pipelines**: `barrier=False` defers the completion handshake so several async a2as (e.g. one layer's q/k/v) share a single barrier, and the **consumer-signal handshake** (`signal_arrive_async` / `signal_wait`) replaces even that barrier with a CE-written arrival flag plus a consumer-stream poll — see [docs/API.md](docs/API.md).
+- **Grouped handshakes for async pipelines**: `barrier=False` defers the completion handshake so several async a2as (e.g. one layer's q/k/v) share a single barrier — see [docs/API.md](docs/API.md).
 - **Compute-communication fusion examples** (fused QK RMSNorm + RoPE into the scatter kernel, standalone `rms_norm` / `rope` / `norm_rope` ops) live on the `examples/qk-norm-rope-fusion` branch — this branch keeps the pure all-to-all core.
 - **Single-node NVLink P2P**, `world_size ∈ [1, 8]` (odd sizes such as 3/5/6/7 included).
 - **Uniform splits**: sequence length `s` and head count `n` divisible by `world_size`.
@@ -103,7 +103,6 @@ if __name__ == "__main__":
 | `group.all_to_all_single_4d_async(..., barrier=True) -> AsyncA2AHandle` | Same op on a high-priority comm stream; overlap until `handle.wait()`; `barrier=False` groups several calls under one handshake. |
 | `group.all_to_all_single_4d_ce(x, *, mode=0, tag="")` | Same collective on the DMA engines (zero SM) — the overlap path. |
 | `group.all_to_all_single_4d_ce_async(..., barrier=True) -> AsyncA2AHandle` | Async CE variant; its in-flight window genuinely overlaps concurrent compute. |
-| `group.signal_arrive_async()` / `group.signal_wait()` | Consumer-signal handshake for `barrier=False` CE groups (no barrier kernel at all). |
 | `group.destroy()` | Release symmetric-heap resources (collective). |
 
 Shapes, the `use_tma` tri-state, tag semantics, and the **collective hard constraints** (call-sequence uniformity across ranks — violating them hangs the whole group) are documented in [docs/API.md](docs/API.md).
