@@ -29,11 +29,6 @@ struct PeerPtrs {
     void* p[WS];
 };
 
-// Baseline is a raw byte copy; Identity is a no-op. Future RoPE/RMSNorm specialize this hook.
-struct EpilogueIdentity {
-    __device__ __forceinline__ void operator()(uint8_t* /*row_bytes*/, int /*row_off*/) const {}
-};
-
 // Free function: pure-CUDA vectorized direct write to peer symmetric memory (host already
 // resolved peer_ptrs via nvshmem_ptr). Launch with the given config (no env, no autotune).
 void launch_a2a(const void*                  src,

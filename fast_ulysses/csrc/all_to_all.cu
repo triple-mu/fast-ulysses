@@ -13,9 +13,9 @@ namespace ulysses {
 // large (typically 4KB) remote bursts. Far better NVLink efficiency than the old scattered writes
 // ("write a 256B d-row then jump 4KB"). UNROLL register prefetch pipelines read/write (local reads hidden behind remote
 // writes).
-template<int WORLD_SIZE, int MODE, int UNROLL, typename Epilogue>
+template<int WORLD_SIZE, int MODE, int UNROLL>
 __global__ void a2a_copy_generic(
-    const uint8_t* __restrict__ src, PeerPtrs<WORLD_SIZE> peers, Ulysses4DDims dims, int elem_size, Epilogue)
+    const uint8_t* __restrict__ src, PeerPtrs<WORLD_SIZE> peers, Ulysses4DDims dims, int elem_size)
 {
     const int     row_bytes = dims.d * elem_size;   // 16B aligned (guaranteed by Global Constraints)
     const int     vecs      = row_bytes >> 4;       // uint4 count per d-row
@@ -79,11 +79,9 @@ static void launch_ws_u(const PeerPtrs<WS>&  pp,
                         cudaStream_t         stream)
 {
     if (mode == 0)
-        a2a_copy_generic<WS, 0, UNROLL, EpilogueIdentity>
-            <<<blocks, threads, 0, stream>>>(src, pp, dims, elem_size, EpilogueIdentity{});
+        a2a_copy_generic<WS, 0, UNROLL><<<blocks, threads, 0, stream>>>(src, pp, dims, elem_size);
     else
-        a2a_copy_generic<WS, 1, UNROLL, EpilogueIdentity>
-            <<<blocks, threads, 0, stream>>>(src, pp, dims, elem_size, EpilogueIdentity{});
+        a2a_copy_generic<WS, 1, UNROLL><<<blocks, threads, 0, stream>>>(src, pp, dims, elem_size);
 }
 
 template<int WS>
