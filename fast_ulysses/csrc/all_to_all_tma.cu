@@ -333,8 +333,8 @@ A2AConfig resolve_config_tma(const void*                  src,
                 finish();
             },
             stream);
-        if (verbose)
-            std::cerr << "[tma-at] ws=" << ws << " mode=" << mode << " nl=" << n_local << " sl=" << s_local
+        if (verbose && dims.rank == 0)
+            std::cout << "[tma-at] ws=" << ws << " mode=" << mode << " nl=" << n_local << " sl=" << s_local
                       << " | tn=" << c.tile_n << " ts=" << c.tile_s << " -> " << std::fixed << std::setprecision(1)
                       << us << " us/call" << std::endl;
         if (us < best_t) {
