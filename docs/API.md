@@ -110,47 +110,9 @@ Notes:
 Async CE variant (same comm-stream launch and ordering constraint as
 `all_to_all_single_4d_async`). Because the transfer rides the DMA engines, the in-flight window
 overlaps concurrent GEMMs/attention instead of time-slicing with them. `barrier=False` grouping
-works exactly as on the kernel path — and for CE groups the barrier can be replaced entirely by
-the consumer-signal handshake below. (The sync `all_to_all_single_4d_ce` deliberately has no
+works exactly as on the kernel path. (The sync `all_to_all_single_4d_ce` deliberately has no
 `barrier` parameter: a deferred sync result would be an unreadable view with nothing left to
 publish it.)
-
-## `signal_arrive_async() / signal_wait()`
-
-Consumer-signal handshake (a DeepEP-style split of arrive and wait) for **`barrier=False` CE
-groups**: it replaces the group's one remaining `fast_barrier` with an arrival flag written by the
-copy engine and a poll kernel on the consumer stream.
-
-```python
-hq = group.all_to_all_single_4d_ce_async(q, tag="q", barrier=False)
-hk = group.all_to_all_single_4d_ce_async(k, tag="k", barrier=False)
-hv = group.all_to_all_single_4d_ce_async(v, tag="v", barrier=False)
-group.signal_arrive_async()   # comm stream: 1-byte CE memset per rank, after the copies
-group.signal_wait()           # caller's stream: poll kernel; then q/k/v outputs are readable
-```
-
-- `signal_arrive_async()` enqueues, on the group's comm stream, one 1-byte `cudaMemsetAsync` of
-  the epoch byte into every rank's signal slot — stream-ordered after the group's data copies and
-  executed by the copy engine, so the arrival departs with **zero SM work** (it can neither be
-  starved of an SM slot by concurrent GEMMs nor delay peers while a barrier kernel sits
-  descheduled).
-- `signal_wait()` launches a 1-block poll kernel on the **caller's** current stream that
-  `ld.acquire`-spins until every rank's byte matches the epoch: the consumer proceeds the moment
-  the last peer's data lands, with no barrier-exit → event → stream-wait hop.
-- The poll matches each rank's byte against the current epoch **or the next one** (a peer can run
-  at most one group ahead; plain equality would deadlock under back-to-back groups), which keeps
-  the protocol reset- and wrap-free; epochs whose low byte is 0 are skipped identically on every
-  rank.
-- `signal_wait()` before any `signal_arrive_async()` is a `TORCH_CHECK` error; both are no-ops at
-  `world_size == 1`.
-- Same rank-uniform call-sequence contract as `fast_barrier`; arrive/wait pairs and barrier calls
-  may be mixed across call sites as long as the pattern is identical on all ranks.
-- **Known limitation**: enqueueing many CE+signal groups far ahead of the device **without any
-  drain** (no `wait()`/sync between groups) can deadlock, timing-dependently — reproduced at ws=2
-  with ≥4 undrained back-to-back groups; kernel-path (`all_to_all_single_4d_async`) pile-ups and
-  single groups are unaffected. Pipelines that consume each group's outputs (real compute between
-  groups, or a periodic `handle.wait()`) are the validated regime. Root cause under
-  investigation.
 
 ## `destroy() -> None`
 

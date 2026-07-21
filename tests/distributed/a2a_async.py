@@ -5,10 +5,9 @@
 Checks that (1) async results bitwise-match the sync op, (2) compute submitted between launch and
 wait() (the overlap window) does not corrupt the result, (3) sync and async calls interleave safely
 on the shared comm stream, and (4) in-flight q/k/v async calls with distinct tags stay independent.
-Grouped-handshake coverage: (5) signal_wait without a prior arrive raises on every rank alike,
-(6) a barrier=False/False/True q/k/v group publishes all three results, (7) a CE barrier=False
-group published by signal_arrive_async/signal_wait alone (no fast_barrier), and (8) an epoch-wrap
-loop (>256 arrive/wait pairs, crossing the low-byte wrap and the skip-zero branch).
+Grouped-handshake coverage: (5) a barrier=False/False/True q/k/v group publishes all three
+results on both the base and CE paths, and (6) a deep pile of undrained barrier=False CE calls
+published by one final barrier=True call (regression for the per-call CE join events).
 """
 
 from __future__ import annotations
@@ -79,18 +78,7 @@ def main():
     torch.cuda.synchronize()
     check("mode1 async roundtrip == input", torch.equal(back, x))
 
-    # 4) signal_wait BEFORE any signal_arrive must raise -- identically on every rank, no
-    #    hang. MUST run before any arrive: csig_ready_ latches on the first arrive and the
-    #    error path is unreachable afterwards. ws==1 signal ops are no-ops, so skip there.
-    if ws > 1:
-        try:
-            group.signal_wait()
-            raised = False
-        except RuntimeError:
-            raised = True
-        check("signal_wait without arrive raises", raised)
-
-    # 5) barrier=False grouping on the base path: q/k defer their handshake, v carries it;
+    # 4) barrier=False grouping on the base path: q/k defer their handshake, v carries it;
     #    all three results must be published after the barrier-carrying handle's wait().
     hq = group.all_to_all_single_4d_async(q, mode=0, tag="gq", barrier=False)
     hk = group.all_to_all_single_4d_async(k, mode=0, tag="gk", barrier=False)
@@ -102,42 +90,33 @@ def main():
         torch.equal(oq, rq) and torch.equal(ok_, rk) and torch.equal(ov, rv),
     )
 
-    # 6) CE group published by the consumer signal alone: three barrier=False CE copies,
-    #    one CE-written arrive on the comm stream, one poll kernel on the main stream --
-    #    the whole group crosses ranks without a single fast_barrier.
+    # 5) CE grouping: q/k defer, v publishes -- same contract as the base path, and the CE
+    #    fan-out's join events must chain correctly across the deferred calls.
     cq = group.all_to_all_single_4d_ce(q, mode=0, tag="cq").clone()
     ck = group.all_to_all_single_4d_ce(k, mode=0, tag="ck").clone()
     cv = group.all_to_all_single_4d_ce(v, mode=0, tag="cv").clone()
     hq = group.all_to_all_single_4d_ce_async(q, mode=0, tag="caq", barrier=False)
     hk = group.all_to_all_single_4d_ce_async(k, mode=0, tag="cak", barrier=False)
-    hv = group.all_to_all_single_4d_ce_async(v, mode=0, tag="cav", barrier=False)
-    group.signal_arrive_async()
-    group.signal_wait()
+    hv = group.all_to_all_single_4d_ce_async(v, mode=0, tag="cav", barrier=True)
     oq, ok_, ov = hq.wait(), hk.wait(), hv.wait()
     torch.cuda.synchronize()
     check(
-        "CE barrier=False group + signal arrive/wait",
+        "CE barrier=False group (q/k deferred, v publishes)",
         torch.equal(oq, cq) and torch.equal(ok_, ck) and torch.equal(ov, cv),
     )
 
-    # 7) epoch wrap: >256 arrive/wait pairs cross the low-byte wrap (and the skip-zero
-    #    branch). Each round drains before the next: deep UNDRAINED pile-ups of CE+signal
-    #    groups can still deadlock (timing-dependent; base-path piles and single groups are
-    #    fine -- see the known-limitation note in docs/API.md), so this test pins the wrap
-    #    coverage to the supported drained regime.
+    # 6) CE deferred deep pile: many undrained barrier=False CE calls before one publishing
+    #    call. Regression for the per-call join events -- the old shared CEResources events
+    #    deadlocked within a handful of undrained groups when the host ran far ahead of the
+    #    device (a pending wait could resolve against a later re-record).
     w = torch.randn(1, 8, ws, 32, device=dev, dtype=torch.bfloat16)
-    wref = group.all_to_all_single_4d_ce(w, mode=0, tag="wrapref").clone()
-    wrap_ok = True
-    for i in range(300):
-        hw = group.all_to_all_single_4d_ce_async(w, mode=0, tag="wrap", barrier=False)
-        group.signal_arrive_async()
-        group.signal_wait()
-        got_w = hw.wait()
-        torch.cuda.synchronize()
-        if i % 50 == 49 or i == 299:
-            wrap_ok = wrap_ok and torch.equal(got_w, wref)
-            dist.barrier()  # keep peers' next-round writes from racing this round's read
-    check("signal epoch wrap (300 rounds)", wrap_ok)
+    wref = group.all_to_all_single_4d_ce(w, mode=0, tag="pileref").clone()
+    for _ in range(20):
+        group.all_to_all_single_4d_ce_async(w, mode=0, tag="pile", barrier=False)
+    hw = group.all_to_all_single_4d_ce_async(w, mode=0, tag="pile2", barrier=True)
+    got_w = hw.wait()
+    torch.cuda.synchronize()
+    check("CE deferred deep pile (20 undrained groups)", torch.equal(got_w, wref))
 
     _ = a  # keep the dummy compute live
 

@@ -76,12 +76,12 @@ void launch_a2a_ce(const void*                  src,
     // count; the pool's value is keeping the LOCAL copy concurrent with the remote ones.
     //
     // FRESH events every call -- do not hoist them into CEResources. Re-recording a shared
-    // event that still has in-flight stream waits (deep enqueue-ahead: barrier=False groups
-    // throttled by a consumer-signal poll pile up many calls behind the device) lets a
-    // pending wait resolve against a LATER record whose completion depends on this very
-    // stream progressing -- a circular wait that deadlocks the group (reproduced at ws=2
-    // with >2 undrained groups). Create/destroy is a few us per call and depth-safe: the
-    // waits capture the dependency at call time, and destroy defers until the event retires.
+    // event that still has in-flight stream waits (deep enqueue-ahead: many deferred
+    // barrier=False groups queued behind the device) lets a pending wait resolve against a
+    // LATER record whose completion depends on this very stream progressing -- a circular
+    // wait that deadlocks the group (reproduced at ws=2 with a few undrained groups).
+    // Create/destroy is a few us per call and depth-safe: the waits capture the dependency
+    // at call time, and destroy defers until the event retires.
     cudaEvent_t ready;
     ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
     ULYSSES_CUDA_CHECK(cudaEventRecord(ready, stream));
