@@ -58,3 +58,9 @@ No manual env setup is needed on such nodes; set either variable yourself **befo
 - **CMake error `CMakeCache.txt directory ... is different than ...`**: the persistent `build/` directory was configured from another path (e.g. the repo was moved or renamed). `rm -rf build` and rebuild.
 - **Import error for `fast_ulysses._C` after a torch upgrade**: the extension links libtorch; rebuild after switching PyTorch versions (`rm -rf build` first if CMake gets confused).
 - **Init segfault inside NVSHMEM**: see the fabric section above; also make sure all ranks construct `UlyssesGroup` together (construction is collective).
+- **`fatal error: cuda/std/array: No such file or directory` (CUDA 13 toolkit)**: CUDA 13 moved the CCCL headers (libcu++/CUB/Thrust) into `include/cccl/`, where the NVSHMEM 3.7 headers no longer find them. Add the path for **both** compilers (`bindings.cpp` includes `nvshmem.h` through the host compiler too):
+
+  ```bash
+  CUDAFLAGS=-I/usr/local/cuda/include/cccl CXXFLAGS=-I/usr/local/cuda/include/cccl \
+  NVSHMEM_HOME=<nvshmem install root> pip install -e . --no-build-isolation
+  ```
