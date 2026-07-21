@@ -62,21 +62,33 @@ void UlyssesGroup::fast_barrier_kernel_(cudaStream_t stream)
     ULYSSES_CUDA_CHECK(cudaGetLastError());  // catch a barrier-kernel launch failure
 }
 
-// Consumer-signal poll: one lane ld.acquire-spins on the 8-byte flag word until every
-// rank's byte equals the expected epoch byte. ws <= 8 so one aligned u64 load covers all
-// ranks; acquire orders the subsequent data reads of the consumer stream.
+// Consumer-signal poll: one lane ld.acquire-spins on the 8-byte flag word until every rank's
+// byte reaches the expected epoch byte. ws <= 8 so one aligned u64 load covers all ranks;
+// acquire orders the subsequent data reads of the consumer stream.
+//
+// A peer's byte may already show the NEXT epoch: peer r's arrive_{i+1} is gated (through r's
+// own stream ordering) by r's poll_i -- which needs OUR arrive_i but not our poll_i -- so r
+// can overwrite its byte with b_{i+1} before our poll_i observes b_i. The skew is bounded at
+// ONE group (r's arrive_{i+2} would need r's poll_{i+1}, which needs our arrive_{i+1}, which
+// our stream orders after our poll_i), so accepting byte == b or == next(b) is exact: seeing
+// next(b) still certifies r's epoch-i copies into us landed (they precede arrive_{i+1} in r's
+// stream order -- the same store-ordering the protocol already relies on). Plain equality
+// deadlocks under back-to-back groups.
 __global__ void ulysses_signal_wait_kernel(const uint64_t* flags, int ws, uint64_t expected_byte)
 {
     if (threadIdx.x != 0)
         return;
-    uint64_t want = 0;
-    for (int i = 0; i < ws; ++i)
-        want |= expected_byte << (8 * i);
-    uint64_t mask = (ws == 8) ? ~0ULL : ((1ULL << (8 * ws)) - 1);
-    uint64_t v;
+    const uint32_t exp = static_cast<uint32_t>(expected_byte);
+    const uint32_t nxt = (exp == 255u) ? 1u : exp + 1u;  // next skips 0, like the epoch bump
+    bool           done;
     do {
-        v = ld_acquire_sys_u64(const_cast<uint64_t*>(flags));
-    } while ((v & mask) != want);
+        const uint64_t v = ld_acquire_sys_u64(const_cast<uint64_t*>(flags));
+        done             = true;
+        for (int i = 0; i < ws; ++i) {
+            const uint32_t b = static_cast<uint32_t>((v >> (8 * i)) & 0xFF);
+            done             = done && (b == exp || b == nxt);
+        }
+    } while (!done);
 }
 
 void UlyssesGroup::ensure_csig_init_(cudaStream_t stream)

@@ -137,8 +137,10 @@ group.signal_wait()           # caller's stream: poll kernel; then q/k/v outputs
 - `signal_wait()` launches a 1-block poll kernel on the **caller's** current stream that
   `ld.acquire`-spins until every rank's byte matches the epoch: the consumer proceeds the moment
   the last peer's data lands, with no barrier-exit → event → stream-wait hop.
-- Byte **equality** (not `>=`) makes the protocol reset- and wrap-free; epochs whose low byte is 0
-  are skipped identically on every rank.
+- The poll matches each rank's byte against the current epoch **or the next one** (a peer can run
+  at most one group ahead; plain equality would deadlock under back-to-back groups), which keeps
+  the protocol reset- and wrap-free; epochs whose low byte is 0 are skipped identically on every
+  rank.
 - `signal_wait()` before any `signal_arrive_async()` is a `TORCH_CHECK` error; both are no-ops at
   `world_size == 1`.
 - Same rank-uniform call-sequence contract as `fast_barrier`; arrive/wait pairs and barrier calls

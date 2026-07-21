@@ -129,10 +129,11 @@ public:
     // stream that ld.acquire-spins until every rank's signal byte matches the epoch --
     // the consumer proceeds the moment the last peer's data lands, with no barrier
     // kernel competing for an SM slot on the comm stream and no extra event hop.
-    // Byte equality (not >=) makes the protocol wrap- and reset-free; epochs whose low
-    // byte is 0 are skipped identically on every rank. Same rank-uniform call-sequence
-    // contract as fast_barrier; arrive/wait pairs and fast_barrier calls may be mixed
-    // across call sites as long as the pattern is identical on all ranks.
+    // Byte matching (current epoch or the next one -- a peer may run at most one group
+    // ahead, see the poll-kernel comment) keeps the protocol wrap- and reset-free; epochs
+    // whose low byte is 0 are skipped identically on every rank. Same rank-uniform
+    // call-sequence contract as fast_barrier; arrive/wait pairs and fast_barrier calls may
+    // be mixed across call sites as long as the pattern is identical on all ranks.
     void signal_arrive(cudaStream_t stream);
     void signal_wait(cudaStream_t stream);
 
