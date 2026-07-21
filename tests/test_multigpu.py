@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -42,28 +43,41 @@ def test_multigpu_worker(worker, nproc):
     ngpu = torch.cuda.device_count()
     if ngpu < max(nproc, 2):
         pytest.skip(f"needs >={max(nproc, 2)} GPUs, found {ngpu}")
-    # start_new_session: the torchrun subprocess becomes its own process group, so on
-    # timeout we can killpg the WHOLE group. A plain subprocess.run timeout SIGKILLs only
-    # torchrun itself, orphaning the workers -- and a hung fast_barrier spin kernel keeps
-    # them pinned on the GPUs indefinitely.
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            f"--nproc_per_node={nproc}",
-            str(_DISTRIBUTED / worker),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=600)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        stdout, stderr = proc.communicate()
+    # Timeout teardown: a plain subprocess.run timeout SIGKILLs only the torchrun launcher
+    # and orphans the rank workers (they live in their own sessions) -- a hung fast_barrier
+    # spin kernel then keeps them pinned on the GPUs indefinitely, and inherited stdout
+    # pipes would block the reader forever. So: log to files (no pipe to block on), SIGTERM
+    # torchrun first (its elastic agent tears the workers down), and only then killpg as a
+    # last resort.
+    with tempfile.TemporaryFile(mode="w+") as out_f, tempfile.TemporaryFile(mode="w+") as err_f:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                f"--nproc_per_node={nproc}",
+                str(_DISTRIBUTED / worker),
+            ],
+            stdout=out_f,
+            stderr=err_f,
+            text=True,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            proc.wait(timeout=600)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.terminate()  # elastic agent SIGTERMs and reaps its workers
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+        out_f.seek(0)
+        err_f.seek(0)
+        stdout, stderr = out_f.read(), err_f.read()
+    if timed_out:
         pytest.fail(
             f"{worker} timed out (nproc={nproc})\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
         )
