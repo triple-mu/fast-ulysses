@@ -10,6 +10,7 @@ FAST_ULYSSES_TEST_NPROC overrides the process count list with a single value.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +42,11 @@ def test_multigpu_worker(worker, nproc):
     ngpu = torch.cuda.device_count()
     if ngpu < max(nproc, 2):
         pytest.skip(f"needs >={max(nproc, 2)} GPUs, found {ngpu}")
-    proc = subprocess.run(
+    # start_new_session: the torchrun subprocess becomes its own process group, so on
+    # timeout we can killpg the WHOLE group. A plain subprocess.run timeout SIGKILLs only
+    # torchrun itself, orphaning the workers -- and a hung fast_barrier spin kernel keeps
+    # them pinned on the GPUs indefinitely.
+    proc = subprocess.Popen(
         [
             sys.executable,
             "-m",
@@ -49,11 +54,19 @@ def test_multigpu_worker(worker, nproc):
             f"--nproc_per_node={nproc}",
             str(_DISTRIBUTED / worker),
         ],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=600,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        stdout, stderr = proc.communicate()
+        pytest.fail(
+            f"{worker} timed out (nproc={nproc})\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        )
     assert proc.returncode == 0, (
-        f"{worker} failed (nproc={nproc})\n"
-        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        f"{worker} failed (nproc={nproc})\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     )
