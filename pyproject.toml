@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/triple-mu/custom_ulysses_op"
+Repository = "https://github.com/triple-mu/fast-ulysses"
 
 [project.optional-dependencies]
 dev = ["pre-commit", "pytest", "ruff"]
