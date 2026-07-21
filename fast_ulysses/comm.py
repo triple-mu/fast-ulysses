@@ -195,7 +195,9 @@ class UlyssesGroup:
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
             [x],
-            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(self._group, x, mode, tag, use_tma, barrier),
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(
+                self._group, x, mode, tag, use_tma, barrier
+            ),
         )
         return AsyncA2AHandle(out, ev_done)
 
@@ -246,7 +248,9 @@ class UlyssesGroup:
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
             [x],
-            lambda: torch.ops.fast_ulysses.all_to_all_single_4d_ce(self._group, x, mode, tag, barrier),
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d_ce(
+                self._group, x, mode, tag, barrier
+            ),
         )
         return AsyncA2AHandle(out, ev_done)
 

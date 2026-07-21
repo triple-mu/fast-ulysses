@@ -104,8 +104,7 @@ void UlyssesGroup::signal_arrive(cudaStream_t stream)
     // One 1-byte CE memset into every rank's flags[my_rank] (self included): the arrival
     // signal departs without any SM work, stream-ordered after the group's data copies.
     for (int r = 0; r < world_size_; ++r)
-        ULYSSES_CUDA_CHECK(
-            cudaMemsetAsync(reinterpret_cast<uint8_t*>(csig_peers_[r]) + my_rank_, value, 1, stream));
+        ULYSSES_CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<uint8_t*>(csig_peers_[r]) + my_rank_, value, 1, stream));
 }
 
 void UlyssesGroup::signal_wait(cudaStream_t stream)

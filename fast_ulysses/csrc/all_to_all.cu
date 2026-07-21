@@ -14,8 +14,8 @@ namespace ulysses {
 // ("write a 256B d-row then jump 4KB"). UNROLL register prefetch pipelines read/write (local reads hidden behind remote
 // writes).
 template<int WORLD_SIZE, int MODE, int UNROLL>
-__global__ void a2a_copy_generic(
-    const uint8_t* __restrict__ src, PeerPtrs<WORLD_SIZE> peers, Ulysses4DDims dims, int elem_size)
+__global__ void
+a2a_copy_generic(const uint8_t* __restrict__ src, PeerPtrs<WORLD_SIZE> peers, Ulysses4DDims dims, int elem_size)
 {
     const int     row_bytes = dims.d * elem_size;   // 16B aligned (guaranteed by Global Constraints)
     const int     vecs      = row_bytes >> 4;       // uint4 count per d-row
