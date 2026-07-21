@@ -52,6 +52,8 @@ NVSHMEM_REMOTE_TRANSPORT=none
 
 No manual env setup is needed on such nodes; set either variable yourself **before** constructing the group if you need different behavior.
 
+NCCL (used by the `torch.distributed` bootstrap and the test/benchmark references) probes NVLS on its own: on nodes with a broken Fabric Manager configuration it fails with `unhandled cuda error` right at init ("Failed to bind NVLink SHARP (NVLS) Multicast memory ... CUDA error 401"). Run with `NCCL_NVLS_ENABLE=0` there.
+
 ## Troubleshooting
 
 - **`NVSHMEM_HOME must point to ...`**: the variable is unset or does not contain `include/nvshmem.h`. Point it at the unpacked NVSHMEM archive root.
