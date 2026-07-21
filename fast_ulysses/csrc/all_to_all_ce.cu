@@ -74,18 +74,32 @@ void launch_a2a_ce(const void*                  src,
     // peer's slice, and the launching stream joins all copies before the caller's barrier.
     // The shared source-egress NVLink port caps aggregate bandwidth regardless of stream
     // count; the pool's value is keeping the LOCAL copy concurrent with the remote ones.
-    ULYSSES_CUDA_CHECK(cudaEventRecord(ce.ready, stream));
+    //
+    // FRESH events every call -- do not hoist them into CEResources. Re-recording a shared
+    // event that still has in-flight stream waits (deep enqueue-ahead: barrier=False groups
+    // throttled by a consumer-signal poll pile up many calls behind the device) lets a
+    // pending wait resolve against a LATER record whose completion depends on this very
+    // stream progressing -- a circular wait that deadlocks the group (reproduced at ws=2
+    // with >2 undrained groups). Create/destroy is a few us per call and depth-safe: the
+    // waits capture the dependency at call time, and destroy defers until the event retires.
+    cudaEvent_t ready;
+    ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    ULYSSES_CUDA_CHECK(cudaEventRecord(ready, stream));
     for (int p = 0; p < ws; ++p) {
         cudaStream_t cs = ce.streams[p];
-        ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(cs, ce.ready, 0));
+        ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(cs, ready, 0));
         for (int i = 0; i < dims.b; ++i) {
             const CopyOp op = make_op(src, peer_ptrs[p], dims, mode, elem_size, p, i);
             ULYSSES_CUDA_CHECK(
                 cudaMemcpy2DAsync(op.dst, op.dpitch, op.src, op.spitch, row_w, dims.s_local, cudaMemcpyDefault, cs));
         }
-        ULYSSES_CUDA_CHECK(cudaEventRecord(ce.done[p], cs));
-        ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(stream, ce.done[p], 0));
+        cudaEvent_t done;
+        ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&done, cudaEventDisableTiming));
+        ULYSSES_CUDA_CHECK(cudaEventRecord(done, cs));
+        ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(stream, done, 0));
+        ULYSSES_CUDA_CHECK(cudaEventDestroy(done));
     }
+    ULYSSES_CUDA_CHECK(cudaEventDestroy(ready));
 }
 
 }  // namespace ulysses

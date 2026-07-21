@@ -13,12 +13,11 @@
 namespace ulysses {
 
 // Per-group CE (copy-engine) transfer resources: one stream per peer for the memcpy
-// fan-out plus join events. Created lazily by UlyssesGroup::ce_resources(), released in
-// destroy(). Serial use only (same contract as the config caches).
+// fan-out. Created lazily by UlyssesGroup::ce_resources(), released in destroy(). Serial
+// use only (same contract as the config caches). Join events are deliberately NOT pooled
+// here -- see the fresh-event note in launch_a2a_ce.
 struct CEResources {
     std::vector<cudaStream_t> streams;
-    std::vector<cudaEvent_t>  done;
-    cudaEvent_t               ready = nullptr;
 };
 
 // CE transfer path (all_to_all_ce.cu): per-peer cudaMemcpy2DAsync fan-out over ce.streams,

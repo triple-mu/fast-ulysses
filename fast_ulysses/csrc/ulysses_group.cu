@@ -307,12 +307,8 @@ const CEResources& UlyssesGroup::ce_resources()
 {
     if (!ce_ready_) {
         ce_.streams.resize(world_size_);
-        ce_.done.resize(world_size_);
-        for (int i = 0; i < world_size_; ++i) {
+        for (int i = 0; i < world_size_; ++i)
             ULYSSES_CUDA_CHECK(cudaStreamCreateWithFlags(&ce_.streams[i], cudaStreamNonBlocking));
-            ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ce_.done[i], cudaEventDisableTiming));
-        }
-        ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ce_.ready, cudaEventDisableTiming));
         ce_ready_ = true;
     }
     return ce_;
@@ -339,9 +335,6 @@ void UlyssesGroup::destroy()
             cudaStreamSynchronize(s);
             cudaStreamDestroy(s);
         }
-        for (auto e : ce_.done)
-            cudaEventDestroy(e);
-        cudaEventDestroy(ce_.ready);
         ce_       = {};
         ce_ready_ = false;
     }
