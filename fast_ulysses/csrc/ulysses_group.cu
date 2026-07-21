@@ -164,7 +164,7 @@ void UlyssesGroup::init_world(std::vector<int64_t> uid_ints, int64_t global_rank
         nvshmemx_set_attr_uniqueid_args(static_cast<int>(global_rank), static_cast<int>(global_nranks), &uid, &attr)
             == 0,
         "nvshmemx_set_attr_uniqueid_args failed");
-    // DEVIATION (see task-5-report): use the host-lib direct entry nvshmemx_hostlib_init_attr instead of
+    // DEVIATION: use the host-lib direct entry nvshmemx_hostlib_init_attr instead of
     // inline nvshmemx_init_attr. The inline version calls nvshmemi_init_thread, a symbol that lives only
     // in static libnvshmem_device.a; linking it clashes with the NVSHMEM version node of torch's bundled
     // libtorch_nvshmem.so (undefined symbol nvshmem_selected_device_transport). hostlib_init_attr is the

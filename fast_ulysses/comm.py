@@ -190,9 +190,7 @@ class UlyssesGroup:
         barrier=True call on the same stream publishes them all (its flag write is stream-ordered
         after every prior deferred copy). A barrier=False handle's wait() orders only THIS rank's
         work -- peers' writes into the local output are guaranteed only after the barrier-carrying
-        handle's wait(). All ranks must use the identical barrier pattern (epoch lockstep). (Sync calls run directly
-        on the caller's stream: routing them through the comm stream costs two event hops per call,
-        measured ~0.27 ms/call on H200 -- comparable to the a2a itself.)
+        handle's wait(). All ranks must use the identical barrier pattern (epoch lockstep).
         """
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
@@ -221,6 +219,10 @@ class UlyssesGroup:
         Collective constraints are identical to all_to_all_single_4d (rank-uniform
         call sequence; sync and async calls advance the same barrier epoch), except
         there is no autotune micro-benchmark on first call.
+
+        Deliberately no ``barrier`` parameter: a sync call hands back a readable view,
+        and a deferred one would be unsafe to read with nothing left to publish it --
+        grouped handshakes belong to the async variants, where consumption is explicit.
         """
         return torch.ops.fast_ulysses.all_to_all_single_4d_ce(
             self._group, x.contiguous(), mode, tag
