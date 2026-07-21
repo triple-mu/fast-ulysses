@@ -1,0 +1,12 @@
+===WS2_DUPLEX===
+BENCH nontma mode0 ws=2 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=12 tn=63 ts=1 stg=4 bdiv=4 |    763.4 us    352 GB/s
+BENCH nontma mode0 ws=2 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=12 tn=63 ts=1 stg=4 bdiv=4 |    753.1 us    356 GB/s
+===SMEMPAD_ON_COLLAPSING_CFG===
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    524.6 us    224 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    322.3 us    364 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    324.2 us    362 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    324.2 us    362 GB/s
+===MIXED_RERUN_ARCHIVE===
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    438.9 us    268 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=8 ts=1 stg=4 bdiv=4 |    488.8 us    240 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=1 stg=4 bdiv=4 |    405.2 us    290 GB/s

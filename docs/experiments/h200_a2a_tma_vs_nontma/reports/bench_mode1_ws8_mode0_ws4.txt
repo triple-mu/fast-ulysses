@@ -1,0 +1,28 @@
+===== mode1 USE_TMA=0 H=128 ws=8 =====
+=== mode1 | ws=8 | H=128 D=128 | ours=non-TMA ===
+N=  16384 | ours(non-TMA) med=   195.0us    301 GB/s | NCCL med=   301.8us    195 GB/s
+N=  32768 | ours(non-TMA) med=   373.6us    314 GB/s | NCCL med=   567.9us    207 GB/s
+N=  65536 | ours(non-TMA) med=   755.0us    311 GB/s | NCCL med=  1081.5us    217 GB/s
+N= 131072 | ours(non-TMA) med=  1607.6us    292 GB/s | NCCL med=  2136.4us    220 GB/s
+N= 262144 | ours(non-TMA) med=  3278.4us    287 GB/s | NCCL med=  4155.5us    226 GB/s
+===== mode1 USE_TMA=1 H=128 ws=8 =====
+=== mode1 | ws=8 | H=128 D=128 | ours=TMA ===
+N=  16384 | ours(TMA) med=   376.7us    156 GB/s | NCCL med=   302.2us    194 GB/s
+N=  32768 | ours(TMA) med=   658.5us    178 GB/s | NCCL med=   564.2us    208 GB/s
+N=  65536 | ours(TMA) med=   970.8us    242 GB/s | NCCL med=  1089.9us    216 GB/s
+N= 131072 | ours(TMA) med=  1645.5us    285 GB/s | NCCL med=  2145.5us    219 GB/s
+N= 262144 | ours(TMA) med=  3054.8us    308 GB/s | NCCL med=  4162.5us    226 GB/s
+===== mode0 USE_TMA=0 H=128 ws=4 =====
+=== mode0 | ws=4 | H=128 D=128 | ours=non-TMA ===
+N=  16384 | ours(non-TMA) med=   301.4us    334 GB/s | NCCL med=   515.4us    195 GB/s
+N=  32768 | ours(non-TMA) med=   631.8us    319 GB/s | NCCL med=   990.6us    203 GB/s
+N=  65536 | ours(non-TMA) med=  1311.1us    307 GB/s | NCCL med=  1917.9us    210 GB/s
+N= 131072 | ours(non-TMA) med=  2512.6us    321 GB/s | NCCL med=  3675.8us    219 GB/s
+N= 262144 | ours(non-TMA) med=  5077.3us    317 GB/s | NCCL med=  7167.4us    225 GB/s
+===== mode0 USE_TMA=1 H=128 ws=4 =====
+=== mode0 | ws=4 | H=128 D=128 | ours=TMA ===
+N=  16384 | ours(TMA) med=   330.4us    305 GB/s | NCCL med=   514.4us    196 GB/s
+N=  32768 | ours(TMA) med=   590.1us    341 GB/s | NCCL med=   995.6us    202 GB/s
+N=  65536 | ours(TMA) med=  1178.8us    342 GB/s | NCCL med=  1935.9us    208 GB/s
+N= 131072 | ours(TMA) med=  2415.0us    333 GB/s | NCCL med=  3674.4us    219 GB/s
+N= 262144 | ours(TMA) med=  5090.2us    316 GB/s | NCCL med=  7186.0us    224 GB/s

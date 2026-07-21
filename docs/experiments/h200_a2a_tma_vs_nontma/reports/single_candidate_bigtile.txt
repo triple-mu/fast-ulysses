@@ -1,0 +1,7 @@
+Successfully installed fast-ulysses-0.0.1
+N=  16384 | ours(TMA) med=   456.7us    129 GB/s | NCCL med=   300.8us    195 GB/s
+N=  32768 | ours(TMA) med=   933.2us    126 GB/s | NCCL med=   569.9us    206 GB/s
+tma-at] ws=8 mode=0 nl=16 sl=2048 | tn=16 ts=4 -> 453.1 us/call
+tma-at-pick] rank=0 mode=0 nl=16 sl=2048 -> tn=16 ts=4
+tma-at] ws=8 mode=0 nl=16 sl=4096 | tn=16 ts=4 -> 932.8 us/call
+tma-at-pick] rank=0 mode=0 nl=16 sl=4096 -> tn=16 ts=4

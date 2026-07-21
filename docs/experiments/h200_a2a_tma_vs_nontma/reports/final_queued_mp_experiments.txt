@@ -1,0 +1,41 @@
+# 终局实验数据（交互式运行的合并记录，mode0 除非注明）
+
+## queued（单进程，相位锁定 lockstep，复刻 bench_uniform 计时循环）
+TMA tn8/ts1/stg8/bdiv2   N=16K : 452.2 us (130 GB/s)   # host-paced 同配置 179.5 us
+TMA tn15/ts1/stg4/bdiv4  N=32K : 649.0 us (181 GB/s)   # lib tuner 测得 648.7 us ✓
+TMA tn16/ts4/stg8/bdiv2  N=32K : 325.3 us (361 GB/s)   # 单进程免疫
+TMA tn16/ts4/stg8/bdiv2  N=16K : 167.4 us (351 GB/s)
+nontma th512/un4/f12     N=32K : 536.3 us (219 GB/s)   # host-paced 348.6
+nontma th256/un8/f32     N=32K : 362.6 us (324 GB/s)   # lib bench 365.5 ✓ (tuner 实际 pick)
+
+## queued × alloc（映射类型在锁相位域也无差别）
+TMA tn16/ts4 N=16K malloc/posix/vmm : 167.1 / 167.0 / 167.0 us
+
+## seq（同进程先后两配置，13 iters each，queued）——无滞回
+A(8,1)=450.7 -> B(16,4)=167.7 ；A(16,4)=167.2 -> B(8,1)=450.8 （3 reps 一致）
+
+## 单候选强制（lib，FAST_ULYSSES_TMA_ONLY_BIGTILE=1，全 rank pick=(16,4)）
+N=16K : 456.7 us (129 GB/s)   N=32K : 933.2 us (126 GB/s)
+tuner 测得 (16,4) = 453.1 us/call —— lib 里免疫配置同样塌陷
+
+## mp（fork 8 进程 + cudaIpc 句柄交换，多进程部署形态复刻）
+TMA (16,4)/stg8/bdiv2 N=16K : 451.4 us (130 GB/s)   # = lib 456.7 ✓；单进程 queued 167
+TMA (8,1)/stg8/bdiv2  N=16K : 450.1 us              # = lib 452.8 ✓
+TMA (16,4)/stg8/bdiv2 N=32K : 913.6 us (129)        # = lib patched 933 ✓
+TMA (16,4)            N=256K: 7865.9 us (119)       # 大 tile 在 MP 处处糟糕
+TMA (15,1)/stg4/bdiv4 N=256K: 3418.6 us (275)       # = 原始 lib bench 275 ✓
+nontma th256/un8/f32  N=32K : 361.8 us (325)        # = lib 365.5 ✓；st.global 对进程拓扑不敏感
+nontma th256/un8/f32  N=256K: 3764.2 us (250)
+TMA ws=4 (31,1)/stg4/bdiv4 N=64K : 1224.2 us (329)  # ws=4 在 MP 也健康 ≈ bench 342
+
+## smempad 治愈崩溃配置（tn15/ts1/stg4/bdiv4 N=32K 并发，host-paced）
+pad=0(13blk/SM)=524.6us(224) ; pad>=48K(<=3blk/SM)=322-324us(362-364)  # 驻留块因果确立
+
+## ws=2 双工隔离（nontma th512/f12 N=32K）
+并发(双向) 352 GB/s vs 单发送 356 GB/s   # 双工本身仅 -1%
+
+## NCCL_NVLS_ENABLE=0（lib，ONLY_BIGTILE）
+N=16K/32K : 128/126 GB/s  # 无变化，排除 NCCL NVLS 干扰
+
+## 还原后 sanity（原始 lib，auto）
+N=32K : 366.2 us (321 GB/s) ✓

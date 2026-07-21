@@ -1,0 +1,20 @@
+Successfully installed fast-ulysses-0.0.1
+===CORRECTNESS===
+OK ws=8 bfloat16 d=256 mode=1 use_tma=None shape=(2, 16, 32, 256)
+OK[distinct-tag] ws=8 q/k live together, no alias
+ALL PASS
+===TMA_PATCHED_BENCH===
+=== mode0 | ws=8 | H=128 D=128 | ours=TMA ===
+N=  16384 | ours(TMA) med=   456.8us    129 GB/s | NCCL med=   301.8us    195 GB/s
+N=  32768 | ours(TMA) med=   929.3us    126 GB/s | NCCL med=   560.6us    209 GB/s
+N=  65536 | ours(TMA) med=  1263.7us    186 GB/s | NCCL med=  1080.0us    217 GB/s
+N= 262144 | ours(TMA) med=  2779.7us    338 GB/s | NCCL med=  4146.2us    227 GB/s
+===TMA_PATCHED_WAN===
+=== mode0 | ws=8 | H=40 D=128 | ours=TMA ===
+N=  75600 | ours(TMA) med=   322.5us    263 GB/s | NCCL med=   417.6us    203 GB/s
+===NSYS_N16K===
+Generating SQLite file /tmp/a2a_tma16k.sqlite from /tmp/a2a_tma16k.nsys-rep
+Processing [/tmp/a2a_tma16k.sqlite] with [/usr/local/cuda-12.8/NsightSystems-cli-2025.1.1/target-linux-x64/reports/cuda_gpu_kern_sum.py]...
+ Time (%)  Total Time (ns)  Instances  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                                                  Name
+     19.9        243413463        648   375638.1   439265.5    161440    624160     109548.2  void ulysses::a2a_tma_kernel<(int)8>(CUtensorMap_st, ulysses::TmaMaps, int, int, int, int, int, int…
+      3.9         47517012        616    77138.0    14160.0      2432    302976     105217.9  ulysses::ulysses_barrier_kernel(unsigned long *, ulysses::BarPeers, int, int, unsigned long)

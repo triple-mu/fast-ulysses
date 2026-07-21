@@ -1,0 +1,22 @@
+N=  32768 | ours(TMA) med=   657.0us    179 GB/s | NCCL med=   584.4us    201 GB/s
+Generating SQLite file /tmp/a2a_tma_nsys.sqlite from /tmp/a2a_tma_nsys.nsys-rep
+Processing [/tmp/a2a_tma_nsys.sqlite] with [/usr/local/cuda-12.8/NsightSystems-cli-2025.1.1/target-linux-x64/reports/cuda_gpu_kern_sum.py]...
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                                                  Name
+ --------  ---------------  ---------  ---------  ---------  --------  --------  -----------  ----------------------------------------------------------------------------------------------------
+     56.5        748237809        112  6680694.7  1231312.5       992  78848053   20112638.6  void nvshmemi_init_array_kernel<long>(T1 *, int, T1)
+     23.5        310864800        512   607157.8   627151.5    373056    708864      61500.5  void ulysses::a2a_tma_kernel<(int)4>(CUtensorMap_st, ulysses::TmaMaps, int, int, int, int, int, int…
+      7.1         93853603        104   902438.5   110703.5      2880  26015740    2958753.2  void barrier_on_stream_kernel_threadgroup<(threadgroup_t)1>(int, int)
+      7.0         92315609        200   461578.0   397632.0    338400   2871551     342426.3  ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<(unsigned long)4096>)
+      2.5         33696456        200   168482.3   168448.0    166912    173696        765.0  void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::n…
+      1.8         23768624        512    46423.1    21456.0      2464    294624      62280.4  ulysses::ulysses_barrier_kernel(unsigned long *, ulysses::BarPeers, int, int, unsigned long)
+      0.9         12411073         24   517128.0   393360.5     10208   1501765     454804.4  ncclDevKernel_AllReduce_Sum_f32_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)
+      0.7          8902564          8  1112820.5   868544.0    110208   2556584     912515.2  ncclDevKernel_Broadcast_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)
+      0.1          1264895          8   158111.9   158240.0    157440    158816        525.4  void at::native::<unnamed>::distribution_elementwise_grid_stride_kernel<float, (int)4, void at::nat…
+      0.0            69216         64     1081.5     1088.0       832      1344        151.2  void nvshmemi_init_array_kernel<nvshmemi_team_creation_pe_info>(T1 *, int, T1)
+      0.0            33056         24     1377.3     1472.0      1056      1728        205.1  void at::native::vectorized_elementwise_kernel<(int)4, at::native::FillFunctor<float>, std::array<c…
+      0.0            16320          8     2040.0     2048.0      1984      2080         28.4  void nvshmemi_init_array_kernel<unsigned char>(T1 *, int, T1)
+      0.0            15072          8     1884.0     1904.0      1760      1952         67.2  void nvshmemi_init_array_kernel<unsigned long>(T1 *, int, T1)
+      0.0            10400          8     1300.0     1280.0      1248      1536         96.7  void nvshmemi_init_array_kernel<nvshmemi_team_v3 *>(T1 *, int, T1)

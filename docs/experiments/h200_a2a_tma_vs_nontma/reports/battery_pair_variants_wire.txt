@@ -1,0 +1,74 @@
+===== PAIR: copy-engine DMA reference (512MB GPU0->GPU1) =====
+PAIR memcpy local=0 512MB |   1357.2 us    396 GB/s
+PAIR memcpy local=0 512MB |   1357.2 us    396 GB/s
+===== PAIR: nontma (SM st.global 16B) GPU0->GPU1, threads x factor =====
+PAIR nontma local=0 512MB th=128 un=4 f=4 tn=15 ts=1 stg=4 bdiv=4 |   1466.8 us    366 GB/s
+PAIR nontma local=0 512MB th=128 un=4 f=8 tn=15 ts=1 stg=4 bdiv=4 |   1462.1 us    367 GB/s
+PAIR nontma local=0 512MB th=128 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |   1457.1 us    368 GB/s
+PAIR nontma local=0 512MB th=128 un=4 f=32 tn=15 ts=1 stg=4 bdiv=4 |   1458.5 us    368 GB/s
+PAIR nontma local=0 512MB th=256 un=4 f=4 tn=15 ts=1 stg=4 bdiv=4 |   1457.2 us    368 GB/s
+PAIR nontma local=0 512MB th=256 un=4 f=8 tn=15 ts=1 stg=4 bdiv=4 |   1455.0 us    369 GB/s
+PAIR nontma local=0 512MB th=256 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |   1455.5 us    369 GB/s
+PAIR nontma local=0 512MB th=256 un=4 f=32 tn=15 ts=1 stg=4 bdiv=4 |   1462.9 us    367 GB/s
+PAIR nontma local=0 512MB th=512 un=4 f=4 tn=15 ts=1 stg=4 bdiv=4 |   1456.7 us    369 GB/s
+PAIR nontma local=0 512MB th=512 un=4 f=8 tn=15 ts=1 stg=4 bdiv=4 |   1453.6 us    369 GB/s
+PAIR nontma local=0 512MB th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |   1460.1 us    368 GB/s
+PAIR nontma local=0 512MB th=512 un=4 f=32 tn=15 ts=1 stg=4 bdiv=4 |   1452.6 us    370 GB/s
+PAIR nontma local=0 512MB th=1024 un=4 f=4 tn=15 ts=1 stg=4 bdiv=4 |   1453.0 us    370 GB/s
+PAIR nontma local=0 512MB th=1024 un=4 f=8 tn=15 ts=1 stg=4 bdiv=4 |   1456.1 us    369 GB/s
+PAIR nontma local=0 512MB th=1024 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |   1449.5 us    370 GB/s
+PAIR nontma local=0 512MB th=1024 un=4 f=32 tn=15 ts=1 stg=4 bdiv=4 |   1444.2 us    372 GB/s
+--- local-dst reference (same kernel, dst on GPU0) ---
+PAIR nontma local=0 512MB th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |   1458.6 us    368 GB/s
+===== PAIR: tma bulk tensor GPU0->GPU1, tile_n x tile_s (tile_bytes = tn*ts*256B) =====
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=8 ts=1 stg=4 bdiv=4 |   1459.3 us    368 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=8 ts=2 stg=4 bdiv=4 |   1452.4 us    370 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=8 ts=4 stg=4 bdiv=4 |   1449.1 us    370 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=16 ts=1 stg=4 bdiv=4 |   1453.1 us    369 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=16 ts=2 stg=4 bdiv=4 |   1447.8 us    371 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=16 ts=4 stg=4 bdiv=4 |   1447.2 us    371 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=32 ts=1 stg=4 bdiv=4 |   1449.6 us    370 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=32 ts=2 stg=4 bdiv=4 |   1447.3 us    371 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=32 ts=4 stg=4 bdiv=4 |   1445.7 us    371 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=64 ts=1 stg=4 bdiv=4 |   1449.3 us    370 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=64 ts=2 stg=4 bdiv=4 |   1445.0 us    372 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=64 ts=4 stg=4 bdiv=4 |     -1.0 us -536871 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=128 ts=1 stg=4 bdiv=4 |   1444.9 us    372 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=128 ts=2 stg=4 bdiv=4 |     -1.0 us -536871 GB/s
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=128 ts=4 stg=4 bdiv=4 |     -1.0 us -536871 GB/s
+--- local-dst reference ---
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=64 ts=2 stg=4 bdiv=4 |   1444.7 us    372 GB/s
+===== WIRE: data/raw NVLink bytes per method (single sender) =====
+PAIR memcpy local=0 512MB |   1356.8 us    396 GB/s
+WIRE pair_memcpy dataTx_KiB=12058627 rawTx_KiB=12836280
+PAIR nontma local=0 512MB th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |   1460.3 us    368 GB/s
+WIRE pair_nontma dataTx_KiB=12582912 rawTx_KiB=14251161
+PAIR tma local=0 512MB th=512 un=4 f=16 tn=16 ts=4 stg=4 bdiv=4 |   1446.9 us    371 GB/s
+WIRE pair_tma dataTx_KiB=12582912 rawTx_KiB=14213555
+===== A2A variants (mode0 ws=8 N=32768 H=128) =====
+--- nontma faithful, concurrent ---
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=12 tn=15 ts=1 stg=4 bdiv=4 |    350.3 us    335 GB/s
+--- nontma write-only (no src reads), concurrent ---
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=1 localdst=0 th=512 un=4 f=12 tn=15 ts=1 stg=4 bdiv=4 |    346.7 us    339 GB/s
+--- nontma local-dst (no NVLink), single ---
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=1 th=512 un=4 f=12 tn=15 ts=1 stg=4 bdiv=4 |     83.2 us   1613 GB/s
+--- nontma faithful, single sender (no contention) ---
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=12 tn=15 ts=1 stg=4 bdiv=4 |    328.3 us    358 GB/s
+--- tma faithful (repo default cfg), concurrent ---
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    526.3 us    223 GB/s
+--- tma BEST cfg (tn=16 ts=4 stg=8 bdiv=2), concurrent ---
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=8 bdiv=2 |    324.8 us    362 GB/s
+--- tma local-dst, single ---
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=1 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |     88.0 us   1525 GB/s
+--- tma faithful, single sender ---
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    331.0 us    355 GB/s
+===== WIRE: a2a single-sender data/raw per path =====
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=12 tn=15 ts=1 stg=4 bdiv=4 |    328.7 us    357 GB/s
+WIRE a2a_nontma_single dataTx_KiB=6193153 rawTx_KiB=7021008
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    330.9 us    355 GB/s
+WIRE a2a_tma_single dataTx_KiB=6193151 rawTx_KiB=7023877
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=8 bdiv=2 |    324.5 us    362 GB/s
+WIRE a2a_tmabest_single dataTx_KiB=6193153 rawTx_KiB=7009578
+--- tma BEST single sender (timing) ---
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=8 bdiv=2 |    324.9 us    361 GB/s
+payload/iter(single sender egress) = numel*2*7/8 = 117.44 MB; iters incl 3 warmup + 1 probe

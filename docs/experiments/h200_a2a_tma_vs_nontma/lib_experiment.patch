@@ -1,0 +1,136 @@
+diff --git a/fast_ulysses/csrc/all_to_all_tma.cu b/fast_ulysses/csrc/all_to_all_tma.cu
+index 804a939..ba698b0 100644
+--- a/fast_ulysses/csrc/all_to_all_tma.cu
++++ b/fast_ulysses/csrc/all_to_all_tma.cu
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <c10/util/Exception.h>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cuda.h>
+ #include <cuda_runtime.h>
+ #include <functional>
+@@ -193,7 +194,7 @@ void launch_a2a_tma(const void*                  src,
+     const int      s_local = dims.s_local, n_local = dims.n_local;
+     const int      tile_n     = std::min({cfg.tile_n, n_local, 256});
+     const int      tile_s     = std::min({cfg.tile_s, s_local, 256});
+-    constexpr int  stages     = 4;  // fixed (measured DiT optimum; keeps tma_wait_group at {3,0})
++    constexpr int  stages     = 8;  // EXPERIMENT: deep pipeline (was 4)
+     const uint32_t tile_bytes = (uint32_t)tile_s * tile_n * d * elem_size;
+     const uint32_t tb_al      = (tile_bytes + 127u) & ~127u;
+     const int      smem       = (int)(tb_al * (uint32_t)stages) + 128 + 8 * stages;
+@@ -208,7 +209,7 @@ void launch_a2a_tma(const void*                  src,
+     const int     n_stiles = (s_local + tile_s - 1) / tile_s;
+     const int     n_ntiles = (n_local + tile_n - 1) / tile_n;
+     const int     total    = ws * b * n_stiles * n_ntiles;
+-    constexpr int bdiv     = 4;  // fixed (measured DiT optimum): more tiles per block -> enables pipelining
++    constexpr int bdiv     = 2;  // EXPERIMENT: fewer tiles per block, fewer resident blocks (was 4)
+     const int     blocks   = std::max(std::min(total, 65535) / bdiv, 1);
+
+     CUtensorMap src_map;
+@@ -229,7 +230,7 @@ void launch_a2a_tma(const void*                  src,
+ // region (corruption; and during autotune the cross-rank overrun writes race). Require it to divide: mode0
+ // needs s_local % tile_s == 0 (tile_s is 1 here, always ok), mode1 needs n_local % tile_n == 0. The other dim
+ // spans the rank's full chunk == the dst global dim, so its trailing tile is clipped correctly.
+-static std::vector<A2AConfig> tma_candidates(int mode, int n_local, int s_local)
++static std::vector<A2AConfig> tma_candidates(int mode, int n_local, int s_local, int d, int elem_size)
+ {
+     std::vector<A2AConfig> v;
+     auto                   add = [&](int tn, int ts) {
+@@ -247,6 +248,22 @@ static std::vector<A2AConfig> tma_candidates(int mode, int n_local, int s_local)
+     };
+     // Converged set (stages/bdiv fixed at 4): vary tile_n {default, n_local-1, n_local/2, n_local, 8} and,
+     // for mode1, also tile_s {1,2}. The overrun guard in add() drops non-dividing tile_n for mode1.
++    // EXPERIMENT(FAST_ULYSSES_TMA_ONLY_BIGTILE=1): keep only the big-tile candidate, to separate
++    // "tuner measures candidates wrong" from "lib runs the config slow".
++    static const bool only_bigtile = [] {
++        const char* e = getenv("FAST_ULYSSES_TMA_ONLY_BIGTILE");
++        return e && e[0] == '1';
++    }();
++    if (only_bigtile) {
++        const int64_t row_bytes = static_cast<int64_t>(n_local) * d * elem_size;
++        int           ts_big    = 1;
++        for (int t = 2; t <= 64; ++t)
++            if (s_local % t == 0 && row_bytes * t <= 24 * 1024)
++                ts_big = t;
++        add(n_local, ts_big);
++        if (!v.empty())
++            return v;
++    }
+     const A2AConfig def = default_config(mode, n_local);  // seed: default config enters candidates first
+     add(def.tile_n, def.tile_s);
+     const int nl1 = std::max(1, n_local - 1), nlh = std::max(1, n_local / 2);
+@@ -257,6 +274,17 @@ static std::vector<A2AConfig> tma_candidates(int mode, int n_local, int s_local)
+     add(8, 1);
+     add(nl1, ts_extra);
+     add(nlh, ts_extra);
++    // EXPERIMENT: big-tile deep-pipeline candidate -- largest tile_s dividing s_local with tile <= 24KB
++    // (whole-block tile_n, so mode1's divisibility guard also passes).
++    {
++        const int64_t row_bytes = static_cast<int64_t>(n_local) * d * elem_size;
++        int           ts_big    = 1;
++        for (int t = 2; t <= 64; ++t)
++            if (s_local % t == 0 && row_bytes * t <= 24 * 1024)
++                ts_big = t;
++        if (ts_big > 1)
++            add(n_local, ts_big);
++    }
+     return v;
+ }
+
+@@ -275,11 +303,16 @@ A2AConfig resolve_config_tma(const void*                  src,
+                              const std::function<void()>& finish)
+ {
+     const int  n_local = dims.n_local, s_local = dims.s_local, ws = (int)peer_ptrs.size();
+-    const auto cands = tma_candidates(mode, n_local, s_local);
++    const auto cands = tma_candidates(mode, n_local, s_local, dims.d, elem_size);
+
+     A2AConfig best   = cands[0];
+     float     best_t = 1e30f;
+     for (const auto& c : cands) {
++        // Probe (bare launch, not timed): a candidate can exceed the smem budget (deep stages x big
++        // tile). A failed launch returns synchronously; skip it (cudaGetLastError clears the error).
++        launch_a2a_tma(src, peer_ptrs, dims, mode, elem_size, c, stream);
++        if (cudaGetLastError() != cudaSuccess)
++            continue;
+         // Timed run is the real per-call op (launch + finish=quiet+barrier) so the ranking matches steady
+         // state (a launch-only microbench mis-ranks tile_n: a smaller tile_n that loses on raw launch time
+         // wins once the cross-rank barrier serializes per-iteration contention).
+diff --git a/fast_ulysses/csrc/ulysses_group.cu b/fast_ulysses/csrc/ulysses_group.cu
+index a9dc8ae..d769dab 100644
+--- a/fast_ulysses/csrc/ulysses_group.cu
++++ b/fast_ulysses/csrc/ulysses_group.cu
+@@ -2,8 +2,10 @@
+ #include "ulysses_group.cuh"
+ #include <ATen/cuda/CUDAContext.h>
+ #include <c10/cuda/CUDAGuard.h>
++#include <cstdlib>
+ #include <cstring>
+ #include <cuda_runtime.h>
++#include <iostream>
+ #include <nvshmem.h>
+ #include <nvshmemx.h>
+ #include <torch/torch.h>
+@@ -169,8 +171,20 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&
+         auto            it  = cfg_cache_.find(key);
+         if (it != cfg_cache_.end())
+             return it->second;
+-        A2AConfig cfg   = tma ? resolve_config_tma(src, peers, dims, mode, elem, false, stream, finish) :
+-                                resolve_config_nontma(src, peers, dims, mode, elem, stream, false, finish);
++        // FAST_ULYSSES_TUNE_VERBOSE=1: print per-candidate microbench results (debug; all ranks).
++        static const bool tune_verbose = [] {
++            const char* e = getenv("FAST_ULYSSES_TUNE_VERBOSE");
++            return e && e[0] == '1';
++        }();
++        A2AConfig cfg   = tma ? resolve_config_tma(src, peers, dims, mode, elem, tune_verbose, stream, finish) :
++                                resolve_config_nontma(src, peers, dims, mode, elem, stream, tune_verbose, finish);
++        if (tune_verbose && !tma)
++            std::cerr << "[nontma-at] rank=" << dims.rank << " mode=" << mode << " nl=" << dims.n_local
++                      << " sl=" << dims.s_local << " -> th=" << cfg.threads << " un=" << cfg.unroll
++                      << " blocks=" << cfg.blocks << std::endl;
++        if (tune_verbose && tma)
++            std::cerr << "[tma-at-pick] rank=" << dims.rank << " mode=" << mode << " nl=" << dims.n_local
++                      << " sl=" << dims.s_local << " -> tn=" << cfg.tile_n << " ts=" << cfg.tile_s << std::endl;
+         cfg_cache_[key] = cfg;
+         return cfg;
+     };

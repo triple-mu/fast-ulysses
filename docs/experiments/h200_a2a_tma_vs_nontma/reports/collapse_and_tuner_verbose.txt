@@ -1,0 +1,61 @@
+BUILD_OK
+===== A. resident-block throttle via smempad (tn16 ts4 stg2 bdiv2, m0 ws8 N=32768, concurrent) =====
+  base smem 32.4KB: pad 0->7blk/SM, 16K->4, 32K->3, 64K->2, 96K/160K->1
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    349.8 us    336 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    328.7 us    357 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    327.8 us    358 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    326.1 us    360 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    326.0 us    360 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    325.7 us    361 GB/s
+===== A2. same config, single sender (collapse should vanish) =====
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    330.5 us    355 GB/s
+BENCH tma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=2 bdiv=2 |    325.0 us    361 GB/s
+===== B. nontma factor cliff th512 un4 (concurrent) =====
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=4 tn=15 ts=1 stg=4 bdiv=4 |    421.8 us    278 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=8 tn=15 ts=1 stg=4 bdiv=4 |    393.0 us    299 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=12 tn=15 ts=1 stg=4 bdiv=4 |    348.6 us    337 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    350.0 us    336 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=20 tn=15 ts=1 stg=4 bdiv=4 |    419.9 us    280 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=24 tn=15 ts=1 stg=4 bdiv=4 |    494.0 us    238 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=28 tn=15 ts=1 stg=4 bdiv=4 |    563.4 us    208 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=32 tn=15 ts=1 stg=4 bdiv=4 |    609.2 us    193 GB/s
+===== B2. nontma factor curve, single sender (cliff should vanish) =====
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=8 tn=15 ts=1 stg=4 bdiv=4 |    329.5 us    356 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    328.9 us    357 GB/s
+BENCH nontma mode0 ws=8 N=32768 H=128 D=128 conc=0 var=0 localdst=0 th=512 un=4 f=32 tn=15 ts=1 stg=4 bdiv=4 |    328.3 us    358 GB/s
+===== C. repo TMA candidate set at N=16384 (bench measured 167 GB/s) concurrent =====
+BENCH tma mode0 ws=8 N=16384 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    183.1 us    321 GB/s
+BENCH tma mode0 ws=8 N=16384 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=8 ts=1 stg=4 bdiv=4 |    183.0 us    321 GB/s
+BENCH tma mode0 ws=8 N=16384 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=1 stg=4 bdiv=4 |    183.5 us    320 GB/s
+BENCH tma mode0 ws=8 N=16384 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=16 tn=16 ts=4 stg=8 bdiv=2 |    166.6 us    353 GB/s
+BENCH nontma mode0 ws=8 N=16384 H=128 D=128 conc=1 var=0 localdst=0 th=512 un=4 f=12 tn=15 ts=1 stg=4 bdiv=4 |    239.8 us    245 GB/s
+===== D. pair local-dst HBM references (fixing earlier --local typo) =====
+PAIR nontma local=1 512MB th=512 un=4 f=16 tn=15 ts=1 stg=4 bdiv=4 |    278.5 us   1928 GB/s
+PAIR tma local=1 512MB th=512 un=4 f=16 tn=64 ts=2 stg=4 bdiv=4 |    271.9 us   1974 GB/s
+===== E. real tuner picks (rebuilt lib, FAST_ULYSSES_TUNE_VERBOSE=1) =====
+--- forced TMA, N=16384,32768 ---
+      1 [tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=8[tma-at] ws=888888 mode=8 mode= mode=00 nl= mode= mode= mode=0 mode= mode=0 nl=1600 nl= nl=00 nl=16 sl= nl=161616 nl= nl=1616 sl=40964096 sl= | tn=4096 sl= | tn= sl=16 sl= sl= | tn=164096 ts=164096 sl=40964096 | tn=16 | tn=1 ts= | tn=4096 | tn=1616 ts=16 -> 116 | tn= ts= ts= ts=11 ts= -> 1651.31611 ->  -> 651.3 ->  us/call ts= ->  -> 651.3651.3 us/call651.3
+      1 [tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=8[tma-at] ws= mode=80888888 nl= mode=16 mode= mode= mode= mode= mode= mode=00 nl=0 sl=0000 nl= nl=16 nl=4096 nl= nl= nl=1616 sl=16 | tn=16151616 sl= sl= sl=4096 sl= sl=4096 ts= | tn=1 sl= -> 4096409640964096 | tn=409615 | tn= | tn=15 | tn= | tn=1515 | tn= ts=15 ts=151 ts= ->  ts=15648.71 ts= ts=11 ->  ts= us/call1 ->  -> 11 -> 648.7
+      1 [tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=888[tma-at] ws=8 mode=8 mode= mode=88 mode= mode= mode=8 mode=0000000 mode= nl= nl= nl= nl= nl= nl= nl=1601616161616 sl= sl=162048 nl= | tn= sl= sl= sl= sl=2048 sl=1682048204820482048 | tn=2048 sl= | tn= ts=2048 | tn= | tn= | tn=88 ts= ts= | tn=881 ts= | tn=8 ts=118 ts= -> 18 -> 1 ->  ->  ts=1378.9 ->  us/call ts=378.91378.9 ->  us/call378.9
+      1 [tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=88[tma-at] ws=8 mode=8 mode=0[tma-at] ws= nl=88 mode=80 mode=8 mode= mode=0 mode=16 mode= sl= nl=000 nl=00204816 nl= nl= nl=161616 nl= nl= | tn=16 sl=16 sl= sl=2048 sl= | tn=161616 sl=2048 sl=20482048 sl= ts=2048 ts=2048 | tn=204816 | tn= | tn=116 | tn=1 | tn= | tn= ts=16 ->  ts=16 -> 1616 ts= ts=1 ts= -> 374.61 us/call ts=374.611 -> 1374.6 ->
+      1 [tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=[tma-at] ws=8[tma-at] ws=[tma-at] ws=[tma-at] ws=8 mode=888 mode= mode=88 mode=0 mode=800 mode= mode=0 nl=0 mode= nl= nl=00 nl=16 nl=016 nl=16 nl=1616 sl= nl= sl=1616 sl= sl=204816 sl=204820482048 | tn= sl= sl=2048 | tn= sl= | tn= | tn=152048 ts=2048 | tn=15204815 | tn=15 | tn=1 | tn= -> 15 ts= ts=15 ts=15115 ts=11 ts= ts= -> 348.0 ts=1 ->  -> 11 us/call -> 1 ->  -> 348.1348.1 -> 348.0
+      1 [tma-at] ws=[tma-at] ws=[tma-at] ws=8[tma-at] ws=[tma-at] ws=[tma-at] ws=8[tma-at] ws=[tma-at] ws=8 mode=88 mode= mode=8 mode= mode=808 mode=00 nl=000 mode= nl= mode=16 nl= sl=16 nl= nl= nl=00164096 sl= sl=40964096161616 nl= nl= | tn= | tn=88 ts= | tn= sl= sl= sl=409616 | tn=16 ts=1840964096 sl=84096 sl= | tn=40961 | tn= ->  ts= | tn= | tn= ts=8 -> 8669.31669.3881 ts= ts= us/call1
+      1 [tma-at-pick] rank=374.6[tma-at-pick] rank=
+      1 [tma-at-pick] rank=
+      1 N=  32768 | ours(TMA) med=   651.8us    180 GB/s | NCCL med=   567.3us    207 GB/s
+      1 N=  16384 | ours(TMA) med=   352.8us    166 GB/s | NCCL med=   301.5us    195 GB/s
+      1 651.3[tma-at-pick] rank=[tma-at-pick] rank= us/call1[tma-at-pick] rank= mode=[tma-at-pick] rank= mode=7 mode=[tma-at-pick] rank=0
+      1 40 mode=0 mode=050 mode=[tma-at-pick] rank= nl=20 nl= nl=16 mode= sl=0 nl= nl=1616 sl= mode= nl=16 sl=0409616 sl=40964096 -> tn=0164096 nl= nl=16 -> tn= sl= -> tn=15 sl= -> tn=1615 sl= ts= sl=154096409615 -> tn= ts= ts=409640961 -> tn= ts=15111 -> tn= -> tn=
+      1 1374.6 us/call -> 374.6 us/call374.6 ->  us/call[tma-at-pick] rank= us/call ->
+      1  us/call[tma-at-pick] rank= ->  us/call
+      1  us/call mode=[tma-at-pick] rank=4[tma-at-pick] rank= us/call7[tma-at-pick] rank= mode=6
+      1  mode=0 nl= mode=[tma-at-pick] rank= nl= mode=00[tma-at-pick] rank=160 sl= nl=0160 nl= nl=516204816 mode= sl=0 nl=16 sl= mode=2048 -> tn= sl=1520482048 nl=16 sl=0 -> tn= nl= ts= -> tn= -> tn=16 sl= sl=20481516 ts=1
+--- auto path, N=32768 ---
+[ulysses non-TMA tune] ws=[nontma-at] rank=[nontma-at] rank=[nontma-at] rank=[nontma-at] rank=86[nontma-at] rank=[nontma-at] rank= mode=[nontma-at] rank= mode=407 mode= mode=0 n_local=2100 nl= nl=316 mode= mode= mode= nl=16165 sl=16 s_local=04096 nl=016 nl=0 sl= mode=4096 sl= d=4096 sl=16 nl=40960 -> th=128 -> th=4096 -> th= sl=16 -> th= nl=256256 -> threads=2562564096 un= sl=16 un= un=256 un= unroll=8 -> th= blocks=84096 sl= -> th=8256 blocks=882564224 blocks=4096 un=4224 blocks= blocks=4224 un= |
+[nontma-at] rank=0 mode=0 nl=16 sl=4096 -> th=256 un=8 blocks=4224
+ -> [tma-at-pick] rank= ts= ts=1 ->  -> 1 -> 4653.0653.0 us/call us/call1 -> 653.0653.0 ->  mode=653.1
+ ->  us/call us/call653.00 nl= us/call[tma-at-pick] rank=
+[tma-at-pick] rank=
+1[tma-at-pick] rank=[tma-at-pick] rank=7 mode=[tma-at-pick] rank= us/call[tma-at-pick] rank=
+ sl= mode=3 mode=0254096[tma-at-pick] rank=0 nl= mode=0 nl= mode=16 mode= -> tn=015 mode=160 nl=0 sl= nl=0 ts=0 sl= nl=16409616 nl= sl=1 nl=409616 sl=164096 sl= sl= -> tn=164096
+N=  32768 | ours(auto) med=   364.8us    322 GB/s | NCCL med=   565.8us    208 GB/s
