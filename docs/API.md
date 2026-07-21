@@ -145,6 +145,12 @@ group.signal_wait()           # caller's stream: poll kernel; then q/k/v outputs
   `world_size == 1`.
 - Same rank-uniform call-sequence contract as `fast_barrier`; arrive/wait pairs and barrier calls
   may be mixed across call sites as long as the pattern is identical on all ranks.
+- **Known limitation**: enqueueing many CE+signal groups far ahead of the device **without any
+  drain** (no `wait()`/sync between groups) can deadlock, timing-dependently — reproduced at ws=2
+  with ≥4 undrained back-to-back groups; kernel-path (`all_to_all_single_4d_async`) pile-ups and
+  single groups are unaffected. Pipelines that consume each group's outputs (real compute between
+  groups, or a periodic `handle.wait()`) are the validated regime. Root cause under
+  investigation.
 
 ## `destroy() -> None`
 

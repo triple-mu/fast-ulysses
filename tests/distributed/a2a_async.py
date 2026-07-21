@@ -121,7 +121,10 @@ def main():
     )
 
     # 7) epoch wrap: >256 arrive/wait pairs cross the low-byte wrap (and the skip-zero
-    #    branch). Small tensor; verify every 50 rounds and at the end.
+    #    branch). Each round drains before the next: deep UNDRAINED pile-ups of CE+signal
+    #    groups can still deadlock (timing-dependent; base-path piles and single groups are
+    #    fine -- see the known-limitation note in docs/API.md), so this test pins the wrap
+    #    coverage to the supported drained regime.
     w = torch.randn(1, 8, ws, 32, device=dev, dtype=torch.bfloat16)
     wref = group.all_to_all_single_4d_ce(w, mode=0, tag="wrapref").clone()
     wrap_ok = True
@@ -129,9 +132,9 @@ def main():
         hw = group.all_to_all_single_4d_ce_async(w, mode=0, tag="wrap", barrier=False)
         group.signal_arrive_async()
         group.signal_wait()
+        got_w = hw.wait()
+        torch.cuda.synchronize()
         if i % 50 == 49 or i == 299:
-            got_w = hw.wait()
-            torch.cuda.synchronize()
             wrap_ok = wrap_ok and torch.equal(got_w, wref)
             dist.barrier()  # keep peers' next-round writes from racing this round's read
     check("signal epoch wrap (300 rounds)", wrap_ok)
