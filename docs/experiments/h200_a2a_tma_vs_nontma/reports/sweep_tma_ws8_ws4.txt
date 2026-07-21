@@ -1,0 +1,358 @@
+BUILD_OK
+===TMA_SWEEP_m0_ws8_N32768===
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=2 bdiv=2 |    376.8 us    312 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=2 bdiv=4 |    355.6 us    330 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=2 bdiv=8 |    375.0 us    313 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=4 bdiv=2 |    351.1 us    334 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=4 bdiv=4 |    376.6 us    312 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=4 bdiv=8 |    387.4 us    303 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=8 bdiv=2 |    398.5 us    295 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=8 bdiv=4 |    500.1 us    235 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=1 stg=8 bdiv=8 |    389.0 us    302 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=2 bdiv=2 |    350.9 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=2 bdiv=4 |    350.1 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=2 bdiv=8 |    350.4 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=4 bdiv=2 |    346.1 us    339 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=4 bdiv=4 |    389.2 us    302 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=4 bdiv=8 |    391.0 us    300 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=8 bdiv=2 |    416.2 us    282 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=8 bdiv=4 |    526.6 us    223 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=2 stg=8 bdiv=8 |    361.7 us    325 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=2 bdiv=2 |    353.1 us    333 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=2 bdiv=4 |    353.8 us    332 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=2 bdiv=8 |    353.2 us    333 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=4 bdiv=2 |    348.2 us    337 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=4 bdiv=4 |    419.0 us    280 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=4 bdiv=8 |    383.3 us    306 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=8 bdiv=2 |    326.5 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=8 bdiv=4 |    329.4 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=4 stg=8 bdiv=8 |    334.1 us    352 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=2 bdiv=2 |    350.2 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=2 bdiv=4 |    351.1 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=2 bdiv=8 |    351.6 us    334 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=4 bdiv=2 |    328.2 us    358 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=4 bdiv=4 |    330.5 us    355 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=4 bdiv=8 |    332.5 us    353 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=8 bdiv=2 |    325.3 us    361 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=8 bdiv=4 |    326.8 us    359 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=8 ts=8 stg=8 bdiv=8 |    330.1 us    356 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=2 bdiv=2 |    429.5 us    273 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=2 bdiv=4 |    407.5 us    288 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=2 bdiv=8 |    362.3 us    324 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=4 bdiv=2 |    434.4 us    270 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=4 bdiv=4 |    525.9 us    223 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=4 bdiv=8 |    363.6 us    323 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=8 bdiv=2 |    485.6 us    242 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=8 bdiv=4 |    556.3 us    211 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=1 stg=8 bdiv=8 |    356.3 us    330 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=2 bdiv=2 |    351.1 us    334 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=2 bdiv=4 |    351.4 us    334 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=2 bdiv=8 |    349.0 us    337 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=4 bdiv=2 |    352.7 us    333 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=4 bdiv=4 |    448.0 us    262 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=4 bdiv=8 |    363.7 us    323 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=8 bdiv=2 |    326.2 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=8 bdiv=4 |    327.7 us    358 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=2 stg=8 bdiv=8 |    330.3 us    356 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=2 bdiv=2 |    353.8 us    332 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=2 bdiv=4 |    351.8 us    334 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=2 bdiv=8 |    349.4 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=4 bdiv=2 |    326.9 us    359 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=4 bdiv=4 |    329.9 us    356 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=4 bdiv=8 |    330.2 us    356 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=8 bdiv=2 |    324.9 us    361 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=8 bdiv=4 |    326.5 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=4 stg=8 bdiv=8 |    329.2 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=2 bdiv=2 |    329.7 us    356 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=2 bdiv=4 |    331.8 us    354 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=2 bdiv=8 |    333.3 us    352 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=4 bdiv=2 |    326.4 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=4 bdiv=4 |    327.4 us    359 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=4 bdiv=8 |    328.9 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=15 ts=8 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=2 bdiv=2 |    349.8 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=2 bdiv=4 |    348.5 us    337 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=2 bdiv=8 |    349.9 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=4 bdiv=2 |    345.5 us    340 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=4 bdiv=4 |    390.3 us    301 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=4 bdiv=8 |    391.4 us    300 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=8 bdiv=2 |    413.4 us    284 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=8 bdiv=4 |    527.0 us    223 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=1 stg=8 bdiv=8 |    358.3 us    328 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=2 bdiv=2 |    351.0 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=2 bdiv=4 |    351.8 us    334 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=2 bdiv=8 |    352.4 us    333 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=4 bdiv=2 |    346.6 us    339 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=4 bdiv=4 |    416.3 us    282 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=4 bdiv=8 |    389.8 us    301 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=8 bdiv=2 |    325.2 us    361 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=8 bdiv=4 |    327.1 us    359 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=2 stg=8 bdiv=8 |    331.1 us    355 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=2 bdiv=2 |    349.9 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=2 bdiv=4 |    350.0 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=2 bdiv=8 |    351.0 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=4 bdiv=2 |    326.8 us    359 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=4 bdiv=4 |    329.5 us    356 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=4 bdiv=8 |    330.9 us    355 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=8 bdiv=2 |    324.5 us    362 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=8 bdiv=4 |    325.7 us    361 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=4 stg=8 bdiv=8 |    328.6 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=2 bdiv=2 |    330.5 us    355 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=2 bdiv=4 |    330.8 us    355 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=2 bdiv=8 |    334.8 us    351 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=4 bdiv=2 |    325.8 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=4 bdiv=4 |    327.8 us    358 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=4 bdiv=8 |    329.2 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=16 ts=8 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=2 bdiv=2 |    349.5 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=2 bdiv=4 |    348.7 us    337 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=2 bdiv=8 |    350.0 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=4 bdiv=2 |    344.7 us    341 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=4 bdiv=4 |    393.9 us    298 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=4 bdiv=8 |    392.8 us    299 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=8 bdiv=2 |    414.6 us    283 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=8 bdiv=4 |    528.6 us    222 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=1 stg=8 bdiv=8 |    358.1 us    328 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=2 bdiv=2 |    350.8 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=2 bdiv=4 |    352.2 us    333 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=2 bdiv=8 |    352.0 us    334 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=4 bdiv=2 |    346.2 us    339 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=4 bdiv=4 |    417.9 us    281 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=4 bdiv=8 |    386.9 us    304 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=8 bdiv=2 |    325.4 us    361 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=8 bdiv=4 |    326.7 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=2 stg=8 bdiv=8 |    330.8 us    355 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=2 bdiv=2 |    349.3 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=2 bdiv=4 |    349.6 us    336 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=2 bdiv=8 |    350.7 us    335 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=4 bdiv=2 |    326.5 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=4 bdiv=4 |    329.3 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=4 bdiv=8 |    331.2 us    355 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=8 bdiv=2 |    324.5 us    362 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=8 bdiv=4 |    326.0 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=4 stg=8 bdiv=8 |    328.7 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=2 bdiv=2 |    329.9 us    356 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=2 bdiv=4 |    331.5 us    354 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=2 bdiv=8 |    333.6 us    352 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=4 bdiv=2 |    325.9 us    360 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=4 bdiv=4 |    327.8 us    358 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=4 bdiv=8 |    329.0 us    357 GB/s
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=8 N=32768 H=128 tn=32 ts=8 stg=8 bdiv=8 | SKIP (smem/OOR)
+===NONTMA_SWEEP_m0_ws4_N65536===
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=4 f=8 |   1382.1 us    291 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=4 f=12 |   1413.1 us    285 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=4 f=16 |   1348.3 us    299 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=4 f=24 |   1277.0 us    315 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=4 f=32 |   1246.0 us    323 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=8 f=8 |   1509.3 us    267 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=8 f=12 |   1487.4 us    271 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=8 f=16 |   1402.6 us    287 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=8 f=24 |   1283.9 us    314 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=256 un=8 f=32 |   1235.6 us    326 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=4 f=8 |   1401.3 us    287 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=4 f=12 |   1323.5 us    304 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=4 f=16 |   1263.4 us    319 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=4 f=24 |   1211.2 us    332 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=4 f=32 |   1185.4 us    340 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=8 f=8 |   1492.7 us    270 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=8 f=12 |   1437.7 us    280 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=8 f=16 |   1396.5 us    288 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=8 f=24 |   1406.4 us    286 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=512 un=8 f=32 |   1473.5 us    273 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=4 f=8 |   1454.4 us    277 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=4 f=12 |   1387.8 us    290 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=4 f=16 |   1322.4 us    304 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=4 f=24 |   1319.2 us    305 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=4 f=32 |   1196.6 us    336 GB/s
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=8 f=8 | SKIP (launch OOR)
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=8 f=12 | SKIP (launch OOR)
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=8 f=16 | SKIP (launch OOR)
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=8 f=24 | SKIP (launch OOR)
+SWEEP nontma mode0 ws=4 N=65536 H=128 th=1024 un=8 f=32 | SKIP (launch OOR)
+===TMA_SWEEP_m0_ws4_N65536===
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=2 bdiv=2 |   1148.6 us    351 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=2 bdiv=4 |   1175.8 us    342 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=2 bdiv=8 |   1213.7 us    332 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=4 bdiv=2 |   1161.5 us    347 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=4 bdiv=4 |   1197.1 us    336 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=4 bdiv=8 |   1237.7 us    325 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=8 bdiv=2 |   1186.1 us    339 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=8 bdiv=4 |   1252.5 us    321 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=1 stg=8 bdiv=8 |   1345.8 us    299 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=2 bdiv=2 |   1150.0 us    350 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=2 bdiv=4 |   1182.2 us    341 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=2 bdiv=8 |   1210.7 us    333 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=4 bdiv=2 |   1146.0 us    351 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=4 bdiv=4 |   1177.2 us    342 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=4 bdiv=8 |   1237.9 us    325 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=8 bdiv=2 |   1131.2 us    356 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=8 bdiv=4 |   1145.0 us    352 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=2 stg=8 bdiv=8 |   1166.5 us    345 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=2 bdiv=2 |   1810.8 us    222 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=2 bdiv=4 |   1159.5 us    347 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=2 bdiv=8 |   1209.9 us    333 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=4 bdiv=2 |   1963.9 us    205 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=4 bdiv=4 |   1143.7 us    352 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=4 bdiv=8 |   1173.9 us    343 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=8 bdiv=2 |   1087.5 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=8 bdiv=4 |   1092.9 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=4 stg=8 bdiv=8 |   1096.3 us    367 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=2 bdiv=2 |   1849.3 us    218 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=2 bdiv=4 |   1167.3 us    345 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=2 bdiv=8 |   1282.4 us    314 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=4 bdiv=2 |   1088.9 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=4 bdiv=4 |   1094.7 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=4 bdiv=8 |   1095.6 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=8 bdiv=2 |   1085.3 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=8 bdiv=4 |   1090.4 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=8 ts=8 stg=8 bdiv=8 |   1091.4 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=2 bdiv=2 |   1149.9 us    350 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=2 bdiv=4 |   1181.6 us    341 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=2 bdiv=8 |   1203.0 us    335 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=4 bdiv=2 |   1143.3 us    352 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=4 bdiv=4 |   1175.6 us    343 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=4 bdiv=8 |   1248.1 us    323 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=8 bdiv=2 |   1129.0 us    357 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=8 bdiv=4 |   1142.0 us    353 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=1 stg=8 bdiv=8 |   1167.3 us    345 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=2 bdiv=2 |   1810.7 us    222 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=2 bdiv=4 |   1158.5 us    348 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=2 bdiv=8 |   1205.7 us    334 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=4 bdiv=2 |   1960.7 us    205 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=4 bdiv=4 |   1139.5 us    353 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=4 bdiv=8 |   1182.7 us    340 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=8 bdiv=2 |   1086.6 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=8 bdiv=4 |   1091.2 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=2 stg=8 bdiv=8 |   1094.6 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=2 bdiv=2 |   1843.2 us    218 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=2 bdiv=4 |   1166.5 us    345 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=2 bdiv=8 |   1253.4 us    321 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=4 bdiv=2 |   1087.3 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=4 bdiv=4 |   1093.4 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=4 bdiv=8 |   1094.9 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=8 bdiv=2 |   1084.9 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=8 bdiv=4 |   1089.8 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=4 stg=8 bdiv=8 |   1091.5 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=2 bdiv=2 |   1092.3 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=2 bdiv=4 |   1094.9 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=2 bdiv=8 |   1098.1 us    367 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=4 bdiv=2 |   1086.9 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=4 bdiv=4 |   1090.8 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=4 bdiv=8 |   1092.0 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=16 ts=8 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=2 bdiv=2 |   1142.2 us    353 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=2 bdiv=4 |   1181.5 us    341 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=2 bdiv=8 |   1249.0 us    322 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=4 bdiv=2 |   1132.8 us    355 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=4 bdiv=4 |   1161.2 us    347 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=4 bdiv=8 |   1240.1 us    325 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=8 bdiv=2 |   1090.8 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=8 bdiv=4 |   1091.9 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=1 stg=8 bdiv=8 |   1094.3 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=2 bdiv=2 |   1984.9 us    203 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=2 bdiv=4 |   1147.5 us    351 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=2 bdiv=8 |   1198.3 us    336 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=4 bdiv=2 |   1087.8 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=4 bdiv=4 |   1091.9 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=4 bdiv=8 |   1094.5 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=8 bdiv=2 |   1085.7 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=8 bdiv=4 |   1090.9 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=2 stg=8 bdiv=8 |   1090.9 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=2 bdiv=2 |   1093.4 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=2 bdiv=4 |   1096.9 us    367 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=2 bdiv=8 |   1101.7 us    365 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=4 bdiv=2 |   1086.2 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=4 bdiv=4 |   1090.7 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=4 bdiv=8 |   1092.9 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=4 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=2 bdiv=2 |   1090.6 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=2 bdiv=4 |   1093.1 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=2 bdiv=8 |   1096.5 us    367 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=4 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=4 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=4 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=31 ts=8 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=2 bdiv=2 |   1814.8 us    222 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=2 bdiv=4 |   1159.2 us    347 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=2 bdiv=8 |   1208.7 us    333 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=4 bdiv=2 |   1962.0 us    205 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=4 bdiv=4 |   1141.8 us    353 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=4 bdiv=8 |   1178.2 us    342 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=8 bdiv=2 |   1086.7 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=8 bdiv=4 |   1091.6 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=1 stg=8 bdiv=8 |   1096.1 us    367 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=2 bdiv=2 |   1858.4 us    217 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=2 bdiv=4 |   1164.0 us    346 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=2 bdiv=8 |   1255.4 us    321 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=4 bdiv=2 |   1088.7 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=4 bdiv=4 |   1093.7 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=4 bdiv=8 |   1094.9 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=8 bdiv=2 |   1084.5 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=8 bdiv=4 |   1090.1 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=2 stg=8 bdiv=8 |   1091.5 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=2 bdiv=2 |   1093.6 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=2 bdiv=4 |   1095.6 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=2 bdiv=8 |   1098.6 us    367 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=4 bdiv=2 |   1085.9 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=4 bdiv=4 |   1090.8 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=4 bdiv=8 |   1092.6 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=4 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=2 bdiv=2 |   1090.9 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=2 bdiv=4 |   1092.7 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=2 bdiv=8 |   1095.0 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=4 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=4 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=4 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=32 ts=8 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=2 bdiv=2 |   1813.1 us    222 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=2 bdiv=4 |   1158.1 us    348 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=2 bdiv=8 |   1212.0 us    332 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=4 bdiv=2 |   1963.6 us    205 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=4 bdiv=4 |   1141.8 us    353 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=4 bdiv=8 |   1176.9 us    342 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=8 bdiv=2 |   1087.1 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=8 bdiv=4 |   1091.7 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=1 stg=8 bdiv=8 |   1095.8 us    367 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=2 bdiv=2 |   1857.7 us    217 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=2 bdiv=4 |   1167.8 us    345 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=2 bdiv=8 |   1262.8 us    319 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=4 bdiv=2 |   1088.5 us    370 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=4 bdiv=4 |   1093.2 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=4 bdiv=8 |   1095.0 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=8 bdiv=2 |   1085.1 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=8 bdiv=4 |   1089.7 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=2 stg=8 bdiv=8 |   1091.2 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=2 bdiv=2 |   1093.1 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=2 bdiv=4 |   1095.6 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=2 bdiv=8 |   1098.9 us    366 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=4 bdiv=2 |   1086.2 us    371 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=4 bdiv=4 |   1090.8 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=4 bdiv=8 |   1092.9 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=4 stg=8 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=2 bdiv=2 |   1090.8 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=2 bdiv=4 |   1091.9 us    369 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=2 bdiv=8 |   1094.8 us    368 GB/s
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=4 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=4 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=4 bdiv=8 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=8 bdiv=2 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=8 bdiv=4 | SKIP (smem/OOR)
+SWEEP tma mode0 ws=4 N=65536 H=128 tn=64 ts=8 stg=8 bdiv=8 | SKIP (smem/OOR)

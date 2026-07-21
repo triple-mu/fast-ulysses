@@ -36,8 +36,9 @@ tma_decode(int g, int per_peer, int n_ntiles, int n_stiles, int tile_n, int tile
     s       = st * tile_s;
 }
 
-// Software-pipelined: single thread issues, B smem buffers rotate, prefetch-1-ahead + wait_group(B-1)
-// keeps B-1 TMA stores in flight -> remote NVLink write pipeline stays full (removes the single-stage serial bubble).
+// Software-pipelined: single thread issues, B smem buffers rotate; before a buffer is reloaded,
+// wait_group.read(0) drains the smem READS of all issued stores while their remote writes stay in
+// flight -> remote NVLink write pipeline stays full (removes the single-stage serial bubble).
 // grid covers the full (peer, b, s-tile, n-tile) set; each block grid-strides over its own run of tiles.
 template<int STAGES>
 __global__ void a2a_tma_kernel(const __grid_constant__ CUtensorMap src_map,
@@ -109,10 +110,13 @@ __global__ void a2a_tma_kernel(const __grid_constant__ CUtensorMap src_map,
         tma_store_4d(&dst.m[peer], 0, n + dst_n_off, s + dst_s_off, bi, buf_a[cur]);
         tma_commit_group();
 
-        // prefetch next tile: first drain to <= STAGES-1 stores in flight so the target buffer was read by an old store
+        // prefetch next tile: its slot (j+STAGES)%STAGES == cur is the buffer store #j is reading right
+        // now, and wait_group<STAGES-1> would leave store #j among the pending groups (smem reuse race).
+        // wait_group_read<0> instead waits until every issued store has finished READING its smem source
+        // -- the remote NVLink writes stay in flight, so the store pipeline keeps its depth.
         int nl = j + STAGES;
         if (nl < M) {
-            tma_wait_group<STAGES - 1>();  // keep <=STAGES-1 stores in flight
+            tma_wait_group_read<0>();  // all stores done reading smem; writes still in flight
             int slot = nl % STAGES;
             int g2   = blockIdx.x + nl * gridDim.x;
             int peer2, n2, s2, bi2;
@@ -178,7 +182,7 @@ static void build_tma_maps(int                          mode,
     }
 }
 
-// Fixed pipeline depth (measured DiT optimum; keeps tma_wait_group at {3,0}).
+// Fixed pipeline depth (measured DiT optimum).
 constexpr int kTmaStages = 4;
 
 // Device max opt-in dynamic smem, cached (one device per process). Hopper allows 227KB but
@@ -305,7 +309,11 @@ A2AConfig resolve_config_tma(const void*                  src,
                              cudaStream_t                 stream,
                              const std::function<void()>& finish)
 {
-    const int              n_local = dims.n_local, s_local = dims.s_local, ws = (int)peer_ptrs.size();
+    const int n_local = dims.n_local, s_local = dims.s_local, ws = (int)peer_ptrs.size();
+    // cuTensorMapEncodeTiled caps every boxDim at 256 and box[0] is the full d-row, so d > 256 cannot
+    // take the TMA path at all -- same sentinel as "no config fits", the caller falls back / errors.
+    if (dims.d > 256)
+        return A2AConfig{};
     std::vector<A2AConfig> cands;
     for (const auto& c : tma_candidates(mode, n_local, s_local))
         if (tma_smem_bytes(c, dims, elem_size) <= tma_max_dyn_smem())
@@ -325,8 +333,8 @@ A2AConfig resolve_config_tma(const void*                  src,
                 finish();
             },
             stream);
-        if (verbose)
-            std::cerr << "[tma-at] ws=" << ws << " mode=" << mode << " nl=" << n_local << " sl=" << s_local
+        if (verbose && dims.rank == 0)
+            std::cout << "[tma-at] ws=" << ws << " mode=" << mode << " nl=" << n_local << " sl=" << s_local
                       << " | tn=" << c.tile_n << " ts=" << c.tile_s << " -> " << std::fixed << std::setprecision(1)
                       << us << " us/call" << std::endl;
         if (us < best_t) {

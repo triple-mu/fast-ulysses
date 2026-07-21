@@ -1,0 +1,29 @@
+verify nontma mode1 ws=8 N=2048 H=128 D=128: OK (0 errors)
+verify tma mode1 ws=8 N=2048 H=128 D=128: OK (0 errors)
+===NONTMA_SWEEP_m0_ws8_N32768===
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=4 f=8 |    415.9 us    282 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=4 f=12 |    384.4 us    306 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=4 f=16 |    388.2 us    303 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=4 f=24 |    344.4 us    341 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=4 f=32 |    351.6 us    334 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=8 f=8 |    413.5 us    284 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=8 f=12 |    400.5 us    293 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=8 f=16 |    360.3 us    326 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=8 f=24 |    454.9 us    258 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=256 un=8 f=32 |    350.6 us    335 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=4 f=8 |    398.2 us    295 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=4 f=12 |    348.3 us    337 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=4 f=16 |    354.2 us    332 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=4 f=24 |    491.8 us    239 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=4 f=32 |    611.0 us    192 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=8 f=8 |    386.1 us    304 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=8 f=12 |    453.8 us    259 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=8 f=16 |    388.5 us    302 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=8 f=24 |    487.9 us    241 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=512 un=8 f=32 |    646.9 us    182 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=1024 un=4 f=8 |    371.9 us    316 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=1024 un=4 f=12 |    477.5 us    246 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=1024 un=4 f=16 |    601.7 us    195 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=1024 un=4 f=24 |    609.2 us    193 GB/s
+SWEEP nontma mode0 ws=8 N=32768 H=128 th=1024 un=4 f=32 |    691.5 us    170 GB/s
+CUDA error cudaGetLastError() at a2a_harness.cu:542: too many resources requested for launch

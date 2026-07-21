@@ -16,11 +16,13 @@ Ulysses sequence parallelism (DeepSpeed-Ulysses) shards very long sequences acro
 
 ## Features
 
-- **Two kernel paths, picked at runtime**:
-  - **TMA path** (sm90+, Hopper/Blackwell): `cp.async.bulk` (the TMA copy engine) moves the data with a software pipeline. TMA copies run on the copy engine rather than the SMs, **occupying almost no SM**, leaving compute capacity for communication/computation overlap.
+- **Three transfer paths**:
   - **non-TMA path**: SM-resident vectorized direct writes with a per-shape autotuned launch config; the fallback for sm80 (A100) and anything without TMA.
-  - With `use_tma=None` (auto), **both paths are micro-benchmarked on the actual hardware at first call and the faster one is cached** (replacing any offline static table); it can also be forced per call (see the `use_tma` tri-state in [docs/API.md](docs/API.md)).
-- **Fused QK RMSNorm + RoPE**: standalone single-GPU ops (`rms_norm` / `rope` / `norm_rope`) plus an all-to-all variant that fuses the q/k norm+rope into the scatter kernel itself — see [docs/API.md](docs/API.md).
+  - **TMA path** (sm90+, Hopper/Blackwell): `cp.async.bulk` (the TMA unit) moves the data with a software pipeline, occupying almost no SM.
+  - With `use_tma=None` (auto), **both kernel paths are micro-benchmarked on the actual hardware at first call and the faster one is cached** (replacing any offline static table); it can also be forced per call (see the `use_tma` tri-state in [docs/API.md](docs/API.md)).
+  - **CE path** (`all_to_all_single_4d_ce`, chosen explicitly): a per-peer `cudaMemcpy2DAsync` fan-out on the DMA engines — **zero SM usage**, so the transfer keeps running at full NVLink bandwidth while compute kernels (e.g. cuBLAS nvjet GEMMs) hold every SM slot. The overlap path: 93–98% of the CE a2a hides under a concurrent GEMM chain vs 25–39% for the kernel paths (4×H100/H200, Wan shapes).
+- **Grouped handshakes for async pipelines**: `barrier=False` defers the completion handshake so several async a2as (e.g. one layer's q/k/v) share a single barrier, and the **consumer-signal handshake** (`signal_arrive_async` / `signal_wait`) replaces even that barrier with a CE-written arrival flag plus a consumer-stream poll — see [docs/API.md](docs/API.md).
+- **Compute-communication fusion examples** (fused QK RMSNorm + RoPE into the scatter kernel, standalone `rms_norm` / `rope` / `norm_rope` ops) live on the `examples/qk-norm-rope-fusion` branch — this branch keeps the pure all-to-all core.
 - **Single-node NVLink P2P**, `world_size ∈ [1, 8]` (odd sizes such as 3/5/6/7 included).
 - **Uniform splits**: sequence length `s` and head count `n` divisible by `world_size`.
 - **Both directions**: `mode=0` scatters heads / gathers sequence (entering attention); `mode=1` is its inverse (leaving attention).
@@ -97,12 +99,12 @@ if __name__ == "__main__":
 | API | Summary |
 | --- | --- |
 | `UlyssesGroup(process_group=None, device=None, initial_pool_bytes=2<<30)` | Collective group construction: NVSHMEM init + symmetric-heap pool. |
-| `group.all_to_all_single_4d(x, *, mode=0, tag="", use_tma=None)` | Uniform 4D all-to-all (mode0 / mode1). |
-| `group.all_to_all_single_4d_async(...) -> AsyncA2AHandle` | Same op on a high-priority comm stream; overlap until `handle.wait()`. |
-| `group.all_to_all_single_4d_qk(x, weight, cos, sin, ...)` | mode0 a2a with source-side fused QK RMSNorm + RoPE. |
-| `group.all_to_all_single_4d_qk2(q, k, ...)` | q + k in one collective call (shared barrier). |
+| `group.all_to_all_single_4d(x, *, mode=0, tag="", use_tma=None)` | Uniform 4D all-to-all (mode0 / mode1), kernel paths. |
+| `group.all_to_all_single_4d_async(..., barrier=True) -> AsyncA2AHandle` | Same op on a high-priority comm stream; overlap until `handle.wait()`; `barrier=False` groups several calls under one handshake. |
+| `group.all_to_all_single_4d_ce(x, *, mode=0, tag="")` | Same collective on the DMA engines (zero SM) — the overlap path. |
+| `group.all_to_all_single_4d_ce_async(..., barrier=True) -> AsyncA2AHandle` | Async CE variant; its in-flight window genuinely overlaps concurrent compute. |
+| `group.signal_arrive_async()` / `group.signal_wait()` | Consumer-signal handshake for `barrier=False` CE groups (no barrier kernel at all). |
 | `group.destroy()` | Release symmetric-heap resources (collective). |
-| `rms_norm` / `rope` / `norm_rope` | Standalone single-GPU fused elementwise ops. |
 
 Shapes, the `use_tma` tri-state, tag semantics, and the **collective hard constraints** (call-sequence uniformity across ranks — violating them hangs the whole group) are documented in [docs/API.md](docs/API.md).
 
@@ -116,13 +118,12 @@ Wan2.2 (14B-class) 5s 720p attention shape (N=75600, H=40, D=128, bf16), single 
 | 4 | 301 | 306 | 202 | **1.5×** |
 | 8 | 301 | 301 | 203 | **1.5×** |
 
-Fusing QK RMSNorm+RoPE into the a2a gives **1.44–1.61×** over the unfused sequence on the Wan q+k workload. Full methodology, shape derivation, and reproduction commands: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+Full methodology, shape derivation, the CE-path overlap study, and reproduction commands: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Testing
 
 ```bash
-pytest                     # single-GPU op tests; multi-GPU suites auto-skip below 2 GPUs
-pytest -m multigpu         # torchrun-wrapped multi-GPU correctness suites
+pytest                     # torchrun-wrapped multi-GPU suites; auto-skip below 2 GPUs
 torchrun --nproc_per_node=8 tests/distributed/a2a_correctness.py   # direct worker invocation
 ```
 

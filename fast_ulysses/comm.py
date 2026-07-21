@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Callable
 
 import torch
 import torch.distributed as dist
+
+# NVSHMEM reads NVSHMEM_SYMMETRIC_SIZE when it (re)initializes -- i.e. when the first LIVE group is
+# constructed (destroying the last group finalizes NVSHMEM, so the next group re-initializes with a
+# fresh size). While any group is alive the heap keeps its size; track that to warn instead of
+# failing at some later nvshmem_align. destroy() keeps the count in step with the C++ group count.
+_live_groups = 0
+_heap_bytes = 0
 
 
 class AsyncA2AHandle:
@@ -51,13 +59,31 @@ class UlyssesGroup:
         self.rank = dist.get_rank(pg)
         self.world_size = dist.get_world_size(pg)
         self.peer_global_ranks = list(dist.get_process_group_ranks(pg))
+        if self.world_size != dist.get_world_size():
+            # The uid broadcast below runs on WORLD and nvshmem_team_split_strided is a
+            # world-collective -- a subgroup-only construction would hang, so reject it up front.
+            raise NotImplementedError(
+                "process_group must span all ranks (NVSHMEM bootstrap is world-collective); "
+                f"got a subgroup of {self.world_size}/{dist.get_world_size()} ranks"
+            )
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
         self.device = device
         torch.cuda.set_device(device)
 
-        # Reservation must be set via env before NVSHMEM init.
-        os.environ["NVSHMEM_SYMMETRIC_SIZE"] = str(int(initial_pool_bytes))
+        # Reservation must be set via env before NVSHMEM init; it takes effect only when NVSHMEM
+        # (re)initializes, which happens while no other group is alive.
+        global _live_groups, _heap_bytes
+        if _live_groups == 0:
+            os.environ["NVSHMEM_SYMMETRIC_SIZE"] = str(int(initial_pool_bytes))
+            _heap_bytes = int(initial_pool_bytes)
+        elif int(initial_pool_bytes) > _heap_bytes:
+            warnings.warn(
+                f"initial_pool_bytes={int(initial_pool_bytes)} exceeds the NVSHMEM heap sized by "
+                f"the first live UlyssesGroup ({_heap_bytes} B); the extra bytes may not be backed "
+                "(size the first group's pool for all concurrently-live groups)",
+                stacklevel=2,
+            )
         # P2P direct writes do not need NVLS (NVLink SHARP multicast); on some nodes its
         # multicast heap mapping fails and segfaults, so disable by default for cross-node
         # robustness (overridable via env).
@@ -84,6 +110,8 @@ class UlyssesGroup:
             int(initial_pool_bytes),
         )
         dist.barrier(group=pg)
+        _live_groups += 1
+        self._destroyed = False
 
         # Dedicated high-priority stream for the ASYNC collectives (sync calls run directly on the
         # caller's stream -- routing them through here costs two event hops per call, ~0.27 ms
@@ -120,7 +148,7 @@ class UlyssesGroup:
     ) -> torch.Tensor:
         """Uniform 4D all-to-all: mode0 scatters heads / gathers sequence; mode1 is its inverse.
 
-        COLLECTIVE SEMANTICS: s/n must divide world_size (uniform). The first (shape, mode, use_tma)
+        COLLECTIVE SEMANTICS: s/n must be divisible by world_size (uniform). The first (shape, mode, use_tma)
         seen runs a local micro-benchmark and caches the launch config; every rank MUST issue the
         SAME (shape, mode, use_tma) call sequence (the nvshmem symmetric alloc + cross-rank barrier
         are collective; all ranks miss the same entry on the first call together). Sync AND async
@@ -146,6 +174,7 @@ class UlyssesGroup:
         mode: int = 0,
         tag: str = "",
         use_tma: bool | None = None,
+        barrier: bool = True,
     ) -> AsyncA2AHandle:
         """Async variant: launches on the group's comm stream and returns immediately; kernels
         submitted to the caller's stream afterwards overlap with the a2a until handle.wait().
@@ -155,80 +184,104 @@ class UlyssesGroup:
         ORDERING CONSTRAINT when mixing with sync calls: the fast_barrier epoch is one per-group
         monotonic counter, so barrier kernels must EXECUTE in submission order. wait() every async
         handle of this group before issuing the next sync collective on the main stream -- that
-        data dependency forces the comm-stream barriers to complete first. (Sync calls run directly
-        on the caller's stream: routing them through the comm stream costs two event hops per call,
-        measured ~0.27 ms/call on H200 -- comparable to the a2a itself.)
+        data dependency forces the comm-stream barriers to complete first.
+
+        barrier=False groups several calls under ONE handshake: only copies are issued, and a later
+        barrier=True call on the same stream publishes them all (its flag write is stream-ordered
+        after every prior deferred copy). A barrier=False handle's wait() orders only THIS rank's
+        work -- peers' writes into the local output are guaranteed only after the barrier-carrying
+        handle's wait(). All ranks must use the identical barrier pattern (epoch lockstep).
         """
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
             [x],
-            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(self._group, x, mode, tag, use_tma),
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d(
+                self._group, x, mode, tag, use_tma, barrier
+            ),
         )
         return AsyncA2AHandle(out, ev_done)
 
-    def all_to_all_single_4d_qk(
+    def all_to_all_single_4d_ce(
         self,
         x: torch.Tensor,
-        weight: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         *,
-        mode: str = "cross_head",
-        interleaved: bool = True,
-        eps: float = 1e-6,
+        mode: int = 0,
         tag: str = "",
-        use_tma: bool | None = None,
     ) -> torch.Tensor:
-        """Mode0 Ulysses input a2a with fused source-side QK RMSNorm + RoPE (for q/k; v uses the
-        plain op).
+        """CE (copy-engine) variant of all_to_all_single_4d: identical collective
+        semantics, layouts, tag-scoped output buffers and barrier epochs, but the
+        transfer is a per-peer cudaMemcpy2DAsync fan-out on DMA engines instead of an
+        SM/TMA kernel. It uses no SMs (flag barrier aside), so it keeps running at full
+        NVLink bandwidth while compute kernels hold every SM slot -- the
+        overlap-friendly third path next to the SM scatter (use_tma=False) and TMA
+        (use_tma=True). Path choice is explicit: the auto-tune of
+        all_to_all_single_4d does not consider CE. Per call it adds ~world_size memcpy
+        launches (a few us each), so prefer the kernel paths for tiny shapes.
 
-        x: [b, s_local, n_global, d]; weight fp32 ([d] per_head / [n_global*d] cross_head);
-        cos/sin fp32 [s_local, d/2] at this rank's GLOBAL positions; interleaved=GPT-J vs NeoX.
-        Out [b, s_global, n_local, d].
+        Collective constraints are identical to all_to_all_single_4d (rank-uniform
+        call sequence; sync and async calls advance the same barrier epoch), except
+        there is no autotune micro-benchmark on first call.
+
+        Deliberately no ``barrier`` parameter: a sync call hands back a readable view,
+        and a deferred one would be unsafe to read with nothing left to publish it --
+        grouped handshakes belong to the async variants, where consumption is explicit.
         """
-        m = {"per_head": 0, "cross_head": 1}[mode]
-        return torch.ops.fast_ulysses.all_to_all_single_4d_qk(
-            self._group, x.contiguous(), weight, cos, sin, m, interleaved, eps, tag, use_tma
+        return torch.ops.fast_ulysses.all_to_all_single_4d_ce(
+            self._group, x.contiguous(), mode, tag
         )
 
-    def all_to_all_single_4d_qk2(
+    def all_to_all_single_4d_ce_async(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        weight_q: torch.Tensor,
-        weight_k: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        x: torch.Tensor,
         *,
-        mode: str = "cross_head",
-        interleaved: bool = True,
-        eps: float = 1e-6,
+        mode: int = 0,
         tag: str = "",
-        use_tma: bool | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """q + k in ONE collective call: two fused scatters back-to-back, then a SINGLE shared
-        quiet+fast_barrier (half the sync latency of two all_to_all_single_4d_qk calls). q/k share
-        shape/dtype/cos/sin; weight_q/weight_k are their respective norm weights. Outputs land in
-        distinct buffers (tag::q / tag::k). Collective constraints are the same as the single op.
+        barrier: bool = True,
+    ) -> AsyncA2AHandle:
+        """Async CE variant: launches on the group's comm stream and returns
+        immediately (ordering constraint as in all_to_all_single_4d_async: wait()
+        every handle before the next sync collective on the main stream). Because the
+        transfer rides the DMA engines, this is the variant whose in-flight window
+        actually overlaps concurrent GEMMs/attention instead of time-slicing with
+        them.
         """
-        m = {"per_head": 0, "cross_head": 1}[mode]
-        oq, ok = torch.ops.fast_ulysses.all_to_all_single_4d_qk2(
-            self._group,
-            q.contiguous(),
-            k.contiguous(),
-            weight_q,
-            weight_k,
-            cos,
-            sin,
-            m,
-            interleaved,
-            eps,
-            tag,
-            use_tma,
+        x = x.contiguous()
+        out, ev_done = self._launch_on_comm_stream(
+            [x],
+            lambda: torch.ops.fast_ulysses.all_to_all_single_4d_ce(
+                self._group, x, mode, tag, barrier
+            ),
         )
-        return oq, ok
+        return AsyncA2AHandle(out, ev_done)
+
+    def signal_arrive_async(self) -> None:
+        """Enqueue the consumer-signal ARRIVE on the group's comm stream: one 1-byte CE
+        memset of the epoch byte into every rank's signal slot, stream-ordered after any
+        prior async copies (use with barrier=False groups). Zero SM work -- the arrival
+        departs even while compute holds every SM. Pair with signal_wait() on the
+        consumer stream; identical call pattern required on all ranks."""
+        with torch.cuda.stream(self._comm_stream):
+            torch.ops.fast_ulysses.signal_arrive(self._group)
+
+    def signal_wait(self) -> None:
+        """Launch the consumer-signal WAIT poll kernel on the CALLER's current stream:
+        a 1-block kernel that ld.acquire-spins until every rank's signal byte matches
+        the epoch of the last signal_arrive_async. The caller's subsequent kernels may
+        then read every output of the signalled group. Replaces the comm-stream
+        fast_barrier for grouped CE collectives: no SM-slot contention with concurrent
+        compute, no event hop -- the consumer proceeds the moment the last peer's data
+        lands."""
+        torch.ops.fast_ulysses.signal_wait(self._group)
 
     def destroy(self) -> None:
         """Release the symmetric-heap resources (collective: ALL ranks must call together)."""
+        if self._destroyed:
+            return
+        # Drain the comm stream first: dist.barrier only syncs the caller's current stream, so an
+        # unwaited async a2a could still be writing the buffers nvshmem_free is about to release.
+        self._comm_stream.synchronize()
         dist.barrier(group=self.pg)
         self._group.destroy()
+        self._destroyed = True
+        global _live_groups
+        _live_groups -= 1

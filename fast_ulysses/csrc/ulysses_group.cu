@@ -4,6 +4,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <iostream>
 #include <nvshmem.h>
 #include <nvshmemx.h>
 #include <torch/torch.h>
@@ -36,28 +37,111 @@ __global__ void ulysses_barrier_kernel(uint64_t* local, BarPeers peers, int ws, 
     } while (v < epoch);
 }
 
-void UlyssesGroup::fast_barrier(cudaStream_t stream)
+void UlyssesGroup::ensure_bar_init_(cudaStream_t stream)
 {
-    if (world_size_ == 1)
+    if (bar_ready_)
         return;
-    if (!bar_ready_) {
-        const auto& buf = pool_->acquire({static_cast<int64_t>(world_size_)}, at::kLong, "__ulysses_sync__");
-        bar_local_      = buf.sym_base;
-        bar_peers_      = buf.peer_ptrs;
-        ULYSSES_CUDA_CHECK(
-            cudaMemsetAsync(bar_local_, 0, world_size_ * sizeof(uint64_t), stream));  // init 0; epoch starts at 1
-        // One slow sync: ensure all ranks finish clearing before anyone writes a flag (otherwise the
-        // clear could overwrite an already-written epoch).
-        nvshmemx_barrier_on_stream(team_, stream);
-        bar_ready_ = true;
-    }
-    ++bar_epoch_;
+    const auto& buf = pool_->acquire({static_cast<int64_t>(world_size_)}, at::kLong, "__ulysses_sync__");
+    bar_local_      = buf.sym_base;
+    bar_peers_      = buf.peer_ptrs;
+    ULYSSES_CUDA_CHECK(
+        cudaMemsetAsync(bar_local_, 0, world_size_ * sizeof(uint64_t), stream));  // init 0; epoch starts at 1
+    // One slow sync: ensure all ranks finish clearing before anyone writes a flag (otherwise the
+    // clear could overwrite an already-written epoch).
+    nvshmemx_barrier_on_stream(team_, stream);
+    bar_ready_ = true;
+}
+
+void UlyssesGroup::fast_barrier_kernel_(cudaStream_t stream)
+{
     BarPeers peers;
     for (int i = 0; i < world_size_; ++i)
         peers.p[i] = bar_peers_[i];
     ulysses_barrier_kernel<<<1, 32, 0, stream>>>(
         reinterpret_cast<uint64_t*>(bar_local_), peers, world_size_, my_rank_, bar_epoch_);
     ULYSSES_CUDA_CHECK(cudaGetLastError());  // catch a barrier-kernel launch failure
+}
+
+// Consumer-signal poll: one lane ld.acquire-spins on the 8-byte flag word until every rank's
+// byte reaches the expected epoch byte. ws <= 8 so one aligned u64 load covers all ranks;
+// acquire orders the subsequent data reads of the consumer stream.
+//
+// A peer's byte may already show the NEXT epoch: peer r's arrive_{i+1} is gated (through r's
+// own stream ordering) by r's poll_i -- which needs OUR arrive_i but not our poll_i -- so r
+// can overwrite its byte with b_{i+1} before our poll_i observes b_i. The skew is bounded at
+// ONE group (r's arrive_{i+2} would need r's poll_{i+1}, which needs our arrive_{i+1}, which
+// our stream orders after our poll_i), so accepting byte == b or == next(b) is exact: seeing
+// next(b) still certifies r's epoch-i copies into us landed (they precede arrive_{i+1} in r's
+// stream order -- the same store-ordering the protocol already relies on). Plain equality
+// deadlocks under back-to-back groups.
+__global__ void ulysses_signal_wait_kernel(const uint64_t* flags, int ws, uint64_t expected_byte)
+{
+    if (threadIdx.x != 0)
+        return;
+    const uint32_t exp = static_cast<uint32_t>(expected_byte);
+    const uint32_t nxt = (exp == 255u) ? 1u : exp + 1u;  // next skips 0, like the epoch bump
+    bool           done;
+    do {
+        const uint64_t v = ld_acquire_sys_u64(const_cast<uint64_t*>(flags));
+        done             = true;
+        for (int i = 0; i < ws; ++i) {
+            const uint32_t b = static_cast<uint32_t>((v >> (8 * i)) & 0xFF);
+            done             = done && (b == exp || b == nxt);
+        }
+    } while (!done);
+}
+
+void UlyssesGroup::ensure_csig_init_(cudaStream_t stream)
+{
+    if (csig_ready_)
+        return;
+    // 8 bytes (uint8[ws], ws <= 8) so the poll kernel reads one aligned u64.
+    const auto& buf = pool_->acquire({8}, at::kByte, "__ulysses_csignal__");
+    csig_local_     = buf.sym_base;
+    csig_peers_     = buf.peer_ptrs;
+    ULYSSES_CUDA_CHECK(cudaMemsetAsync(csig_local_, 0, 8, stream));
+    // One slow sync: all ranks finish clearing before anyone writes a signal byte.
+    nvshmemx_barrier_on_stream(team_, stream);
+    csig_ready_ = true;
+}
+
+void UlyssesGroup::signal_arrive(cudaStream_t stream)
+{
+    if (world_size_ == 1)
+        return;
+    ensure_csig_init_(stream);
+    if ((++csig_epoch_ & 0xFF) == 0)  // byte 0 means "unset"; skip it (identical on all ranks)
+        ++csig_epoch_;
+    const int value = static_cast<int>(csig_epoch_ & 0xFF);
+    // One 1-byte CE memset into every rank's flags[my_rank] (self included): the arrival
+    // signal departs without any SM work, stream-ordered after the group's data copies.
+    for (int r = 0; r < world_size_; ++r)
+        ULYSSES_CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<uint8_t*>(csig_peers_[r]) + my_rank_, value, 1, stream));
+}
+
+void UlyssesGroup::signal_wait(cudaStream_t stream)
+{
+    if (world_size_ == 1)
+        return;
+    TORCH_CHECK(csig_ready_, "signal_wait without a prior signal_arrive");
+    ulysses_signal_wait_kernel<<<1, 32, 0, stream>>>(
+        reinterpret_cast<const uint64_t*>(csig_local_), world_size_, csig_epoch_ & 0xFF);
+    ULYSSES_CUDA_CHECK(cudaGetLastError());
+}
+
+void UlyssesGroup::fast_barrier(cudaStream_t stream)
+{
+    if (world_size_ == 1)
+        return;
+    ensure_bar_init_(stream);
+    ++bar_epoch_;
+    // NOTE (measured on 4xH200, CUDA 13.3): a cuStreamWriteValue64/WaitValue64 variant of
+    // this barrier -- attractive on paper because the CE a2a path would then never need an
+    // SM slot -- was tried and REVERTED: stream memops interfered with concurrent GEMMs
+    // (overlap hidden% dropped from +34% to -28% with WRITE_VALUE_DEFAULT and -15% with
+    // NO_MEMORY_BARRIER). The 1-block spin kernel only needs an SM slot at a kernel
+    // boundary and empirically wins under compute pressure.
+    fast_barrier_kernel_(stream);
 }
 
 int64_t UlyssesGroup::uniqueid_nints()
@@ -91,7 +175,7 @@ void UlyssesGroup::init_world(std::vector<int64_t> uid_ints, int64_t global_rank
         nvshmemx_set_attr_uniqueid_args(static_cast<int>(global_rank), static_cast<int>(global_nranks), &uid, &attr)
             == 0,
         "nvshmemx_set_attr_uniqueid_args failed");
-    // DEVIATION (see task-5-report): use the host-lib direct entry nvshmemx_hostlib_init_attr instead of
+    // DEVIATION: use the host-lib direct entry nvshmemx_hostlib_init_attr instead of
     // inline nvshmemx_init_attr. The inline version calls nvshmemi_init_thread, a symbol that lives only
     // in static libnvshmem_device.a; linking it clashes with the NVSHMEM version node of torch's bundled
     // libtorch_nvshmem.so (undefined symbol nvshmem_selected_device_transport). hostlib_init_attr is the
@@ -175,11 +259,14 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
         return cfg;
     };
 
-    // Explicit path: force it. tile_n=0 is the resolve_config_tma sentinel for "no config fits the
-    // device's dynamic-smem cap" (e.g. sm_120's ~99KB) -- forced TMA must fail loudly, not corrupt.
+    // Explicit path: force it. tile_n=0 is the resolve_config_tma sentinel for "TMA infeasible": d > 256
+    // (tensormap boxDim cap) or no config fits the device's dynamic-smem cap (e.g. sm_120's ~99KB) --
+    // forced TMA must fail loudly, not corrupt.
     if (use_tma_i == 1) {
         const A2AConfig cfg = resolve_path(true);
-        TORCH_CHECK(cfg.tile_n > 0, "use_tma=True: no TMA config fits this device's dynamic-smem cap");
+        TORCH_CHECK(cfg.tile_n > 0,
+                    "use_tma=True: TMA infeasible for this shape/device (needs d <= 256 and a config that "
+                    "fits the dynamic-smem cap)");
         return {true, cfg};
     }
     if (use_tma_i == 0)
@@ -216,6 +303,17 @@ UlyssesGroup::PathConfig UlyssesGroup::resolve_config(const Ulysses4DDims&      
     return {tma, tma ? cfg_t : cfg_n};
 }
 
+const CEResources& UlyssesGroup::ce_resources()
+{
+    if (!ce_ready_) {
+        ce_.streams.resize(world_size_);
+        for (int i = 0; i < world_size_; ++i)
+            ULYSSES_CUDA_CHECK(cudaStreamCreateWithFlags(&ce_.streams[i], cudaStreamNonBlocking));
+        ce_ready_ = true;
+    }
+    return ce_;
+}
+
 A2AConfig UlyssesGroup::resolve_config_cached(const ConfigKey& key, const std::function<A2AConfig()>& tune)
 {
     auto it = cfg_cache_.find(key);
@@ -230,6 +328,16 @@ void UlyssesGroup::destroy()
 {
     if (destroyed_)
         return;
+    if (ce_ready_) {
+        // Unchecked teardown calls, matching the rest of destroy(): the caller already
+        // guarantees quiescence (comm.py drains the comm stream + dist.barrier first).
+        for (auto s : ce_.streams) {
+            cudaStreamSynchronize(s);
+            cudaStreamDestroy(s);
+        }
+        ce_       = {};
+        ce_ready_ = false;
+    }
     if (pool_)
         pool_->destroy();
     if (owns_team_)
@@ -245,7 +353,14 @@ void UlyssesGroup::destroy()
 
 UlyssesGroup::~UlyssesGroup()
 {
-    destroy();
+    // No collective teardown from the destructor: destroy() calls nvshmem_free / team_destroy /
+    // hostlib_finalize, all collective, while GC / interpreter-exit timing differs across ranks --
+    // a rank destructing alone would hang the group. Leak and warn instead; explicit destroy()
+    // (the Python wrapper guards it with dist.barrier) is the supported path.
+    if (!destroyed_)
+        std::cerr << "[fast_ulysses] UlyssesGroup dropped without destroy(); leaking symmetric-heap "
+                     "resources (call group.destroy() on all ranks)"
+                  << std::endl;
 }
 
 }  // namespace ulysses

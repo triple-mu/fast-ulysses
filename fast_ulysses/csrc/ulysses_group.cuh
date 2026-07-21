@@ -12,6 +12,26 @@
 
 namespace ulysses {
 
+// Per-group CE (copy-engine) transfer resources: one stream per peer for the memcpy
+// fan-out. Created lazily by UlyssesGroup::ce_resources(), released in destroy(). Serial
+// use only (same contract as the config caches). Join events are deliberately NOT pooled
+// here -- see the fresh-event note in launch_a2a_ce.
+struct CEResources {
+    std::vector<cudaStream_t> streams;
+};
+
+// CE transfer path (all_to_all_ce.cu): per-peer cudaMemcpy2DAsync fan-out over ce.streams,
+// joined back to `stream` with events. Pure DMA -- no SM usage, no launch config, no
+// autotune. The caller appends the flag barrier (no nvshmem quiet needed: these are not
+// NVSHMEM proxy writes).
+void launch_a2a_ce(const void*                  src,
+                   const std::vector<uint64_t>& peer_ptrs,
+                   const Ulysses4DDims&         dims,
+                   int                          mode,
+                   int                          elem_size,
+                   const CEResources&           ce,
+                   cudaStream_t                 stream);
+
 class UlyssesGroup: public torch::CustomClassHolder {
 public:
     static int64_t              uniqueid_nints();  // ceil(sizeof(nvshmemx_uniqueid_t)/8)
@@ -28,6 +48,12 @@ public:
     int64_t world_size() const
     {
         return world_size_;
+    }
+    // This rank's CUDA device ordinal: entry points without an input tensor (the signal ops)
+    // guard on it, since nothing else pins the current device.
+    int64_t device_id() const
+    {
+        return device_id_;
     }
     void destroy();
 
@@ -92,6 +118,24 @@ public:
     // visible). No-op when world_size==1.
     void fast_barrier(cudaStream_t stream);
 
+    // Lazily create (world_size streams + events) and return the CE transfer resources.
+    const CEResources& ce_resources();
+
+    // Consumer-signal handshake (DeepEP-style split of arrive and wait) for grouped CE
+    // collectives. signal_arrive enqueues one 1-byte cudaMemsetAsync per rank (epoch low
+    // byte, CE-executed -- zero SM) on the given stream, AFTER the group's data copies in
+    // stream order. signal_wait launches a 1-block poll kernel on the given (consumer)
+    // stream that ld.acquire-spins until every rank's signal byte matches the epoch --
+    // the consumer proceeds the moment the last peer's data lands, with no barrier
+    // kernel competing for an SM slot on the comm stream and no extra event hop.
+    // Byte matching (current epoch or the next one -- a peer may run at most one group
+    // ahead, see the poll-kernel comment) keeps the protocol wrap- and reset-free; epochs
+    // whose low byte is 0 are skipped identically on every rank. Same rank-uniform
+    // call-sequence contract as fast_barrier; arrive/wait pairs and fast_barrier calls may
+    // be mixed across call sites as long as the pattern is identical on all ranks.
+    void signal_arrive(cudaStream_t stream);
+    void signal_wait(cudaStream_t stream);
+
 private:
     int                                my_rank_, world_size_, device_id_;
     int                                sm_major_ = 0;  // cached cudaDeviceGetAttribute(major) at construction
@@ -109,11 +153,26 @@ private:
     // -- true=TMA -- so a repeat auto call skips the two-path micro-benchmark.
     std::map<std::tuple<int, int, int, int>, bool> auto_path_cache_;
 
+    // CE transfer resources (lazy; see ce_resources()).
+    CEResources ce_;
+    bool        ce_ready_ = false;
+
     // fast_barrier state: symmetric flag buffer (uint64[ws]) + monotonic epoch (incremented lockstep per rank).
     bool                  bar_ready_ = false;
     uint64_t              bar_epoch_ = 0;
     void*                 bar_local_ = nullptr;  // this rank's flag base
     std::vector<uint64_t> bar_peers_;            // per-peer flag base (including self)
+
+    void ensure_bar_init_(cudaStream_t stream);      // shared flag-buffer init
+    void fast_barrier_kernel_(cudaStream_t stream);  // launch the spin-kernel barrier at bar_epoch_
+
+    // consumer-signal state: symmetric byte flags (uint8[ws]) + monotonic epoch.
+    bool                  csig_ready_ = false;
+    uint64_t              csig_epoch_ = 0;
+    void*                 csig_local_ = nullptr;
+    std::vector<uint64_t> csig_peers_;
+
+    void ensure_csig_init_(cudaStream_t stream);
 };
 
 }  // namespace ulysses

@@ -42,6 +42,11 @@ __device__ __forceinline__ void tma_wait_group()
 {
     __trap();
 }
+template<int N>
+__device__ __forceinline__ void tma_wait_group_read()
+{
+    __trap();
+}
 
 #else
 
@@ -102,12 +107,21 @@ __device__ __forceinline__ void tma_commit_group()
 }
 
 // Wait until at most N bulk_groups remain in flight (wait for all but the last N stores). N is a template
-// non-type param because the PTX immediate must be a compile-time constant; the kernel (templated on STAGES)
-// calls tma_wait_group<STAGES-1>() to keep the pipeline full and tma_wait_group<0>() to drain at the end.
+// non-type param because the PTX immediate must be a compile-time constant; the kernel calls
+// tma_wait_group<0>() to drain all stores before exit.
 template<int N>
 __device__ __forceinline__ void tma_wait_group()
 {
     asm volatile("cp.async.bulk.wait_group %0;" ::"n"(N));
+}
+
+// .read variant: wait until at most N bulk_groups are still READING their smem source; their remote
+// writes may stay in flight. tma_wait_group_read<0>() is what makes recycling an smem buffer safe
+// without draining the NVLink write pipeline.
+template<int N>
+__device__ __forceinline__ void tma_wait_group_read()
+{
+    asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(N));
 }
 
 // async-proxy visibility fence: makes subsequent generic writes visible to TMA (the async proxy).

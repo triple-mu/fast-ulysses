@@ -46,8 +46,10 @@ def main() -> None:
     group = UlyssesGroup(process_group=pg, initial_pool_bytes=1 << 30)
 
     b = 2
+    # d=512 exceeds the TMA tensormap boxDim cap (256): auto must fall back to non-TMA and still
+    # be bit-exact (explicit True/False stay restricted to d in {64,128} below).
     for dtype in (torch.float16, torch.bfloat16):
-        for d in (64, 128, 256):
+        for d in (64, 128, 256, 512):
             for mode in (0, 1):
                 shape = (b, 16, 4 * ws, d) if mode == 0 else (b, 16 * ws, 4, d)
                 x = torch.randn(shape, dtype=dtype, device=dev)
@@ -78,6 +80,34 @@ def main() -> None:
                         )
                     dist.barrier()
 
+                # CE (copy-engine) path: same reference, must also be bit-exact
+                # (b=2 exercises the per-(peer, b) memcpy loop).
+                ours_ce = group.all_to_all_single_4d_ce(x, mode=mode, tag=f"{tag}_ce")
+                if not torch.equal(ours_ce, ref):
+                    raise AssertionError(
+                        f"CE MISMATCH rank={rank} ws={ws} dtype={dtype} d={d} mode={mode}"
+                    )
+                if rank == 0:
+                    print(
+                        f"OK[ce] ws={ws} {str(dtype).split('.')[-1]} d={d} mode={mode} "
+                        f"shape={tuple(ours_ce.shape)}",
+                        flush=True,
+                    )
+                dist.barrier()
+
+    # Forcing TMA at d=512 must raise (tensormap boxDim cap), not corrupt. The check fires before any
+    # barrier/launch, so all ranks raise together and stay in lockstep.
+    if torch.cuda.get_device_capability()[0] >= 9:
+        x = torch.randn(b, 16, 4 * ws, 512, dtype=torch.bfloat16, device=dev)
+        try:
+            group.all_to_all_single_4d(x, mode=0, tag="tma_d512", use_tma=True)
+        except RuntimeError:
+            if rank == 0:
+                print(f"OK[forced-tma-d512-raises] ws={ws}", flush=True)
+        else:
+            raise AssertionError(f"use_tma=True with d=512 should raise, rank={rank}")
+        dist.barrier()
+
     # Distinct-tag non-aliasing (replaces the old a2a_frame): two concurrently-live results of the SAME
     # shape must use distinct tags and not clobber each other. Run both a2a, THEN check both -- if out_q
     # aliased out_k's buffer, out_q would now hold k's data.
@@ -90,6 +120,25 @@ def main() -> None:
         raise AssertionError(f"TAG ALIAS rank={rank} ws={ws} (distinct tags clobbered each other)")
     if rank == 0:
         print(f"OK[distinct-tag] ws={ws} q/k live together, no alias", flush=True)
+    dist.barrier()
+
+    # CE and the kernel paths share tag buffers and barrier epochs: interleave one base
+    # and one CE call on distinct tags and check both results stay intact.
+    outq = group.all_to_all_single_4d(xq, mode=0, tag="q_mix")
+    outk = group.all_to_all_single_4d_ce(xk, mode=0, tag="k_mix")
+    if not (torch.equal(outq, refq) and torch.equal(outk, refk)):
+        raise AssertionError(f"CE MIX rank={rank} ws={ws} (base/ce interleave corrupted a result)")
+    if rank == 0:
+        print(f"OK[ce-mix] ws={ws} base+ce interleave, shared epochs intact", flush=True)
+    dist.barrier()
+
+    # Async CE roundtrip: comm-stream launch, wait() on the main stream.
+    h = group.all_to_all_single_4d_ce_async(xq, mode=0, tag="ce_async")
+    out_async = h.wait()
+    if not torch.equal(out_async, refq):
+        raise AssertionError(f"CE ASYNC MISMATCH rank={rank} ws={ws}")
+    if rank == 0:
+        print(f"OK[ce-async] ws={ws}", flush=True)
     dist.barrier()
 
     if rank == 0:

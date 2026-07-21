@@ -1,0 +1,20 @@
+===== USE_TMA=0 H=128 =====
+=== mode0 | ws=8 | H=128 D=128 | ours=non-TMA ===
+N=  16384 | ours(non-TMA) med=   194.3us    302 GB/s | NCCL med=   301.0us    195 GB/s
+N=  32768 | ours(non-TMA) med=   365.3us    321 GB/s | NCCL med=   562.7us    209 GB/s
+N=  65536 | ours(non-TMA) med=   747.8us    314 GB/s | NCCL med=  1086.6us    216 GB/s
+N= 131072 | ours(non-TMA) med=  1619.5us    290 GB/s | NCCL med=  2131.0us    220 GB/s
+N= 262144 | ours(non-TMA) med=  3145.6us    299 GB/s | NCCL med=  4133.4us    227 GB/s
+===== USE_TMA=1 H=128 =====
+=== mode0 | ws=8 | H=128 D=128 | ours=TMA ===
+N=  16384 | ours(TMA) med=   352.4us    167 GB/s | NCCL med=   300.7us    195 GB/s
+N=  32768 | ours(TMA) med=   651.2us    180 GB/s | NCCL med=   561.4us    209 GB/s
+N=  65536 | ours(TMA) med=   787.7us    298 GB/s | NCCL med=  1089.9us    216 GB/s
+N= 131072 | ours(TMA) med=  1649.8us    285 GB/s | NCCL med=  2130.1us    221 GB/s
+N= 262144 | ours(TMA) med=  3417.9us    275 GB/s | NCCL med=  4151.1us    226 GB/s
+===== USE_TMA=0 H=40 Wan =====
+=== mode0 | ws=8 | H=40 D=128 | ours=non-TMA ===
+N=  75600 | ours(non-TMA) med=   278.0us    305 GB/s | NCCL med=   414.3us    204 GB/s
+===== USE_TMA=1 H=40 Wan =====
+=== mode0 | ws=8 | H=40 D=128 | ours=TMA ===
+N=  75600 | ours(TMA) med=   324.8us    261 GB/s | NCCL med=   415.6us    204 GB/s
