@@ -50,6 +50,12 @@ public:
     {
         return world_size_;
     }
+    // This rank's CUDA device ordinal: entry points without an input tensor (the signal ops)
+    // guard on it, since nothing else pins the current device.
+    int64_t device_id() const
+    {
+        return device_id_;
+    }
     void destroy();
 
     SymmetricHeapPool& pool()
