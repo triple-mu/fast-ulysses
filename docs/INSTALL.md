@@ -2,11 +2,13 @@
 
 ## Requirements
 
-- **NVSHMEM 3.7.0** (host library + headers; only the install root is needed, no system-wide setup)
-- **PyTorch** built for **CUDA 12**
-- **CUDA 12** toolkit (`nvcc`)
+- **NVSHMEM 3.7+**, latest recommended (host library + headers; only the install root is needed)
+- **PyTorch** (any recent CUDA build)
+- **CUDA 12 or 13** toolkit (`nvcc`; CUDA 13 needs one extra include flag — see Troubleshooting)
 - CMake ≥ 3.18 (plus `ccache` optionally — picked up automatically for faster rebuilds)
 - Target GPUs: sm80 (A100) / sm90 (H100/H200) / sm100 (B200) / sm120
+
+Tested combinations: NVSHMEM 3.7.0/cu12 + nvcc 12.8 + torch cu130; NVSHMEM 3.7.2/cu13 + nvcc 13.3 + torch cu126/cu132.
 
 ## Build
 
@@ -29,7 +31,7 @@ Notes:
 
 ## Docker
 
-Any recent NGC PyTorch image works as a base (CUDA 12 + PyTorch preinstalled):
+Any recent NGC PyTorch image works as a base:
 
 ```bash
 docker run --rm -it --gpus all --ipc=host \

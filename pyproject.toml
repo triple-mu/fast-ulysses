@@ -14,6 +14,7 @@ dynamic = ["version"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Environment :: GPU :: NVIDIA CUDA :: 12",
+    "Environment :: GPU :: NVIDIA CUDA :: 13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 

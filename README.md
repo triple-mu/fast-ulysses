@@ -30,7 +30,7 @@ Ulysses sequence parallelism (DeepSpeed-Ulysses) shards very long sequences acro
 
 ## Installation
 
-Requirements: **NVSHMEM 3.7.0**, **PyTorch** (CUDA 12 build), **CUDA 12**, and a GPU from sm80 (A100) / sm90 (H100/H200) / sm100 (B200) / sm120.
+Requirements: **NVSHMEM 3.7+** (latest recommended), **PyTorch**, **CUDA 12 or 13**, and a GPU from sm80 (A100) / sm90 (H100/H200) / sm100 (B200) / sm120.
 
 ```bash
 NVSHMEM_HOME=<nvshmem install root> \
