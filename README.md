@@ -12,7 +12,7 @@
 
 Ulysses sequence parallelism (DeepSpeed-Ulysses) shards long sequences across GPUs: one all-to-all before attention trades the sequence shard for a head shard, a second one trades back. For long-sequence / video DiT workloads (Wan, HunyuanVideo, ...) these two all-to-alls are the critical communication.
 
-`fast_ulysses` ships this 4D all-to-all as a standalone **torch custom op** that bypasses NCCL inside the node: outputs live on the NVSHMEM symmetric heap, data goes straight into peer memory over NVLink P2P, and a custom flag barrier synchronizes ranks — no host round-trip, no NCCL collective on the hot path.
+`fast_ulysses` ships this 4D all-to-all as a standalone **torch custom op** (`torch.ops.fast_ulysses.all_to_all_single_4d`) that bypasses NCCL inside the node: outputs live on the NVSHMEM symmetric heap, data goes straight into peer memory over NVLink P2P, and a custom flag barrier synchronizes ranks — no host round-trip, no NCCL collective on the hot path.
 
 ## Features
 

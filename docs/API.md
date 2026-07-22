@@ -70,14 +70,15 @@ this rank's own work only. All ranks must use the identical barrier pattern. Sav
 kernels and N-1 cross-rank skew couplings per group.
 
 **Overlap in practice (8×H200)**: cooperative-launch GEMMs (e.g. cuBLAS nvjet) release no SM
-slots, so the SM-resident scatter just waits for them to drain — nsys shows zero overlap. Use the
-CE path below for those windows.
+slots, so the SM-resident scatter just waits for them to drain — nsys shows zero overlap. The
+async kernel paths pay off in non-cooperative compute windows; for cooperative ones use the CE
+path below.
 
 ## `all_to_all_single_4d_ce(x, *, mode=0, tag="") -> Tensor`
 
 CE (**copy-engine**) transfer path: identical collective semantics, layouts, tags and barrier
-epochs, but the transfer is a per-peer pitched `cudaMemcpy2DAsync` fan-out on the DMA engines
-(per-peer streams joined back with events, then the flag barrier).
+epochs, but the transfer is a pitched `cudaMemcpy2DAsync` fan-out on the DMA engines — one 2D
+copy per `(peer, b)` on per-peer streams, joined back with events, then the flag barrier.
 
 The DMA engines use **no SMs**, so the transfer keeps full NVLink bandwidth while compute holds
 every SM slot. Measured on 4×H200: 385 GB/s per peer,
