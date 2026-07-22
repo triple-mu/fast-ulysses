@@ -148,20 +148,11 @@ class UlyssesGroup:
     ) -> torch.Tensor:
         """Uniform 4D all-to-all: mode0 scatters heads / gathers sequence; mode1 is its inverse.
 
-        COLLECTIVE SEMANTICS: s/n must be divisible by world_size (uniform). The first (shape, mode, use_tma)
-        seen runs a local micro-benchmark and caches the launch config; every rank MUST issue the
-        SAME (shape, mode, use_tma) call sequence (the nvshmem symmetric alloc + cross-rank barrier
-        are collective; all ranks miss the same entry on the first call together). Sync AND async
-        calls count in that sequence (both advance the same per-group barrier epoch).
-
-        use_tma (None=auto / True / False): None=auto -> sm<9 uses non-TMA; sm90+ micro-benchmarks
-        BOTH paths on the first call for this shape and caches the faster (runtime path selection,
-        replacing the old static table). True forces TMA (requires sm90+, else TORCH_CHECK fails);
-        False forces non-TMA. Every rank MUST pass the SAME use_tma (a mismatch diverges
-        kernel/barrier + cache key -> hang).
-
-        tag scopes the symmetric-heap output buffer (reused on same tag+shape+dtype). Results that
-        must stay live together (e.g. q/k/v) MUST use distinct tags, else they alias one buffer.
+        Collective -- every rank MUST issue the SAME (shape, mode, use_tma) call sequence
+        (sync and async count together), or the whole group hangs. First call per shape
+        micro-benchmarks and caches the launch config; use_tma None/True/False picks
+        auto/TMA/non-TMA. Concurrently-live results (e.g. q/k/v) MUST use distinct tags,
+        else they alias one symmetric-heap buffer. Full contract: docs/API.md.
         """
         return torch.ops.fast_ulysses.all_to_all_single_4d(
             self._group, x.contiguous(), mode, tag, use_tma
@@ -176,21 +167,13 @@ class UlyssesGroup:
         use_tma: bool | None = None,
         barrier: bool = True,
     ) -> AsyncA2AHandle:
-        """Async variant: launches on the group's comm stream and returns immediately; kernels
-        submitted to the caller's stream afterwards overlap with the a2a until handle.wait().
-        Collective constraints are identical to the sync call (same rank-uniform call sequence,
-        sync and async counted together).
+        """Async variant on the group's comm stream; handle.wait() makes the caller's stream
+        wait (GPU-side) and returns the output view. Same collective contract as the sync call.
 
-        ORDERING CONSTRAINT when mixing with sync calls: the fast_barrier epoch is one per-group
-        monotonic counter, so barrier kernels must EXECUTE in submission order. wait() every async
-        handle of this group before issuing the next sync collective on the main stream -- that
-        data dependency forces the comm-stream barriers to complete first.
-
-        barrier=False groups several calls under ONE handshake: only copies are issued, and a later
-        barrier=True call on the same stream publishes them all (its flag write is stream-ordered
-        after every prior deferred copy). A barrier=False handle's wait() orders only THIS rank's
-        work -- peers' writes into the local output are guaranteed only after the barrier-carrying
-        handle's wait(). All ranks must use the identical barrier pattern (epoch lockstep).
+        Barrier kernels must execute in submission order: wait() every outstanding handle
+        BEFORE the next sync collective. barrier=False defers the handshake so several calls
+        share one -- only the barrier-carrying handle's wait() implies peers' writes arrived,
+        and all ranks must use the identical barrier pattern. Full contract: docs/API.md.
         """
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(
@@ -208,23 +191,12 @@ class UlyssesGroup:
         mode: int = 0,
         tag: str = "",
     ) -> torch.Tensor:
-        """CE (copy-engine) variant of all_to_all_single_4d: identical collective
-        semantics, layouts, tag-scoped output buffers and barrier epochs, but the
-        transfer is a per-peer cudaMemcpy2DAsync fan-out on DMA engines instead of an
-        SM/TMA kernel. It uses no SMs (flag barrier aside), so it keeps running at full
-        NVLink bandwidth while compute kernels hold every SM slot -- the
-        overlap-friendly third path next to the SM scatter (use_tma=False) and TMA
-        (use_tma=True). Path choice is explicit: the auto-tune of
-        all_to_all_single_4d does not consider CE. Per call it adds ~world_size memcpy
-        launches (a few us each), so prefer the kernel paths for tiny shapes.
-
-        Collective constraints are identical to all_to_all_single_4d (rank-uniform
-        call sequence; sync and async calls advance the same barrier epoch), except
-        there is no autotune micro-benchmark on first call.
-
-        Deliberately no ``barrier`` parameter: a sync call hands back a readable view,
-        and a deferred one would be unsafe to read with nothing left to publish it --
-        grouped handshakes belong to the async variants, where consumption is explicit.
+        """CE (copy-engine) variant: same collective contract as all_to_all_single_4d, but
+        the transfer rides the DMA engines (zero SM) and so overlaps compute that starves
+        the kernel paths. Explicit choice -- the use_tma auto-tune never picks CE; prefer
+        the kernel paths for tiny shapes (~world_size memcpy launches per call).
+        Deliberately no ``barrier`` parameter: a deferred sync result would be an
+        unreadable view with nothing left to publish it. Full contract: docs/API.md.
         """
         return torch.ops.fast_ulysses.all_to_all_single_4d_ce(
             self._group, x.contiguous(), mode, tag
@@ -238,12 +210,9 @@ class UlyssesGroup:
         tag: str = "",
         barrier: bool = True,
     ) -> AsyncA2AHandle:
-        """Async CE variant: launches on the group's comm stream and returns
-        immediately (ordering constraint as in all_to_all_single_4d_async: wait()
-        every handle before the next sync collective on the main stream). Because the
-        transfer rides the DMA engines, this is the variant whose in-flight window
-        actually overlaps concurrent GEMMs/attention instead of time-slicing with
-        them.
+        """Async CE variant; the in-flight window genuinely overlaps concurrent
+        GEMMs/attention. Ordering and barrier=False grouping exactly as in
+        all_to_all_single_4d_async. Full contract: docs/API.md.
         """
         x = x.contiguous()
         out, ev_done = self._launch_on_comm_stream(

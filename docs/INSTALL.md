@@ -2,11 +2,13 @@
 
 ## Requirements
 
-- **NVSHMEM 3.7.0** (host library + headers; only the install root is needed, no system-wide setup)
-- **PyTorch** built for **CUDA 12**
-- **CUDA 12** toolkit (`nvcc`)
+- **NVSHMEM 3.7+**, latest recommended (host library + headers; only the install root is needed)
+- **PyTorch** (any recent CUDA build)
+- **CUDA 12 or 13** toolkit (`nvcc`; CUDA 13 needs one extra include flag — see Troubleshooting)
 - CMake ≥ 3.18 (plus `ccache` optionally — picked up automatically for faster rebuilds)
 - Target GPUs: sm80 (A100) / sm90 (H100/H200) / sm100 (B200) / sm120
+
+Tested combinations: NVSHMEM 3.7.0/cu12 + nvcc 12.8 + torch cu130; NVSHMEM 3.7.2/cu13 + nvcc 13.3 + torch cu126/cu132.
 
 ## Build
 
@@ -29,7 +31,7 @@ Notes:
 
 ## Docker
 
-Any recent NGC PyTorch image works as a base (CUDA 12 + PyTorch preinstalled):
+Any recent NGC PyTorch image works as a base:
 
 ```bash
 docker run --rm -it --gpus all --ipc=host \
@@ -43,16 +45,14 @@ NVSHMEM_HOME=/opt/nvshmem FAST_ULYSSES_CUDA_ARCH=90 pip install -e . --no-build-
 
 ## Nodes without an NVSwitch fabric
 
-Some H100/H200 nodes have no NVSwitch fabric (or carry IB NICs). There, NVSHMEM's default init may attempt the NVLS multicast heap mapping or the IB remote transport and **segfault**. This op is single-node NVLink P2P only, so `UlyssesGroup` already applies safe defaults at construction (via `os.environ.setdefault`):
+On nodes without an NVSwitch fabric (or with IB NICs), NVSHMEM's default init may attempt the NVLS multicast mapping or the IB remote transport and **segfault**. This op is single-node NVLink P2P only, so `UlyssesGroup` applies safe defaults at construction (`os.environ.setdefault` — override them **before** constructing the group if needed):
 
 ```text
 NVSHMEM_DISABLE_NVLS=1
 NVSHMEM_REMOTE_TRANSPORT=none
 ```
 
-No manual env setup is needed on such nodes; set either variable yourself **before** constructing the group if you need different behavior.
-
-NCCL (used by the `torch.distributed` bootstrap and the test/benchmark references) probes NVLS on its own: on nodes with a broken Fabric Manager configuration it fails with `unhandled cuda error` right at init ("Failed to bind NVLink SHARP (NVLS) Multicast memory ... CUDA error 401"). Run with `NCCL_NVLS_ENABLE=0` there.
+NCCL (the `torch.distributed` bootstrap and test/benchmark references) probes NVLS on its own: on a broken Fabric Manager it dies at init with `unhandled cuda error` ("Failed to bind NVLink SHARP (NVLS) Multicast memory ... CUDA error 401"). Run with `NCCL_NVLS_ENABLE=0` there.
 
 ## Troubleshooting
 
@@ -60,9 +60,16 @@ NCCL (used by the `torch.distributed` bootstrap and the test/benchmark reference
 - **CMake error `CMakeCache.txt directory ... is different than ...`**: the persistent `build/` directory was configured from another path (e.g. the repo was moved or renamed). `rm -rf build` and rebuild.
 - **Import error for `fast_ulysses._C` after a torch upgrade**: the extension links libtorch; rebuild after switching PyTorch versions (`rm -rf build` first if CMake gets confused).
 - **Init segfault inside NVSHMEM**: see the fabric section above; also make sure all ranks construct `UlyssesGroup` together (construction is collective).
-- **`fatal error: cuda/std/array: No such file or directory` (CUDA 13 toolkit)**: CUDA 13 moved the CCCL headers (libcu++/CUB/Thrust) into `include/cccl/`, where the NVSHMEM 3.7 headers no longer find them. Add the path for **both** compilers (`bindings.cpp` includes `nvshmem.h` through the host compiler too):
+- **`fatal error: cuda/std/array: No such file or directory` (CUDA 13 toolkit)**: CUDA 13 moved the CCCL headers into `include/cccl/`, where the NVSHMEM 3.7 headers no longer find them. Add the path for **both** compilers (the host compiler includes `nvshmem.h` too):
 
   ```bash
   CUDAFLAGS=-I/usr/local/cuda/include/cccl CXXFLAGS=-I/usr/local/cuda/include/cccl \
+  NVSHMEM_HOME=<nvshmem install root> pip install -e . --no-build-isolation
+  ```
+- **CMake error `The link interface of target "nvshmem::nvshmem_host" contains: CCCL::CCCL`** (CUDA-13 NVSHMEM build on a CUDA-12 toolkit): CUDA 12 has no `CCCL::CCCL` CMake target, but CCCL is header-only here, so a stub satisfies it:
+
+  ```bash
+  printf 'if(NOT TARGET CCCL::CCCL)\n  add_library(CCCL::CCCL INTERFACE IMPORTED)\nendif()\n' > /tmp/cccl_stub.cmake
+  FAST_ULYSSES_CMAKE_ARGS="-DCMAKE_PROJECT_INCLUDE=/tmp/cccl_stub.cmake" \
   NVSHMEM_HOME=<nvshmem install root> pip install -e . --no-build-isolation
   ```

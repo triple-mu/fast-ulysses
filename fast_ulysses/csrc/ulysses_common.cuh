@@ -39,13 +39,12 @@ void launch_a2a(const void*                  src,
                 const A2AConfig&             cfg,
                 cudaStream_t                 stream);
 
-// Local microbench shared by both resolve paths: warmup + time 10 iters, return us/call. Defined in
-// all_to_all.cu. run_once is the REAL per-call op (launch + finish, where finish = quiet + fast_barrier),
-// so its ranking matches steady-state perf. The fast_barrier inside is hang-safe: under pure-lazy SPMD all
-// ranks miss the same (shape,mode,tma) on the first call together, so they call equal barriers in lockstep.
+// Local microbench shared by both resolve paths: warmup + time 10 iters, return us/call. run_once
+// is the REAL per-call op (launch + quiet + fast_barrier), so its ranking matches steady state;
+// hang-safety of the barrier inside: see the resolve_config note in ulysses_group.cuh.
 float microbench_us(const std::function<void()>& run_once, cudaStream_t stream);
 
-// SM count of the current device, queried once per process and cached. Defined in all_to_all.cu.
+// SM count of the current device, cached (defined in all_to_all.cu, like microbench_us).
 int sm_count_cached();
 
 // non-TMA config resolution: micro-benchmark sweep over threads x unroll x blocks, keep the fastest (result

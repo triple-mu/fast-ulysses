@@ -20,10 +20,9 @@ struct CEResources {
     std::vector<cudaStream_t> streams;
 };
 
-// CE transfer path (all_to_all_ce.cu): per-peer cudaMemcpy2DAsync fan-out over ce.streams,
-// joined back to `stream` with events. Pure DMA -- no SM usage, no launch config, no
-// autotune. The caller appends the flag barrier (no nvshmem quiet needed: these are not
-// NVSHMEM proxy writes).
+// CE transfer path: per-peer cudaMemcpy2DAsync fan-out over ce.streams, joined back to
+// `stream` with events. The caller appends the flag barrier (no nvshmem quiet needed:
+// these are not NVSHMEM proxy writes). Rationale: all_to_all_ce.cu file header.
 void launch_a2a_ce(const void*                  src,
                    const std::vector<uint64_t>& peer_ptrs,
                    const Ulysses4DDims&         dims,
