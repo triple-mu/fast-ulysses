@@ -191,10 +191,9 @@ void launch_a2a(const void*                  src,
                     stream);
 }
 
-// Local microbench shared by both resolve_config paths: warmup then time 10 iters, return us/call.
-// No collective primitive -- under SPMD all ranks miss the same (shape,mode,tma) on the first call
-// and run this concurrently, so the remote writes contend just as in steady state. Correctness is
-// guaranteed by the post-launch fast_barrier, not by any timing-side lockstep.
+// No collective primitive of its own: under SPMD all ranks run this concurrently, so the remote
+// writes contend just as in steady state; correctness is guaranteed by the post-launch
+// fast_barrier, not by any timing-side lockstep.
 float microbench_us(const std::function<void()>& run_once, cudaStream_t stream)
 {
     cudaEvent_t s, e;
@@ -211,7 +210,7 @@ float microbench_us(const std::function<void()>& run_once, cudaStream_t stream)
     ULYSSES_CUDA_CHECK(cudaEventElapsedTime(&ms, s, e));
     ULYSSES_CUDA_CHECK(cudaEventDestroy(s));
     ULYSSES_CUDA_CHECK(cudaEventDestroy(e));
-    return ms * 100.f;  // ms(10 iters) -> us/call: /10 iters * 1000 (ms->us)
+    return ms * 100.f;  // ms/10iters -> us/call
 }
 
 // non-TMA config resolution: autotune over the three launch knobs -- threads (in-flight remote writes,

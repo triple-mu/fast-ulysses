@@ -100,12 +100,9 @@ at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>& group,
     return buf.view;
 }
 
-// CE (copy-engine) transfer path: same collective semantics, layouts, tag-scoped output
-// buffers and barrier epochs as all_to_all_single_4d, but the data movement is a per-peer
-// cudaMemcpy2DAsync fan-out on DMA engines (see all_to_all_ce.cu) -- zero SM usage, no
-// launch config, no autotune. This is the third path next to the SM scatter and TMA: pick
-// it when the a2a must overlap concurrent compute (the kernel paths cannot get an SM block
-// slot while e.g. nvjet GEMMs hold them all).
+// CE (copy-engine) transfer path: same collective semantics as all_to_all_single_4d, but
+// the data moves on DMA engines -- zero SM usage, so it overlaps compute that starves the
+// kernel paths. Full rationale: all_to_all_ce.cu file header.
 at::Tensor all_to_all_single_4d_ce(
     const c10::intrusive_ptr<UlyssesGroup>& group, at::Tensor input, int64_t mode, std::string tag, bool barrier)
 {
