@@ -10,23 +10,22 @@
 
 ## Why fast-ulysses?
 
-Ulysses sequence parallelism (DeepSpeed-Ulysses) shards very long sequences across GPUs for attention: one all-to-all before attention swaps the "sequence-sharded" layout for "head-sharded" (every rank gets the full sequence for its own subset of heads), and a second all-to-all swaps back afterwards. For long-sequence / video DiT workloads (Wan, HunyuanVideo, ...) this all-to-all is the critical communication — the longer the sequence and the more GPUs, the harder it bottlenecks.
+Ulysses sequence parallelism (DeepSpeed-Ulysses) shards long sequences across GPUs: one all-to-all before attention trades the sequence shard for a head shard, a second one trades back. For long-sequence / video DiT workloads (Wan, HunyuanVideo, ...) these two all-to-alls are the critical communication.
 
-`fast_ulysses` implements this 4D all-to-all as a standalone, distributable **torch custom op** (namespace `fast_ulysses`, `torch.ops.fast_ulysses.all_to_all_single_4d`) that bypasses NCCL inside a node: output buffers are allocated on the NVSHMEM symmetric heap, data is written directly into peer GPU memory over NVLink P2P, and a lightweight custom NVLink flag barrier synchronizes ranks — the whole path never touches the host and never issues an NCCL collective.
+`fast_ulysses` ships this 4D all-to-all as a standalone **torch custom op** that bypasses NCCL inside the node: outputs live on the NVSHMEM symmetric heap, data goes straight into peer memory over NVLink P2P, and a custom flag barrier synchronizes ranks — no host round-trip, no NCCL collective on the hot path.
 
 ## Features
 
 - **Three transfer paths**:
-  - **non-TMA path**: SM-resident vectorized direct writes with a per-shape autotuned launch config; the fallback for sm80 (A100) and anything without TMA.
-  - **TMA path** (sm90+, Hopper/Blackwell): `cp.async.bulk` (the TMA unit) moves the data with a software pipeline, occupying almost no SM.
-  - With `use_tma=None` (auto), **both kernel paths are micro-benchmarked on the actual hardware at first call and the faster one is cached** (replacing any offline static table); it can also be forced per call (see the `use_tma` tri-state in [docs/API.md](docs/API.md)).
+  - **non-TMA**: SM-resident vectorized direct writes, per-shape autotuned; works on every supported arch.
+  - **TMA** (sm90+): `cp.async.bulk` software pipeline, nearly zero SM usage.
+  - `use_tma=None` benchmarks both kernel paths at first call and caches the winner; forceable per call ([docs/API.md](docs/API.md)).
   - **CE path** (`all_to_all_single_4d_ce`, chosen explicitly): a per-peer `cudaMemcpy2DAsync` fan-out on the DMA engines — **zero SM usage**, so the transfer keeps running at full NVLink bandwidth while compute kernels (e.g. cuBLAS nvjet GEMMs) hold every SM slot. The overlap path: 93–98% of the CE a2a hides under a concurrent GEMM chain vs 25–39% for the kernel paths (4×H100/H200, Wan shapes).
-- **Grouped handshakes for async pipelines**: `barrier=False` defers the completion handshake so several async a2as (e.g. one layer's q/k/v) share a single barrier — see [docs/API.md](docs/API.md).
-- **Compute-communication fusion examples** (fused QK RMSNorm + RoPE into the scatter kernel, standalone `rms_norm` / `rope` / `norm_rope` ops) live on the `examples/qk-norm-rope-fusion` branch — this branch keeps the pure all-to-all core.
-- **Single-node NVLink P2P**, `world_size ∈ [1, 8]` (odd sizes such as 3/5/6/7 included).
-- **Uniform splits**: sequence length `s` and head count `n` divisible by `world_size`.
-- **Both directions**: `mode=0` scatters heads / gathers sequence (entering attention); `mode=1` is its inverse (leaving attention).
-- `float16` / `bfloat16`; requires `d * elem_size` to be 16-byte aligned.
+- **Grouped handshakes**: `barrier=False` lets several async a2as (e.g. one layer's q/k/v) share one handshake ([docs/API.md](docs/API.md)).
+- **Fusion examples** (QK RMSNorm + RoPE in the scatter kernel, standalone `rms_norm` / `rope` / `norm_rope`) live on the `examples/qk-norm-rope-fusion` branch.
+- Single node, NVLink P2P, `world_size ∈ [1, 8]` (odd sizes included).
+- Uniform splits (`s` and `n` divisible by `world_size`); `mode=0` enters attention, `mode=1` leaves it.
+- `float16` / `bfloat16`; `d * elem_size` 16-byte aligned.
 
 ## Installation
 
@@ -38,11 +37,11 @@ FAST_ULYSSES_CUDA_ARCH=90 \
 pip install -e . --no-build-isolation
 ```
 
-- `NVSHMEM_HOME` (required): NVSHMEM install root (must contain `include/nvshmem.h` and `lib/cmake/nvshmem`).
-- `FAST_ULYSSES_CUDA_ARCH`: target compute capabilities, `;`-separated, default `80;90;100;120`.
-- `--no-build-isolation`: build against the PyTorch already installed in the host environment.
+- `NVSHMEM_HOME` (required): install root containing `include/nvshmem.h` and `lib/cmake/nvshmem`.
+- `FAST_ULYSSES_CUDA_ARCH`: target compute capabilities, `;`-separated (default `80;90;100;120`).
+- `--no-build-isolation`: link the already-installed PyTorch.
 
-Docker setup, nodes without an NVSwitch fabric, and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md).
+Docker setup, fabric-less nodes, and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Quick Start
 
@@ -98,14 +97,14 @@ if __name__ == "__main__":
 
 | API | Summary |
 | --- | --- |
-| `UlyssesGroup(process_group=None, device=None, initial_pool_bytes=2<<30)` | Collective group construction: NVSHMEM init + symmetric-heap pool. |
-| `group.all_to_all_single_4d(x, *, mode=0, tag="", use_tma=None)` | Uniform 4D all-to-all (mode0 / mode1), kernel paths. |
-| `group.all_to_all_single_4d_async(..., barrier=True) -> AsyncA2AHandle` | Same op on a high-priority comm stream; overlap until `handle.wait()`; `barrier=False` groups several calls under one handshake. |
-| `group.all_to_all_single_4d_ce(x, *, mode=0, tag="")` | Same collective on the DMA engines (zero SM) — the overlap path. |
-| `group.all_to_all_single_4d_ce_async(..., barrier=True) -> AsyncA2AHandle` | Async CE variant; its in-flight window genuinely overlaps concurrent compute. |
+| `UlyssesGroup(process_group=None, device=None, initial_pool_bytes=2<<30)` | Collective construction: NVSHMEM init + symmetric-heap pool. |
+| `group.all_to_all_single_4d(x, *, mode=0, tag="", use_tma=None)` | Uniform 4D all-to-all, kernel paths. |
+| `group.all_to_all_single_4d_async(..., barrier=True) -> AsyncA2AHandle` | Same op on a high-priority comm stream; `barrier=False` groups calls under one handshake. |
+| `group.all_to_all_single_4d_ce(x, *, mode=0, tag="")` | Same collective on the DMA engines — the overlap path. |
+| `group.all_to_all_single_4d_ce_async(..., barrier=True) -> AsyncA2AHandle` | Async CE variant; genuinely overlaps concurrent compute. |
 | `group.destroy()` | Release symmetric-heap resources (collective). |
 
-Shapes, the `use_tma` tri-state, tag semantics, and the **collective hard constraints** (call-sequence uniformity across ranks — violating them hangs the whole group) are documented in [docs/API.md](docs/API.md).
+Shapes, the `use_tma` tri-state, tag semantics, and the **collective hard constraints** (violating the rank-uniform call sequence hangs the whole group): [docs/API.md](docs/API.md).
 
 ## Benchmarks
 

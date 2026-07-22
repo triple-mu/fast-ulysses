@@ -15,11 +15,10 @@ Shape conventions used throughout: `b` batch, `d` head dim, `ws = world_size`,
 | --- | --- | --- |
 | `process_group` | `torch.distributed.ProcessGroup` or `None` | Bootstrap process group; `None` uses `dist.group.WORLD`. **Must span all ranks** — the NVSHMEM bootstrap is world-collective, so a subgroup raises `NotImplementedError`. |
 | `device` | `torch.device` or `None` | This rank's CUDA device; `None` uses the current device. |
-| `initial_pool_bytes` | `int` | NVSHMEM symmetric-heap reservation, default `2<<30` (2 GiB). Every collective's output buffer is carved from this pool (reused per `tag`). NVSHMEM sizes the heap when it (re)initializes — i.e. from the first **live** group; while any group is alive, a later group's larger request may not be backed (it warns). Destroying all groups finalizes NVSHMEM, so the next group re-initializes with its own size. |
+| `initial_pool_bytes` | `int` | NVSHMEM symmetric-heap reservation, default `2<<30` (2 GiB); every collective's output buffer comes from this pool (reused per `tag`). The heap is sized by the **first live** group — a later, larger request only warns; destroying all groups lets the next one re-size. |
 
-Construction broadcasts the NVSHMEM unique id with `dist.broadcast`, runs `init_world`, and wraps
-the sequence in `dist.barrier`s — **all ranks must construct the group together** (construction is
-itself collective).
+Construction broadcasts the NVSHMEM unique id over `torch.distributed` and is itself collective:
+**all ranks must construct the group together**.
 
 ## `all_to_all_single_4d(x, *, mode=0, tag="", use_tma=None) -> Tensor`
 
@@ -39,86 +38,71 @@ itself collective).
 
 **The `use_tma` tri-state**
 
-- `None` (auto): sm<9 → non-TMA; **sm90+ → on first sight of a shape, both paths are
-  micro-benchmarked at runtime and the faster one is cached**; later calls hit the cache directly.
-  This replaces any offline static table and adapts to the actual hardware.
+- `None` (auto): sm<9 → non-TMA; sm90+ → on first sight of a shape, **both paths are
+  micro-benchmarked and the faster one is cached**.
 - `True`: force TMA. `TORCH_CHECK` error when TMA is unavailable or infeasible: sm<9, `d > 256`
   (tensormap boxDim cap), or no tile config fits the device's dynamic-smem cap (e.g. sm_120's
-  ~99KB). The auto path treats these cases as "non-TMA only" instead of erroring.
+  ~99KB). Auto treats these cases as "non-TMA only" instead of erroring.
 - `False`: force non-TMA.
 
 **Collective hard constraints (violating them hangs the whole group)**
 
-- All ranks must call this method with the **same `(shape, mode, use_tma)` sequence**. `use_tma` is
-  as strict as `shape`/`mode` — a mismatch sends ranks down different kernels/barriers and forks the
-  internal cache key, which hangs.
-- The first call for a given `(shape, mode, use_tma)` runs a **lazy micro-benchmark** to pick the
-  best launch config (the auto path additionally compares both kernels) and caches it (later hits
-  add zero collective overhead). Under strict SPMD all ranks miss the same entry on the first call
-  together, hence hang-free.
-- Sync and async calls **both count** in the rank-uniform call sequence (both advance the same
-  per-group barrier epoch; sync calls run on the caller's stream, async on the comm stream).
+- All ranks must call with the **same `(shape, mode, use_tma)` sequence** — a mismatch sends ranks
+  down different kernels/barriers and forks the internal cache key.
+- The first call per `(shape, mode, use_tma)` runs a **lazy micro-benchmark** and caches the launch
+  config; under SPMD all ranks miss the same entry together, hence hang-free.
+- Sync and async calls **both count** in the sequence (both advance the same per-group barrier
+  epoch; sync runs on the caller's stream, async on the comm stream).
 
 ## `all_to_all_single_4d_async(x, *, mode=0, tag="", use_tma=None, barrier=True) -> AsyncA2AHandle`
 
-Async variant: the collective is submitted to the group's dedicated high-priority comm stream and
-the call returns immediately; kernels submitted to the caller's stream afterwards overlap with the
-a2a. `handle.wait()` makes the **caller's** current stream wait (GPU-side event wait — the host
-does not block) and returns the output view. Collective constraints are identical to the sync call.
+Submits the collective to the group's high-priority comm stream and returns immediately;
+`handle.wait()` makes the **caller's** current stream wait (GPU-side — the host does not block)
+and returns the output view. Constraints identical to the sync call.
 
-**Ordering constraint when mixing with sync calls**: the `fast_barrier` epoch is one per-group
-monotonic counter, so barrier kernels must execute in submission order. `wait()` every outstanding
-async handle of the group **before** issuing the next sync collective on the main stream — the data
-dependency forces the comm-stream barriers to complete first.
+**Mixing with sync calls**: barrier kernels must execute in submission order (one per-group
+epoch), so `wait()` every outstanding async handle **before** the next sync collective.
 
-**Grouped handshake (`barrier=False`)**: several async calls can share ONE completion handshake —
-pass `barrier=False` on all but the last call of the group (e.g. q, k, v of one attention layer).
-Only the barrier-carrying handle's `wait()` guarantees that peers' writes have landed in the local
-output buffers; a `barrier=False` handle's `wait()` orders this rank's own work only. All ranks
-must use the identical barrier pattern (epoch lockstep). This removes N-1 barrier kernels and,
-more importantly, N-1 cross-rank skew couplings per group.
+**Grouped handshake (`barrier=False`)**: several async calls share ONE handshake — pass
+`barrier=False` on all but the last call (e.g. q, k, v of one layer). Only the barrier-carrying
+handle's `wait()` guarantees peers' writes have landed; a `barrier=False` handle's `wait()` orders
+this rank's own work only. All ranks must use the identical barrier pattern. Saves N-1 barrier
+kernels and N-1 cross-rank skew couplings per group.
 
-**Overlap in practice (measured on 8×H200)**: the direct-write scatter is an SM-resident large
-grid; cooperative-launch GEMMs (e.g. cuBLAS nvjet) release no SM slots while running, so the a2a
-can only wait for them to drain (nsys shows zero overlap). The async API pays off in
-non-cooperative compute windows — or use the CE path below, which overlaps by construction.
+**Overlap in practice (8×H200)**: cooperative-launch GEMMs (e.g. cuBLAS nvjet) release no SM
+slots, so the SM-resident scatter just waits for them to drain — nsys shows zero overlap. Use the
+CE path below for those windows.
 
 ## `all_to_all_single_4d_ce(x, *, mode=0, tag="") -> Tensor`
 
-CE (**copy-engine**) transfer path — the third path next to the SM scatter (`use_tma=False`) and
-TMA (`use_tma=True`). Identical collective semantics, layouts, tag-scoped output buffers and
-barrier epochs, but the transfer is a per-peer `cudaMemcpy2DAsync` fan-out on the GPU's DMA
-engines (one pitched 2D copy per `(peer, b)`; internal per-peer streams joined back with events,
-then the usual flag barrier).
+CE (**copy-engine**) transfer path: identical collective semantics, layouts, tags and barrier
+epochs, but the transfer is a per-peer pitched `cudaMemcpy2DAsync` fan-out on the DMA engines
+(per-peer streams joined back with events, then the flag barrier).
 
-Why it exists: the DMA engines use **no SMs at all**, so the transfer keeps running at full NVLink
-bandwidth while compute kernels hold every SM block slot. Measured on 4×H200: 385 GB/s per peer,
+The DMA engines use **no SMs**, so the transfer keeps full NVLink bandwidth while compute holds
+every SM slot. Measured on 4×H200: 385 GB/s per peer,
 pitched rows of `n_local*d*2B` at zero throughput loss, **unaffected by a full-SM spin kernel** —
-whereas both kernel paths serialize behind nvjet GEMMs. Pair it with
-`all_to_all_single_4d_ce_async` to actually hide the a2a behind concurrent compute.
+whereas both kernel paths serialize behind nvjet GEMMs.
 
 Notes:
-- Path choice is explicit; the `use_tma=None` auto-tune does **not** consider CE.
-- No autotune micro-benchmark, no launch config — first calls are collective-safe by construction.
-- Per call it issues ~`world_size` memcpy launches (a few µs each): prefer the kernel paths for
-  tiny shapes or latency-bound regimes.
-- Same rank-uniform call-sequence constraint as every other collective (sync and async advance the
-  same barrier epoch).
+- Path choice is explicit — the `use_tma=None` auto-tune does not consider CE.
+- No autotune, no launch config; first calls are collective-safe by construction.
+- ~`world_size` memcpy launches per call (a few µs each): prefer the kernel paths for tiny shapes.
+- Same rank-uniform call-sequence constraint as every other collective.
 
 ## `all_to_all_single_4d_ce_async(x, *, mode=0, tag="", barrier=True) -> AsyncA2AHandle`
 
 Async CE variant (same comm-stream launch and ordering constraint as
-`all_to_all_single_4d_async`). Because the transfer rides the DMA engines, the in-flight window
-overlaps concurrent GEMMs/attention instead of time-slicing with them. `barrier=False` grouping
-works exactly as on the kernel path. (The sync `all_to_all_single_4d_ce` deliberately has no
-`barrier` parameter: a deferred sync result would be an unreadable view with nothing left to
+`all_to_all_single_4d_async`); its in-flight window genuinely overlaps concurrent GEMMs/attention.
+`barrier=False` grouping works exactly as on the kernel path. (The sync CE call deliberately has
+no `barrier` parameter: a deferred sync result would be an unreadable view with nothing left to
 publish it.)
 
 ## `destroy() -> None`
 
-Releases the symmetric-heap resources (internally: drain the comm stream, `dist.barrier`, then
-destroy). All ranks must call it together. Dropping a group without calling `destroy()` leaks the
-symmetric heap (with a warning) — the teardown is collective, so it cannot run from GC.
+Releases the symmetric-heap resources (drain comm stream, `dist.barrier`, destroy). All ranks must
+call it together. Dropping a group without `destroy()` leaks the heap with a warning — the
+teardown is collective, so it cannot run from GC.
 
 ---
 
@@ -137,5 +121,6 @@ Read by the library / build / tests:
 | Variable | Where | Meaning |
 | --- | --- | --- |
 | `FAST_ULYSSES_CUDA_ARCH` | build (`setup.py`) | Target compute capabilities, `;`-separated. Default `80;90;100;120`. |
+| `FAST_ULYSSES_CMAKE_ARGS` | build (`setup.py`) | Extra CMake `-D` flags (see docs/INSTALL.md Troubleshooting). |
 | `FAST_ULYSSES_USE_TMA` | `benchmark/bench_uniform.py` | Unset → auto, `0` → non-TMA, else → TMA. |
 | `FAST_ULYSSES_TEST_NPROC` | `tests/test_multigpu.py` | Overrides the torchrun process count (e.g. odd world sizes). |

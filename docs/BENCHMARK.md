@@ -31,11 +31,9 @@ Observations:
 
 - **Stable 1.5–2.1× over NCCL across all world sizes**; the smaller the `ws` (bigger per-peer head
   blocks, fewer peers), the bigger the lead.
-- **Runtime path selection lets mode0 and mode1 each use their faster path**: on H200 at this shape
-  both directions auto-select non-TMA (clearly faster than forced TMA) — no offline table or manual
-  pick needed.
-- Different nodes / fabric topologies differ significantly; the table is a single idle 8×H200 node,
-  order-of-magnitude guidance only.
+- **Runtime path selection**: at this shape both directions auto-select non-TMA (clearly faster
+  than forced TMA) — no offline table needed.
+- Nodes and fabric topologies differ; treat the table as guidance from one idle 8×H200 node.
 
 Reproduce:
 
@@ -46,16 +44,14 @@ PROF_N=75600 PROF_H=40 PROF_D=128 PROF_MODE=0 torchrun --nproc_per_node=8 benchm
 
 ## CE path: overlap under compute (`benchmark/bench_ce.py`)
 
-The CE path trades standalone latency for overlap: its per-peer `cudaMemcpy2DAsync` fan-out rides
-the DMA engines, so it keeps moving data while compute kernels hold every SM block slot — the
-regime where both kernel paths stall.
+The CE path trades standalone latency for overlap: its DMA-engine copies keep moving while
+compute holds every SM slot — the regime where both kernel paths stall.
 
 - **Workload**: Wan 720p/81f shapes (`S=75600, H=40, D=128`, bf16) with a concurrent
   to_q/k/v-shaped 3-GEMM chain (`K=N=5120`).
-- **Metric**: `hidden% = (serial − concurrent) / a2a_alone` — how much of the standalone a2a time
-  disappears when it runs under the GEMM chain. Serial and concurrent are measured **alternately**
-  and compared by median: on shared machines the GEMM window drifts a few percent run to run,
-  which would otherwise swamp the sub-millisecond a2a effect.
+- **Metric**: `hidden% = (serial − concurrent) / a2a_alone`. Serial and concurrent are interleaved
+  and compared by median, cancelling run-to-run GEMM drift that would swamp the sub-millisecond
+  a2a effect.
 - **Exclusive 4×H100/4×H200 runs (Wan ws=4)**: standalone CE 0.68–0.70 ms vs 0.48 ms for the SM
   scatter — but **93–98% of the CE a2a hides** under the GEMM chain vs 25–39% for the kernel
   paths, i.e. net exposed time ~0.05 ms/call vs ~0.37 ms. Per-peer CE throughput is ~385 GB/s and
