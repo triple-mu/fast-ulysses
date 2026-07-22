@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import sysconfig
@@ -55,7 +56,9 @@ class CMakeBuild(build_ext):
                 "-DCMAKE_BUILD_TYPE=Release",
                 f"-DCMAKE_CUDA_ARCHITECTURES={arch}",
                 f"-DNVSHMEM_HOME={nvshmem_home}",
-            ],
+            ]
+            # Extra -D flags for odd setups (e.g. the CCCL::CCCL stub in docs/INSTALL.md).
+            + shlex.split(env.get("FAST_ULYSSES_CMAKE_ARGS", "")),
             env=env,
         )
         subprocess.check_call(["cmake", "--build", str(builddir), "-j"], env=env)
