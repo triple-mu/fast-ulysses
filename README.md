@@ -20,7 +20,7 @@ Ulysses sequence parallelism (DeepSpeed-Ulysses) shards long sequences across GP
   - **non-TMA**: SM-resident vectorized direct writes, per-shape autotuned; works on every supported arch.
   - **TMA** (sm90+): `cp.async.bulk` software pipeline, nearly zero SM usage.
   - `use_tma=None` benchmarks both kernel paths at first call and caches the winner; forceable per call ([docs/API.md](docs/API.md)).
-  - **CE path** (`all_to_all_single_4d_ce`, chosen explicitly): a per-peer `cudaMemcpy2DAsync` fan-out on the DMA engines — **zero SM usage**, so the transfer keeps running at full NVLink bandwidth while compute kernels (e.g. cuBLAS nvjet GEMMs) hold every SM slot. The overlap path: 93–98% of the CE a2a hides under a concurrent GEMM chain vs 25–39% for the kernel paths (4×H100/H200, Wan shapes).
+  - **CE path** (`all_to_all_single_4d_ce`, chosen explicitly): a per-peer `cudaMemcpy2DAsync` fan-out on the DMA engines — **zero SM usage**, so the transfer keeps running at full NVLink bandwidth while compute kernels (e.g. cuBLAS nvjet GEMMs) hold every SM slot. The overlap path: 99% of the CE a2a hides under a concurrent GEMM chain vs 23–26% for the kernel paths (8×H200, Wan shapes).
 - **Grouped handshakes**: `barrier=False` lets several async a2as (e.g. one layer's q/k/v) share one handshake ([docs/API.md](docs/API.md)).
 - **Fusion examples** (QK RMSNorm + RoPE in the scatter kernel, standalone `rms_norm` / `rope` / `norm_rope`) live on the `examples/qk-norm-rope-fusion` branch.
 - Single node, NVLink P2P, `world_size ∈ [1, 8]` (odd sizes included).
@@ -108,13 +108,13 @@ Shapes, the `use_tma` tri-state, tag semantics, and the **collective hard constr
 
 ## Benchmarks
 
-Wan2.2 (14B-class) 5s 720p attention shape (N=75600, H=40, D=128, bf16), single node 8×H200, `use_tma=None`, vs. `torch.distributed` permute + `all_to_all_single` (NCCL):
+Wan2.2 (14B-class) 5s 720p attention shape (N=75600, H=40, D=128, bf16), one 8×H200 node (NVSwitch), `use_tma=None`, vs. `torch.distributed` permute + `all_to_all_single` (NCCL):
 
 | ws | ours mode0 (GB/s) | ours mode1 (GB/s) | NCCL (GB/s) | speedup |
 | --- | --- | --- | --- | --- |
-| 2 | 355 | 355 | 171 | **2.1×** |
-| 4 | 301 | 306 | 202 | **1.5×** |
-| 8 | 301 | 301 | 203 | **1.5×** |
+| 2 | 356 | 356 | 171 | **2.1×** |
+| 4 | 300 | 308 | 200 | **1.5×** |
+| 8 | 303 | 303 | 204 | **1.5×** |
 
 Full methodology, shape derivation, the CE-path overlap study, and reproduction commands: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 

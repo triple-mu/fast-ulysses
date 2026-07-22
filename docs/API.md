@@ -81,9 +81,9 @@ epochs, but the transfer is a pitched `cudaMemcpy2DAsync` fan-out on the DMA eng
 copy per `(peer, b)` on per-peer streams, joined back with events, then the flag barrier.
 
 The DMA engines use **no SMs**, so the transfer keeps full NVLink bandwidth while compute holds
-every SM slot. Measured on 4×H200: 385 GB/s per peer,
-pitched rows of `n_local*d*2B` at zero throughput loss, **unaffected by a full-SM spin kernel** —
-whereas both kernel paths serialize behind nvjet GEMMs.
+every SM slot. Measured on 8×H200 (Wan ws=4): **99% of the CE a2a hides** under a concurrent GEMM
+chain vs 23–26% for the kernel paths, which serialize behind nvjet GEMMs — see
+[docs/BENCHMARK.md](BENCHMARK.md).
 
 Notes:
 - Path choice is explicit — the `use_tma=None` auto-tune does not consider CE.

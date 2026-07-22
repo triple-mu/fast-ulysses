@@ -19,21 +19,22 @@ The benchmark shape is the attention all-to-all of a **Wan2.2 (14B-class) 5s 720
 - `ours` = this op with `use_tma=None` (runtime path selection); `NCCL` = `torch.distributed`
   permute + `all_to_all_single` reference; speedup = NCCL latency / ours latency.
 
-## Uniform all-to-all — 8×H200 (no NVSwitch fabric, idle machine)
+## Uniform all-to-all — 8×H200 (NVSwitch fabric, NVLS disabled; measured 2026-07)
 
 | ws | n_local | ours mode0 (GB/s) | ours mode1 (GB/s) | NCCL (GB/s) | speedup |
 | --- | --- | --- | --- | --- | --- |
-| 2 | 20 | 355 | 355 | 171 | **2.1×** |
-| 4 | 10 | 301 | 306 | 202 | **1.5×** |
-| 8 | 5 | 301 | 301 | 203 | **1.5×** |
+| 2 | 20 | 356 | 356 | 171 | **2.1×** |
+| 4 | 10 | 300 | 308 | 200 | **1.5×** |
+| 8 | 5 | 303 | 303 | 204 | **1.5×** |
 
 Observations:
 
 - **Stable 1.5–2.1× over NCCL across all world sizes**; the smaller the `ws` (bigger per-peer head
   blocks, fewer peers), the bigger the lead.
-- **Runtime path selection**: at this shape both directions auto-select non-TMA (clearly faster
-  than forced TMA) — no offline table needed.
-- Nodes and fabric topologies differ; treat the table as guidance from one idle 8×H200 node.
+- **Runtime path selection**: auto lands on non-TMA at this shape (forced TMA trails, e.g. 257 vs
+  303 GB/s at ws=8 mode0) except ws=4 mode1, where the paths tie — exactly why the choice is
+  measured, not tabled.
+- Nodes and fabric topologies differ; treat the table as guidance from one node.
 
 Reproduce:
 
@@ -52,10 +53,9 @@ compute holds every SM slot — the regime where both kernel paths stall.
 - **Metric**: `hidden% = (serial − concurrent) / a2a_alone`. Serial and concurrent are interleaved
   and compared by median, cancelling run-to-run GEMM drift that would swamp the sub-millisecond
   a2a effect.
-- **Exclusive 4×H100/4×H200 runs (Wan ws=4)**: standalone CE 0.68–0.70 ms vs 0.48 ms for the SM
-  scatter — but **93–98% of the CE a2a hides** under the GEMM chain vs 25–39% for the kernel
-  paths, i.e. net exposed time ~0.05 ms/call vs ~0.37 ms. Per-peer CE throughput is ~385 GB/s and
-  is unaffected by a full-SM spin kernel.
+- **8×H200 runs (Wan ws=4, measured 2026-07)**: standalone CE 0.70 ms vs 0.48 ms for the SM
+  scatter — but **99% of the CE a2a hides** under the GEMM chain vs 26% (scatter) / 23% (TMA),
+  i.e. net exposed time ~0.01 ms/call vs ~0.36 ms.
 
 Reproduce:
 
