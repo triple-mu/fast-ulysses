@@ -4,7 +4,7 @@ Times the sync collective, then how much of the async a2a hides under a concurre
 chain (to_q/k/v-shaped): hidden% = (serial - concurrent) / a2a_alone, which the copy engines
 should drive toward 100%.
 
-    ./scripts/exclusive.sh <gpus> -- torchrun --nproc_per_node=4 benchmark/bench_ce.py
+    ./tools/exclusive.sh <gpus> -- torchrun --nproc_per_node=4 benchmark/bench_ce.py
 
 The DEFAULT copying entry point, so the copy-out is part of both the a2a being timed and the
 work that has to hide under the GEMMs -- which is the question a caller actually has.

@@ -20,4 +20,4 @@ repos:
     hooks:
       - id: clang-format
         types_or: [c++, cuda]
-        files: ^fast_ulysses/csrc/
+        files: ^(include|src)/

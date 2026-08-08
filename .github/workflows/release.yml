@@ -124,7 +124,7 @@ jobs:
             -e CUDA_MAJOR=${{ matrix.cuda_major }} \
             -e LOCAL_VERSION=${{ matrix.tag }} \
             -e OUTDIR=/io/wheelhouse \
-            pytorch/manylinux2_28-builder:${{ matrix.image }} bash scripts/build_wheels.sh
+            pytorch/manylinux2_28-builder:${{ matrix.image }} bash tools/build_wheels.sh
 
       - name: Build the untagged PyPI wheels
         if: matrix.pypi_set
@@ -139,7 +139,7 @@ jobs:
             -e CUDA_MAJOR=${{ matrix.cuda_major }} \
             -e LOCAL_VERSION= \
             -e OUTDIR=/io/wheelhouse-pypi \
-            pytorch/manylinux2_28-builder:${{ matrix.image }} bash scripts/build_wheels.sh
+            pytorch/manylinux2_28-builder:${{ matrix.image }} bash tools/build_wheels.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -171,7 +171,7 @@ jobs:
         # and check_wheel.py cross-checks that against the libcudart the .so actually needs.
         run: |
           shopt -s globstar nullglob
-          /opt/python/cp312-cp312/bin/python scripts/check_wheel.py collected/**/*.whl
+          /opt/python/cp312-cp312/bin/python tools/check_wheel.py collected/**/*.whl
 
       - name: Assert the expected artifact count
         # A row that fails does not fail this workflow (fail-fast is off), so without a count

@@ -66,12 +66,12 @@ jobs:
 
       - name: Repair wheel
         run: |
-          mapfile -t excludes < <($PYBIN/python scripts/check_wheel.py --print-excludes)
+          mapfile -t excludes < <($PYBIN/python tools/check_wheel.py --print-excludes)
           $PYBIN/python -m auditwheel repair "${excludes[@]}" \
             --plat manylinux_2_28_x86_64 -w dist/ raw/*.whl
 
       - name: Check wheel
-        run: $PYBIN/python scripts/check_wheel.py --cuda-major 13 --arch 90,100 dist/*.whl
+        run: $PYBIN/python tools/check_wheel.py --cuda-major 13 --arch 90,100 dist/*.whl
 
       - name: Install the wheel and run the CPU suite
         # From /tmp, not the workspace: ${{ github.workspace }}/fast_ulysses is an importable
@@ -79,10 +79,10 @@ jobs:
         # import -- so from the workspace this would pass by skipping everything.
         #
         # tests/test_multigpu.py is not runnable on any GitHub-hosted runner (no GPU). It is
-        # gated manually by scripts/preflight_gpu.sh before a tag is pushed.
+        # gated manually by tools/preflight_gpu.sh before a tag is pushed.
         run: |
           $PYBIN/pip install dist/*.whl
-          cd /tmp && $PYBIN/pytest "$GITHUB_WORKSPACE/tests/test_plan.py" -q
+          cd /tmp && $PYBIN/pytest "$GITHUB_WORKSPACE/test/test_plan.py" -q
 
   matrix-smoke:
     # Weekly only. Same rows as release.yml's wheels matrix -- keep the two lists in sync --
@@ -118,4 +118,4 @@ jobs:
             -e CUDA_MAJOR=${{ matrix.cuda_major }} \
             -e PYTHONS=cp312 \
             -e LOCAL_VERSION=weekly \
-            pytorch/manylinux2_28-builder:${{ matrix.image }} bash scripts/build_wheels.sh
+            pytorch/manylinux2_28-builder:${{ matrix.image }} bash tools/build_wheels.sh

@@ -16,7 +16,9 @@ from setuptools.command.build_ext import build_ext
 _HERE = Path(__file__).resolve().parent
 os.chdir(_HERE)
 
+# Relative to build_lib (and to the wheel root); the source tree keeps the package under python/.
 _BUILD_META = Path("fast_ulysses") / "_build_meta.py"
+_PKG_DIR = _HERE / "python" / "fast_ulysses"
 
 
 # Minimum NVSHMEM this extension is built against. 3.4.5 is what the nvidia-nvshmem-cu13
@@ -25,16 +27,12 @@ _NVSHMEM_MIN = (3, 4, 5)
 
 
 def _base_version() -> str:
-    """The one version literal, read out of fast_ulysses/__init__.py.
+    """The one version literal, read out of ./VERSION.
 
-    By regex, not by import: importing the package dlopens an extension that does not exist
-    yet when this runs.
+    CMake reads the same file, and setup.py bakes it into _build_meta.py, which is where the
+    installed package reads __version__ from.
     """
-    text = (_HERE / "fast_ulysses" / "__init__.py").read_text()
-    m = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.M)
-    if m is None:
-        raise RuntimeError("fast_ulysses/__init__.py has no __version__ literal")
-    return m.group(1)
+    return (_HERE / "VERSION").read_text().strip()
 
 
 def _build_jobs(arch: str) -> int:
@@ -232,7 +230,7 @@ class CMakeBuild(build_ext):
         """--inplace and editable installs copy the extension out of build/lib.* into the
         source tree after the build; the metadata module has to follow it."""
         super().copy_extensions_to_source()
-        shutil.copyfile(Path(self.build_lib) / _BUILD_META, _HERE / _BUILD_META)
+        shutil.copyfile(Path(self.build_lib) / _BUILD_META, _PKG_DIR / _BUILD_META.name)
 
     @staticmethod
     def _write_build_meta(outdir: Path, *, arch: str, nvshmem_home: Path, has_work_registry: bool):

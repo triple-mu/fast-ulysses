@@ -29,7 +29,7 @@ Also reported per call:
                   launches that the device timing cannot see. It also carries the default
                   entry point's output allocation, which the borrowed form does not make.
 
-Run under scripts/exclusive.sh; the numbers are meaningless on a shared GPU.
+Run under tools/exclusive.sh; the numbers are meaningless on a shared GPU.
 """
 
 from __future__ import annotations

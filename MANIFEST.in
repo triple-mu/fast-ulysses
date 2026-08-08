@@ -1,10 +1,11 @@
-include LICENSE
+include LICENSE VERSION
 include CMakeLists.txt
 include .clang-format
-graft fast_ulysses/csrc
-# setuptools already picks up tests/test*.py on its own, which ships test_multigpu.py without
-# the tests/distributed/ workers it launches as subprocesses. Take the whole tree instead.
-recursive-include tests *.py
+graft include
+graft src
+# setuptools already picks up test/test*.py on its own, which ships test_multigpu.py without
+# the test/distributed/ workers it launches as subprocesses. Take the whole tree instead.
+recursive-include test *.py
 # _build_meta.py is generated at build time and describes the machine that built it; shipping
 # one in the sdist would have every source install claim whatever the release builder saw.
 global-exclude __pycache__ *.so *.o _build_meta.py

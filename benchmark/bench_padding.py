@@ -19,9 +19,9 @@ reshape and a `cat`.
 Both of our columns use the DEFAULT copying entry point, so the copy-out is in both and cancels
 out of the even-vs-uneven ratio this benchmark is about.
 
-Run under scripts/exclusive.sh; the numbers are meaningless on a shared GPU.
+Run under tools/exclusive.sh; the numbers are meaningless on a shared GPU.
 
-    ./scripts/exclusive.sh 4,5,6,7 -- torchrun --nproc_per_node=4 benchmark/bench_padding.py
+    ./tools/exclusive.sh 4,5,6,7 -- torchrun --nproc_per_node=4 benchmark/bench_padding.py
 """
 
 from __future__ import annotations

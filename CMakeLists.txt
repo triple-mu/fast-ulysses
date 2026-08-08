@@ -80,24 +80,21 @@ if (NOT DEFINED EXT_SUFFIX)
     set(EXT_SUFFIX ".so")
 endif ()
 
-# One version literal, in fast_ulysses/__init__.py. Parse it here so a bare `cmake -S . -B build`
-# bakes the same string the Python side reports; setup.py overrides it with the full version
-# including any local tag.
+# One version literal, in ./VERSION. Read it here so a bare `cmake -S . -B build` bakes the same
+# string the Python side reports; setup.py overrides it with the full version including any local
+# tag.
 if (NOT DEFINED FAST_ULYSSES_VERSION)
-    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/fast_ulysses/__init__.py" _version_line
-            REGEX "^__version__[ \t]*=")
-    string(REGEX REPLACE ".*\"([^\"]+)\".*" "\\1" FAST_ULYSSES_VERSION "${_version_line}")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" FAST_ULYSSES_VERSION LIMIT_COUNT 1)
 endif ()
 # Re-run configure when the literal is bumped, so the baked macro cannot go stale.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/fast_ulysses/__init__.py")
+        "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 
 # Wheel builds bake only $ORIGIN-relative RPATH entries; developer builds also keep the absolute
 # directory this build found NVSHMEM in.
 option(FAST_ULYSSES_RELOCATABLE "Emit an $ORIGIN-only RPATH (wheel builds)" OFF)
 
-file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/fast_ulysses/csrc/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/fast_ulysses/csrc/*.cu")
+file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu")
 add_library(_C SHARED ${SOURCES})
 set_target_properties(_C PROPERTIES PREFIX "" SUFFIX "${EXT_SUFFIX}"
         CUDA_SEPARABLE_COMPILATION OFF CUDA_ARCHITECTURES "${FAST_ULYSSES_ARCH_LIST}")
@@ -123,7 +120,7 @@ foreach (dir IN LISTS CUDAToolkit_INCLUDE_DIRS)
     endif ()
 endforeach ()
 target_include_directories(_C PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/fast_ulysses/csrc" "${NVSHMEM_HOME}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${NVSHMEM_HOME}/include"
         ${CCCL_INCLUDE_DIRS})
 find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH REQUIRED)
 # Only the HOST library. No device-side nvshmem_* call exists in these kernels, so there is

@@ -27,13 +27,14 @@ Repository = "https://github.com/triple-mu/fast-ulysses"
 dev = ["pre-commit", "pytest", "ruff"]
 
 [tool.setuptools]
+package-dir = { "" = "python" }
 packages = ["fast_ulysses"]
 
 [tool.setuptools.package-data]
 fast_ulysses = ["py.typed"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["test"]
 addopts = "-ra"
 markers = [
     "multigpu: multi-GPU tests launched via torchrun (skipped when fewer than 2 GPUs)",
@@ -42,6 +43,8 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# The package lives under python/, so isort would otherwise file `fast_ulysses` as third-party.
+src = ["python"]
 extend-exclude = ["3rdparty", "profile", "cmake-build-debug"]
 
 [tool.ruff.lint]
