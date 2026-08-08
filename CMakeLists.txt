@@ -65,17 +65,6 @@ if (NM_STATUS EQUAL 0)
 endif ()
 message(STATUS "c10d::register_work available: ${HAVE_C10D_REGISTER_WORK}")
 
-# setup.py resolves NVSHMEM and passes both paths, because the install we most want to use
-# -- the nvidia-nvshmem-cu13 wheel that torch already depends on -- ships headers and
-# libnvshmem_host.so.3 but NO lib/cmake/nvshmem, so find_package(NVSHMEM) cannot see it.
-# Linking the host library by path works for every layout and needs no package config.
-if (NOT DEFINED NVSHMEM_HOME OR NOT EXISTS "${NVSHMEM_HOME}/include/nvshmem.h")
-    message(FATAL_ERROR "NVSHMEM_HOME missing: setup.py must pass -DNVSHMEM_HOME=<absolute>.")
-endif ()
-if (NOT DEFINED NVSHMEM_HOST_LIB OR NOT EXISTS "${NVSHMEM_HOST_LIB}")
-    message(FATAL_ERROR "NVSHMEM_HOST_LIB missing: setup.py must pass -DNVSHMEM_HOST_LIB=<absolute>.")
-endif ()
-
 if (NOT DEFINED EXT_SUFFIX)
     set(EXT_SUFFIX ".so")
 endif ()
@@ -90,9 +79,6 @@ endif ()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 
-# Wheel builds bake only $ORIGIN-relative RPATH entries; developer builds also keep the absolute
-# directory this build found NVSHMEM in.
-option(FAST_ULYSSES_RELOCATABLE "Emit an $ORIGIN-only RPATH (wheel builds)" OFF)
 
 file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu")
 add_library(_C SHARED ${SOURCES})
@@ -106,48 +92,15 @@ set_target_properties(_C PROPERTIES PREFIX "" SUFFIX "${EXT_SUFFIX}"
 string(REPLACE ";" "," _arch_csv "${FAST_ULYSSES_ARCH_LIST}")
 target_compile_definitions(_C PRIVATE
         FAST_ULYSSES_VERSION="${FAST_ULYSSES_VERSION}"
-        FAST_ULYSSES_CUDA_ARCH_LIST="${_arch_csv}"
-        FAST_ULYSSES_NVSHMEM_HOME="${NVSHMEM_HOME}")
-# CUDA 13 moved the CCCL headers (cuda/std/*) into include/cccl, where nvshmem.h no longer
-# finds them -- and nvshmem.h is included by bindings.cpp, so the HOST compiler needs the
-# path too, not just nvcc. Adding it here removes what INSTALL.md used to ask users to pass
-# by hand.
-find_package(CUDAToolkit REQUIRED)
-set(CCCL_INCLUDE_DIRS "")
-foreach (dir IN LISTS CUDAToolkit_INCLUDE_DIRS)
-    if (EXISTS "${dir}/cccl")
-        list(APPEND CCCL_INCLUDE_DIRS "${dir}/cccl")
-    endif ()
-endforeach ()
-target_include_directories(_C PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${NVSHMEM_HOME}/include"
-        ${CCCL_INCLUDE_DIRS})
+        FAST_ULYSSES_CUDA_ARCH_LIST="${_arch_csv}")
+target_include_directories(_C PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH REQUIRED)
-# Only the HOST library. No device-side nvshmem_* call exists in these kernels, so there is
-# no relocatable-device-code link step and libnvshmem_device.a stays out -- which also keeps
-# nvshmemi_init_thread out, the symbol that clashes with torch's libtorch_nvshmem.so (see the
-# DEVIATION notes in ulysses_group.cu).
-target_link_libraries(_C PRIVATE ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY} Python::Module
-        "${NVSHMEM_HOST_LIB}")
-# The wheel layout is not on any default search path, so bake it in rather than making every
-# caller set LD_LIBRARY_PATH. Relative to $ORIGIN (= <site-packages>/fast_ulysses) so the wheel
-# stays relocatable; four nvidia directories because the cudart wheel layout differs across torch
-# minors. These stay DT_RUNPATH -- no --disable-new-dtags -- so LD_LIBRARY_PATH can still override
-# the bundled NVSHMEM with a site build.
-set(FAST_ULYSSES_RPATH
-        "$ORIGIN/../nvidia/nvshmem/lib"
-        "$ORIGIN/../nvidia/cu13/lib"
-        "$ORIGIN/../nvidia/cu12/lib"
-        "$ORIGIN/../nvidia/cuda_runtime/lib"
-        "$ORIGIN/../torch/lib")
-if (NOT FAST_ULYSSES_RELOCATABLE)
-    # Developer build: nothing of that layout exists above $ORIGIN, so fall back to where this
-    # build found NVSHMEM -- last, so an installed copy still wins.
-    get_filename_component(NVSHMEM_LIB_DIR "${NVSHMEM_HOST_LIB}" DIRECTORY)
-    list(APPEND FAST_ULYSSES_RPATH "${NVSHMEM_LIB_DIR}")
-endif ()
+target_link_libraries(_C PRIVATE ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY} Python::Module)
+# torch's own lib directory is the only thing this links that is not on a default search path.
+# Relative to $ORIGIN (= <site-packages>/fast_ulysses) so the wheel stays relocatable, and left as
+# DT_RUNPATH -- no --disable-new-dtags -- so LD_LIBRARY_PATH can still override it.
 set_target_properties(_C PROPERTIES BUILD_WITH_INSTALL_RPATH ON
-        INSTALL_RPATH "${FAST_ULYSSES_RPATH}")
+        INSTALL_RPATH "$ORIGIN/../torch/lib")
 if (HAVE_C10D_REGISTER_WORK)
     target_compile_definitions(_C PRIVATE FAST_ULYSSES_HAS_WORK_REGISTRY=1)
 else ()

@@ -1,27 +1,82 @@
+// The torch op layer: validate, plan, barrier, transfer, barrier, copy out.
+//
+// Every address this file touches arrives as an argument. The windows and their flags are torch
+// symmetric-memory allocations owned by the Python side (python/fast_ulysses/comm.py), so no
+// communication library appears here, and the only state the group object holds is one CUDA stream.
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <dlfcn.h>
-#include <nvshmem.h>
-#include <nvshmemx.h>
+#include <cuda_runtime.h>
 #include <optional>
 #include <torch/extension.h>
 #include <torch/library.h>
 
 #include <map>
+#include <string>
 #include <tuple>
 
 #include <fast_ulysses/a2a_plan.hpp>
 #include <fast_ulysses/common.hpp>
-#include <fast_ulysses/group.hpp>
+#include <fast_ulysses/transfer.hpp>
 #include <fast_ulysses/work.hpp>
 
 namespace ulysses {
 
+// One CUDA stream, created on first use: the transfer stream the remote peer copies are serialised
+// onto. Rank and world size ride along because every entry point needs them.
+class UlyssesGroup: public torch::CustomClassHolder {
+public:
+    UlyssesGroup(int64_t rank, int64_t world_size):
+        rank_(static_cast<int>(rank)),
+        world_size_(static_cast<int>(world_size))
+    {
+        TORCH_CHECK(world_size_ >= 1 && world_size_ <= 8, "world_size must be in [1, 8] (one node), got ", world_size_);
+        TORCH_CHECK(rank_ >= 0 && rank_ < world_size_, "rank ", rank_, " out of range for world_size ", world_size_);
+    }
+
+    ~UlyssesGroup() override
+    {
+        destroy();
+    }
+
+    int64_t rank() const
+    {
+        return rank_;
+    }
+
+    int64_t world_size() const
+    {
+        return world_size_;
+    }
+
+    cudaStream_t xfer_stream()
+    {
+        if (xfer_ == nullptr) {
+            ULYSSES_CUDA_CHECK(cudaStreamCreateWithFlags(&xfer_, cudaStreamNonBlocking));
+        }
+        return xfer_;
+    }
+
+    // Unlike the NVSHMEM teardown this replaced, nothing here is collective: one rank may run it
+    // alone, so the destructor can call it.
+    void destroy()
+    {
+        if (xfer_ != nullptr) {
+            cudaStreamSynchronize(xfer_);
+            cudaStreamDestroy(xfer_);
+            xfer_ = nullptr;
+        }
+    }
+
+private:
+    int          rank_, world_size_;
+    cudaStream_t xfer_ = nullptr;
+};
+
 namespace {
 
-// Validation + dims for the 4D a2a entry point. Shape-only, so reserve() can size a window for a
-// call that has no tensor yet. The plan treats uneven as the general case, so the only decision
-// here is what the splits ARE: the caller's, or the even ones the shape implies.
+// Validation + dims for the 4D a2a entry point. Shape-only, so a window can be sized for a call
+// that has no tensor yet. The plan treats uneven as the general case, so the only decision here is
+// what the splits ARE: the caller's, or the even ones the shape implies.
 A2ADims make_dims_from_shape(at::IntArrayRef                            sizes,
                              c10::ScalarType                            dtype,
                              int64_t                                    mode,
@@ -94,17 +149,6 @@ A2ADims make_dims_from_shape(at::IntArrayRef                            sizes,
     return dims;
 }
 
-A2ADims make_dims(const at::Tensor&                          input,
-                  int64_t                                    mode,
-                  int                                        ws,
-                  int                                        rank,
-                  const std::optional<std::vector<int64_t>>& seq_splits,
-                  const std::optional<std::vector<int64_t>>& head_splits)
-{
-    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
-    return make_dims_from_shape(input.sizes(), input.scalar_type(), mode, ws, rank, seq_splits, head_splits);
-}
-
 // Validated input, the plan, and the tensor the result will be copied into. `output` is UNDEFINED
 // for a borrowed call, whose result is the window itself.
 struct Prepared {
@@ -121,32 +165,25 @@ bool intervals_overlap(const void* a, int64_t a_bytes, const void* b, int64_t b_
     return pa < pb + b_bytes && pb < pa + a_bytes;
 }
 
-// Refuse a call whose input or `out` shares bytes with the window it is about to fill. The pool
-// keys on (tag, capacity, dtype) rather than shape, so under EVEN splits the two modes of one tag
-// collide -- b*s_total*n_me*d == b*s_me*n_total*d -- and a round trip through one tag hands the
-// transport the very buffer every peer is writing. Only a BORROWED result can reach either check.
-// Intervals rather than `data_ptr() == sym_base`, because a borrowed result sliced on its batch
-// axis is contiguous, starts past the base, and is still in the window.
-void check_window_aliasing(const Prepared& prepared, const SymmetricHeapPool::Buffer& buf, const std::string& tag)
+// Refuse a call whose input or `out` shares bytes with the window it is about to fill. Under EVEN
+// splits the two modes of one window collide -- b*s_total*n_me*d == b*s_me*n_total*d -- so a round
+// trip through one window hands the transport the very buffer every peer is writing. Intervals
+// rather than a pointer comparison, because a borrowed result sliced on its batch axis is
+// contiguous, starts past the base, and is still in the window.
+void check_window_aliasing(const Prepared& prepared, const void* window, int64_t window_bytes)
 {
-    const int64_t window_bytes = buf.numel * prepared.x.element_size();
-    TORCH_CHECK(!intervals_overlap(prepared.x.data_ptr(), prepared.x.nbytes(), buf.sym_base, window_bytes),
-                "input overlaps tag '",
-                tag,
-                "'s symmetric window: it would be read while every peer writes it. Use a "
-                "different tag for the second call, or the copying entry point.");
+    TORCH_CHECK(!intervals_overlap(prepared.x.data_ptr(), prepared.x.nbytes(), window, window_bytes),
+                "input overlaps the window it is about to fill: it would be read while every peer "
+                "writes it. Use a different tag for the second call, or the copying entry point.");
     if (prepared.output.defined()) {
-        TORCH_CHECK(
-            !intervals_overlap(prepared.output.data_ptr(), prepared.output.nbytes(), buf.sym_base, window_bytes),
-            "out overlaps tag '",
-            tag,
-            "'s symmetric window: the copy-out would read and write the same bytes. "
-            "Pass a tensor outside the symmetric heap.");
+        TORCH_CHECK(!intervals_overlap(prepared.output.data_ptr(), prepared.output.nbytes(), window, window_bytes),
+                    "out overlaps the window it is about to fill: the copy-out would read and write "
+                    "the same bytes. Pass a tensor outside the symmetric memory pool.");
     }
 }
 
-// Everything this does runs BEFORE the call's first collective (fast_barrier), so a rejected
-// argument leaves no rank waiting on peers that did not reject it.
+// Everything this does runs BEFORE the call's first barrier, so a rejected argument leaves no rank
+// waiting on peers that did not reject it.
 Prepared prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
                  const at::Tensor&                          input,
                  int64_t                                    mode,
@@ -156,11 +193,17 @@ Prepared prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
                  bool                                       borrowed)
 {
     const int ws = static_cast<int>(group->world_size());
-    TORCH_CHECK(ws >= 1 && ws <= 8, "world_size must be in [1, 8] (one node), got ", ws);
 
     Prepared prepared;
-    prepared.x         = input.contiguous();
-    const A2ADims dims = make_dims(prepared.x, mode, ws, static_cast<int>(group->rank()), seq_splits, head_splits);
+    prepared.x = input.contiguous();
+    TORCH_CHECK(prepared.x.is_cuda(), "input must be a CUDA tensor");
+    const A2ADims dims = make_dims_from_shape(prepared.x.sizes(),
+                                              prepared.x.scalar_type(),
+                                              mode,
+                                              ws,
+                                              static_cast<int>(group->rank()),
+                                              seq_splits,
+                                              head_splits);
     prepared.plan      = build_plan(dims, static_cast<int>(mode), prepared.x.element_size());
 
     if (borrowed) {
@@ -187,56 +230,64 @@ Prepared prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
     return prepared;
 }
 
-// Barrier, transfer, barrier: everything the call does to the symmetric window, ordered on
-// `stream`. Returns the tag's window, whose base holds this rank's result densely. Nothing picks
-// between transports at runtime -- a rank-local decision inside a collective diverges the group.
-const SymmetricHeapPool::Buffer& transfer_on_stream(const c10::intrusive_ptr<UlyssesGroup>& group,
-                                                    const Prepared&                         prepared,
-                                                    const std::string&                      tag,
-                                                    bool                                    barrier,
-                                                    cudaStream_t                            stream)
+// The window this rank writes its own share into and reads its result from, checked against what
+// the plan needs. `window_ptrs[rank]` is our own base; the others are the peers' as we address them.
+void* local_window(
+    const Prepared& prepared, const std::vector<int64_t>& window_ptrs, int64_t window_numel, int rank, int ws)
 {
-    // The window is sized for the largest rank; this rank's own result is a dense prefix of it, so
-    // the borrowed view and the copy-out are built from plan.output_shape, not from the capacity.
-    const auto& buf = group->pool().acquire(prepared.plan.window_numel, prepared.x.scalar_type(), tag);
-    check_window_aliasing(prepared, buf, tag);
+    TORCH_CHECK(static_cast<int>(window_ptrs.size()) == ws,
+                "window_ptrs has ",
+                window_ptrs.size(),
+                " entries, expected world_size ",
+                ws);
+    TORCH_CHECK(window_numel >= prepared.plan.window_numel,
+                "the window holds ",
+                window_numel,
+                " elements but this call needs ",
+                prepared.plan.window_numel);
+    return reinterpret_cast<void*>(window_ptrs[rank]);
+}
 
-    // WRITERS WAIT FOR READERS, before writing anything. The window is single-buffered per tag, so
-    // this call is about to overwrite what the previous call with this tag produced, which a peer
-    // may still be reading; the closing barrier below proves everyone's WRITES landed and nothing
-    // about their READS. It guards the START of a call rather than the end of the previous one
-    // because a BORROWED result is read by the caller at a time the operator never sees -- here it
-    // covers that and the copying form's copy-out alike, since either read is ordered ahead of it.
-    group->fast_barrier(stream, tag);
+// Barrier, transfer, barrier: everything the call does to the window, ordered on `stream`.
+void transfer_on_stream(const c10::intrusive_ptr<UlyssesGroup>& group,
+                        const Prepared&                         prepared,
+                        const std::vector<int64_t>&             window_ptrs,
+                        const std::vector<int64_t>&             flag_ptrs,
+                        bool                                    barrier,
+                        cudaStream_t                            stream)
+{
+    const int                   rank = static_cast<int>(group->rank());
+    const std::vector<uint64_t> peers(window_ptrs.begin(), window_ptrs.end());
+    const std::vector<uint64_t> flags(flag_ptrs.begin(), flag_ptrs.end());
 
-    launch_a2a_ce(prepared.x.data_ptr(),
-                  buf.peer_ptrs,
-                  prepared.plan,
-                  group->ce_resources(),
-                  static_cast<int>(group->rank()),
-                  stream);
-    // No nvshmemx_quiet: the transfers are CE memcpy operations, not NVSHMEM proxy writes, so quiet
-    // would not order them anyway. Their completion is joined onto `stream` inside launch_a2a_ce,
-    // and the flag barrier's store is stream-ordered after that. That a completed peer memcpy is
-    // VISIBLE at the destination when a later kernel's release store arrives is an ASSUMPTION, not
-    // a documented guarantee -- a2a_ce_fault_injection.py is the negative control for it.
+    // WRITERS WAIT FOR READERS, before writing anything. The window is single-buffered, so this
+    // call is about to overwrite what the previous call produced, which a peer may still be
+    // reading; the closing barrier below proves everyone's WRITES landed and nothing about their
+    // READS. It guards the START of a call rather than the end of the previous one because a
+    // BORROWED result is read by the caller at a time the operator never sees.
+    fast_barrier(stream, flags, rank);
+
+    launch_a2a_ce(prepared.x.data_ptr(), peers, prepared.plan, group->xfer_stream(), rank, stream);
+
+    // That a completed peer memcpy is VISIBLE at the destination when a later kernel's release
+    // store arrives is an ASSUMPTION, not a documented guarantee -- a2a_ce_fault_injection.py is
+    // the negative control for it.
     //
     // barrier=false defers the closing handshake to a later barrier=true call on the same stream;
     // until then the window is NOT safe to read. Only the borrowed entry points expose it: a
     // deferred copying call would copy the window out before the peers' writes landed.
     if (barrier) {
-        group->fast_barrier(stream, tag);
+        fast_barrier(stream, flags, rank);
     }
-    return buf;
 }
 
 // Window -> the caller's tensor, ordered after the closing barrier on the same stream. Every rank's
 // result is dense from the window base, so this is one flat device-to-device copy -- this rank's
 // own share included, since it travels through the window like every peer's.
-void copy_out(const Prepared& prepared, const SymmetricHeapPool::Buffer& buf, cudaStream_t stream)
+void copy_out(const Prepared& prepared, const void* window, cudaStream_t stream)
 {
     ULYSSES_CUDA_CHECK(cudaMemcpyAsync(prepared.output.data_ptr(),
-                                       buf.sym_base,
+                                       window,
                                        static_cast<size_t>(prepared.output.numel() * prepared.output.element_size()),
                                        cudaMemcpyDeviceToDevice,
                                        stream));
@@ -244,64 +295,73 @@ void copy_out(const Prepared& prepared, const SymmetricHeapPool::Buffer& buf, cu
 
 }  // namespace
 
-// Size a tag's window for a call that has not happened yet, so the allocation it would otherwise
-// trigger mid-call happens here (SymmetricHeapPool's class comment says why that matters). Takes a
-// shape and mode rather than a byte count, because the window is sized for the LARGEST rank's
-// output and only the plan knows it. Collective, with the same arguments on every rank.
-void reserve(const c10::intrusive_ptr<UlyssesGroup>&    group,
-             std::string                                tag,
-             std::vector<int64_t>                       sizes,
-             int64_t                                    mode,
-             at::ScalarType                             dtype,
-             const std::optional<std::vector<int64_t>>& seq_splits,
-             const std::optional<std::vector<int64_t>>& head_splits)
+// How many elements the window for this call must hold. The Python side allocates by this number,
+// which is the LARGEST rank's output rather than this rank's -- peer offsets only line up while
+// every rank allocates the same size, and each rank can compute the max without communicating.
+int64_t window_numel(std::vector<int64_t>                       sizes,
+                     int64_t                                    mode,
+                     at::ScalarType                             dtype,
+                     int64_t                                    world_size,
+                     int64_t                                    rank,
+                     const std::optional<std::vector<int64_t>>& seq_splits,
+                     const std::optional<std::vector<int64_t>>& head_splits)
 {
-    const int     ws   = static_cast<int>(group->world_size());
-    const A2ADims dims = make_dims_from_shape(
-        at::IntArrayRef(sizes), dtype, mode, ws, static_cast<int>(group->rank()), seq_splits, head_splits);
-    const A2APlan plan = build_plan(dims, static_cast<int>(mode), static_cast<int64_t>(c10::elementSize(dtype)));
-    group->pool().acquire(plan.window_numel, dtype, tag);
-    // The tag's barrier flags come out of the same pool, so they have to be reserved too --
-    // otherwise sealing turns the tag's first HANDSHAKE into the failure, not its first window.
-    group->reserve_barrier(tag, at::cuda::getCurrentCUDAStream());
+    const A2ADims dims = make_dims_from_shape(at::IntArrayRef(sizes),
+                                              dtype,
+                                              mode,
+                                              static_cast<int>(world_size),
+                                              static_cast<int>(rank),
+                                              seq_splits,
+                                              head_splits);
+    return build_plan(dims, static_cast<int>(mode), static_cast<int64_t>(c10::elementSize(dtype))).window_numel;
 }
 
 // THE DEFAULT: an ordinary tensor the caller owns, with no rules attached -- it may outlive the
-// next call with this tag, be read on another stream, or survive destroy(). Price: the copy-out.
+// next call on this window, be read on another stream, or survive destroy(). Price: the copy-out.
 at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>&    group,
                                 const at::Tensor&                          input,
                                 int64_t                                    mode,
-                                std::string                                tag,
+                                std::vector<int64_t>                       window_ptrs,
+                                std::vector<int64_t>                       flag_ptrs,
+                                int64_t                                    window_numel,
                                 const std::optional<std::vector<int64_t>>& seq_splits,
                                 const std::optional<std::vector<int64_t>>& head_splits,
                                 const std::optional<at::Tensor>&           out)
 {
     const at::cuda::CUDAGuard guard(input.device());
     const Prepared            prepared = prepare(group, input, mode, seq_splits, head_splits, out, /*borrowed=*/false);
-    cudaStream_t              stream   = at::cuda::getCurrentCUDAStream();
-    const SymmetricHeapPool::Buffer& buf = transfer_on_stream(group, prepared, tag, /*barrier=*/true, stream);
-    copy_out(prepared, buf, stream);
+    const int                 ws       = static_cast<int>(group->world_size());
+    void* window = local_window(prepared, window_ptrs, window_numel, static_cast<int>(group->rank()), ws);
+    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size());
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    transfer_on_stream(group, prepared, window_ptrs, flag_ptrs, /*barrier=*/true, stream);
+    copy_out(prepared, window, stream);
     return prepared.output;
 }
 
-// THE FAST PATH, spelled out at the call site: the result IS the tag's symmetric window. No
-// copy-out, and NOTHING here enforces the rules that make that safe -- they are on
-// UlyssesGroup.all_to_all_single_4d_borrowed.
+// THE FAST PATH, spelled out at the call site: the result IS the window. No copy-out, and NOTHING
+// here enforces the rules that make that safe -- they are on the Python wrapper.
 at::Tensor all_to_all_single_4d_borrowed(const c10::intrusive_ptr<UlyssesGroup>&    group,
                                          const at::Tensor&                          input,
                                          int64_t                                    mode,
-                                         std::string                                tag,
+                                         std::vector<int64_t>                       window_ptrs,
+                                         std::vector<int64_t>                       flag_ptrs,
+                                         int64_t                                    window_numel,
                                          bool                                       barrier,
                                          const std::optional<std::vector<int64_t>>& seq_splits,
                                          const std::optional<std::vector<int64_t>>& head_splits)
 {
     const at::cuda::CUDAGuard guard(input.device());
     const Prepared prepared = prepare(group, input, mode, seq_splits, head_splits, std::nullopt, /*borrowed=*/true);
-    const SymmetricHeapPool::Buffer& buf =
-        transfer_on_stream(group, prepared, tag, barrier, at::cuda::getCurrentCUDAStream());
-    // The pool owns the memory; this is a no-op-deleter view of it.
+    const int      ws       = static_cast<int>(group->world_size());
+    void*          window   = local_window(prepared, window_ptrs, window_numel, static_cast<int>(group->rank()), ws);
+    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size());
+
+    transfer_on_stream(group, prepared, window_ptrs, flag_ptrs, barrier, at::cuda::getCurrentCUDAStream());
+    // The Python side owns the memory; this is a no-op-deleter view of it.
     return at::from_blob(
-        buf.sym_base, prepared.plan.output_shape, [](void*) {}, prepared.x.options());
+        window, prepared.plan.output_shape, [](void*) {}, prepared.x.options());
 }
 
 // Benchmark-only: the copying call with CUDA events between its stages. `transfer` covers the peer
@@ -311,15 +371,22 @@ std::tuple<at::Tensor, std::vector<double>>
 all_to_all_single_4d_timed(const c10::intrusive_ptr<UlyssesGroup>&    group,
                            const at::Tensor&                          input,
                            int64_t                                    mode,
-                           std::string                                tag,
+                           std::vector<int64_t>                       window_ptrs,
+                           std::vector<int64_t>                       flag_ptrs,
+                           int64_t                                    window_numel,
                            const std::optional<std::vector<int64_t>>& seq_splits,
                            const std::optional<std::vector<int64_t>>& head_splits)
 {
     const at::cuda::CUDAGuard guard(input.device());
     const Prepared prepared = prepare(group, input, mode, seq_splits, head_splits, std::nullopt, /*borrowed=*/false);
-    cudaStream_t   stream   = at::cuda::getCurrentCUDAStream();
-    const auto&    buf      = group->pool().acquire(prepared.plan.window_numel, prepared.x.scalar_type(), tag);
-    check_window_aliasing(prepared, buf, tag);
+    const int      rank     = static_cast<int>(group->rank());
+    const int      ws       = static_cast<int>(group->world_size());
+    void*          window   = local_window(prepared, window_ptrs, window_numel, rank, ws);
+    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size());
+
+    const std::vector<uint64_t> peers(window_ptrs.begin(), window_ptrs.end());
+    const std::vector<uint64_t> flags(flag_ptrs.begin(), flag_ptrs.end());
+    cudaStream_t                stream = at::cuda::getCurrentCUDAStream();
 
     cudaEvent_t marks[5];
     for (auto& ev : marks) {
@@ -327,18 +394,13 @@ all_to_all_single_4d_timed(const c10::intrusive_ptr<UlyssesGroup>&    group,
     }
 
     ULYSSES_CUDA_CHECK(cudaEventRecord(marks[0], stream));
-    group->fast_barrier(stream, tag);
+    fast_barrier(stream, flags, rank);
     ULYSSES_CUDA_CHECK(cudaEventRecord(marks[1], stream));
-    launch_a2a_ce(prepared.x.data_ptr(),
-                  buf.peer_ptrs,
-                  prepared.plan,
-                  group->ce_resources(),
-                  static_cast<int>(group->rank()),
-                  stream);
+    launch_a2a_ce(prepared.x.data_ptr(), peers, prepared.plan, group->xfer_stream(), rank, stream);
     ULYSSES_CUDA_CHECK(cudaEventRecord(marks[2], stream));
-    group->fast_barrier(stream, tag);
+    fast_barrier(stream, flags, rank);
     ULYSSES_CUDA_CHECK(cudaEventRecord(marks[3], stream));
-    copy_out(prepared, buf, stream);
+    copy_out(prepared, window, stream);
     ULYSSES_CUDA_CHECK(cudaEventRecord(marks[4], stream));
 
     ULYSSES_CUDA_CHECK(cudaEventSynchronize(marks[4]));
@@ -358,37 +420,31 @@ all_to_all_single_4d_timed(const c10::intrusive_ptr<UlyssesGroup>&    group,
 
 TORCH_LIBRARY(fast_ulysses, m)
 {
-
     m.class_<ulysses::UlyssesGroup>("UlyssesGroup")
-        .def(torch::init<std::vector<int64_t>, int64_t, int64_t, int64_t>())
-        .def("seal_pool", [](const c10::intrusive_ptr<ulysses::UlyssesGroup>& g) { g->pool().seal(); })
-        .def("barrier_epoch", &ulysses::UlyssesGroup::barrier_epoch)  // tests; see the declaration
-        .def("destroy", &ulysses::UlyssesGroup::destroy)
-        .def_static("uniqueid_nints", &ulysses::UlyssesGroup::uniqueid_nints)
-        .def_static("get_uniqueid", &ulysses::UlyssesGroup::get_uniqueid)
-        .def_static("init_world", &ulysses::UlyssesGroup::init_world);
+        .def(torch::init<int64_t, int64_t>())
+        .def("destroy", &ulysses::UlyssesGroup::destroy);
 
-    m.def("reserve(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, str tag, int[] sizes, "
-          "int mode, ScalarType dtype, int[]? seq_splits=None, int[]? head_splits=None) -> ()");
-    m.impl("reserve", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::reserve);
+    m.def("window_numel(int[] sizes, int mode, ScalarType dtype, int world_size, int rank, "
+          "int[]? seq_splits=None, int[]? head_splits=None) -> int");
+    m.impl("window_numel", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::window_numel);
 
     // `out` is an optional preallocated destination. No `barrier` flag -- deferring the closing
     // handshake would make the copy-out read the window before the peers' writes had landed.
     m.def("all_to_all_single_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
-          "Tensor input, int mode, str tag, int[]? seq_splits=None, int[]? head_splits=None, "
-          "Tensor? out=None) -> Tensor");
+          "Tensor input, int mode, int[] window_ptrs, int[] flag_ptrs, int window_numel, "
+          "int[]? seq_splits=None, int[]? head_splits=None, Tensor? out=None) -> Tensor");
     m.impl("all_to_all_single_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d);
 
     m.def("all_to_all_single_4d_borrowed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
-          "Tensor input, int mode, str tag, bool barrier=True, int[]? seq_splits=None, "
-          "int[]? head_splits=None) -> Tensor");
+          "Tensor input, int mode, int[] window_ptrs, int[] flag_ptrs, int window_numel, "
+          "bool barrier=True, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
     m.impl("all_to_all_single_4d_borrowed",
            c10::DispatchKey::CompositeExplicitAutograd,
            &ulysses::all_to_all_single_4d_borrowed);
 
     m.def("all_to_all_single_4d_timed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
-          "Tensor input, int mode, str tag, int[]? seq_splits=None, int[]? head_splits=None) "
-          "-> (Tensor, float[])");
+          "Tensor input, int mode, int[] window_ptrs, int[] flag_ptrs, int window_numel, "
+          "int[]? seq_splits=None, int[]? head_splits=None) -> (Tensor, float[])");
     m.impl("all_to_all_single_4d_timed",
            c10::DispatchKey::CompositeExplicitAutograd,
            &ulysses::all_to_all_single_4d_timed);
@@ -405,20 +461,13 @@ PYBIND11_MODULE(_C, m)
     });
 
     // TESTS ONLY. Underscored, and not a torch op, because arming it deliberately breaks the
-    // operator: it is the negative control for a2a_ce_flag_ordering.py. See transfer.cu.
+    // operator: it is the negative control for a2a_ce_flag_ordering.py. See src/transfer.cu.
     m.def("_set_ce_fault", &ulysses::set_ce_fault);
 
-    // Diagnostics only -- nothing on the collective path reads it. `nvshmem_loaded_from` is
-    // resolved with dladdr rather than reported from the build, because torch ships its own
-    // libnvshmem and which one won is what a coexistence problem turns on.
     m.def("build_info", []() {
-        Dl_info                            info{};
         std::map<std::string, std::string> out;
-        out["version"]            = FAST_ULYSSES_VERSION;
-        out["cuda_arch_list"]     = FAST_ULYSSES_CUDA_ARCH_LIST;
-        out["nvshmem_build_home"] = FAST_ULYSSES_NVSHMEM_HOME;
-        out["nvshmem_loaded_from"] =
-            dladdr(reinterpret_cast<void*>(&nvshmem_ptr), &info) && info.dli_fname ? info.dli_fname : "unknown";
+        out["version"]        = FAST_ULYSSES_VERSION;
+        out["cuda_arch_list"] = FAST_ULYSSES_CUDA_ARCH_LIST;
         return out;
     });
 }

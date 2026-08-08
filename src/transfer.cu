@@ -1,9 +1,9 @@
 // CE (copy-engine) transfer path for the 4D all-to-all: pitched cudaMemcpy2D/3DAsync straight into
-// peers' symmetric-heap addresses. The movement uses DMA engines and zero SMs, so it runs
+// the peers' window addresses. The movement uses DMA engines and zero SMs, so it runs
 // concurrently with compute rather than waiting for a block slot as an SM-resident collective does.
 // It computes no offsets -- the addressing comes from build_plan in a2a_plan.cc.
-#include <fast_ulysses/a2a_plan.hpp>
-#include <fast_ulysses/group.hpp>
+#include <fast_ulysses/common.hpp>
+#include <fast_ulysses/transfer.hpp>
 
 #include <chrono>
 #include <thread>
@@ -67,13 +67,13 @@ void set_ce_fault(int64_t delay_us)
 void launch_a2a_ce(const void*                  src,
                    const std::vector<uint64_t>& peer_ptrs,
                    const A2APlan&               plan,
-                   const CEResources&           ce,
+                   cudaStream_t                 xfer,
                    int                          rank,
                    cudaStream_t                 stream)
 {
     const int      ws        = static_cast<int>(peer_ptrs.size());
     const uint8_t* src_bytes = static_cast<const uint8_t*>(src);
-    // Fresh events every call -- do not hoist them into CEResources. A shared event re-recorded
+    // Fresh events every call -- do not hoist them onto the group. A shared event re-recorded
     // while earlier waits are still pending lets one of those waits resolve against a later record,
     // which makes the wait depend on the very stream it is blocking: a circular wait. Creating them
     // here is depth-safe, since a wait captures the dependency at call time and destroy defers.
@@ -94,7 +94,6 @@ void launch_a2a_ce(const void*                  src,
         }
     };
 
-    cudaStream_t xfer = ce.xfer;
     ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(xfer, ready, 0));
     // Fault injection (see set_ce_fault): hold the payload back so the flag cannot be behind it.
     if (g_fault_delay_us > 0) {

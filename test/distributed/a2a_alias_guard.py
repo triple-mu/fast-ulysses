@@ -74,7 +74,7 @@ def main() -> None:
         try:
             call()
         except Exception as exc:  # noqa: BLE001 -- the type is torch's, the message is the contract
-            if "overlaps tag" not in str(exc):
+            if "overlaps the window" not in str(exc):
                 fails += 1
                 print(
                     f"FAIL rank={rank} [{name}]: raised, but not the aliasing check: {exc}",

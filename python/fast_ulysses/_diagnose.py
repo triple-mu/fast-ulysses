@@ -1,19 +1,13 @@
 """Name the cause of a failed ``_C`` load.
 
-``ld.so`` reports a mangled symbol or a missing soname, neither of which says WHICH of the
-things this extension is pinned to -- the torch minor, the CUDA major, the NVSHMEM wheel --
-is not what it was built against. This matches the loader's message against the three known
-failures and checks the baked build facts against what is installed now. Imported only from
-the failure path, so a working load pays nothing for it.
+``ld.so`` reports a mangled symbol or a missing soname, neither of which says WHICH of the two
+things this extension is pinned to -- the torch minor and the CUDA major -- is not what it was
+built against. Imported only from the failure path, so a working load pays nothing for it.
 """
 
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-
-# Where the first RPATH entry, $ORIGIN/../nvidia/nvshmem/lib, actually points.
-_NVSHMEM_LIB = Path(__file__).resolve().parent.parent / "nvidia/nvshmem/lib/libnvshmem_host.so.3"
 
 
 def build_meta() -> dict[str, object]:
@@ -61,13 +55,6 @@ def _verdict(text: str, built: dict[str, object], live: dict[str, str]) -> str:
                 "Install the build whose CUDA major matches this torch."
             )
         return "the CUDA major matches the build, so cudart is installed where nothing finds it."
-    if "libnvshmem" in text:
-        if not _NVSHMEM_LIB.exists():
-            return (
-                f"{_NVSHMEM_LIB} does not exist. Install nvidia-nvshmem-"
-                f"cu{live['cuda'].split('.')[0]}, or put a site NVSHMEM on LD_LIBRARY_PATH."
-            )
-        return f"{_NVSHMEM_LIB} exists but did not load; check LD_LIBRARY_PATH for another one."
     return "no known failure pattern matched; the loader message below is the whole story."
 
 
@@ -78,7 +65,6 @@ def explain(exc: BaseException) -> str:
     return (
         f"fast_ulysses._C failed to load: {_verdict(str(exc), built, live)}\n"
         f"  built against: {baked}\n"
-        f"  installed now: torch={live['torch']}, cuda={live['cuda']}, python={live['python']}, "
-        f"nvshmem={_NVSHMEM_LIB if _NVSHMEM_LIB.exists() else 'MISSING'}\n"
+        f"  installed now: torch={live['torch']}, cuda={live['cuda']}, python={live['python']}\n"
         f"  loader error: {exc}"
     )

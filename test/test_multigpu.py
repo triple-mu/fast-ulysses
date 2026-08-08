@@ -50,7 +50,6 @@ def _nprocs() -> list[int]:
         # that timing: each module docstring names the NEGATIVE CONTROL (the line to delete to make
         # it fail) and what its failure looks like. Re-run those controls after any barrier change.
         "a2a_window_race.py",
-        "a2a_cudagraph.py",
         "a2a_ce_flag_ordering.py",
         "a2a_overlapping_barriers.py",
         # The one adversarial worker whose control does NOT need a rebuild: it arms the fault
@@ -66,24 +65,12 @@ def test_multigpu_worker(worker, nproc):
     _run_worker(worker, nproc)
 
 
-def test_multigpu_torch_nvshmem_coexist():
-    """NVSHMEM is a process-global singleton and torch ships its own.
-
-    Runs at 4 ranks regardless of how many GPUs are present: the question is whether the two
-    initialisations coexist, which two pairs already answer. Skips itself when torch's symmetric
-    memory is unavailable, so it is inert on a build where the question does not arise.
-    """
-    if torch.cuda.device_count() < 4:
-        pytest.skip(f"needs >=4 GPUs, found {torch.cuda.device_count()}")
-    _run_worker("a2a_torch_nvshmem_coexist.py", 4)
-
-
 @pytest.mark.parametrize("worker", ["a2a_subgroup.py", "a2a_subgroup_divergent.py"])
 def test_multigpu_subgroup(worker):
     """tp=2 x ulysses-sp: two stride-2 subgroups of the same job, live together.
 
-    Identical shapes in both groups (a2a_subgroup) and, after reserve() has taken the collective
-    allocation off the call path, deliberately divergent ones (a2a_subgroup_divergent).
+    Identical shapes in both groups (a2a_subgroup) and deliberately divergent ones
+    (a2a_subgroup_divergent).
     """
     env = os.environ.get("FAST_ULYSSES_TEST_NPROC")
     nproc = int(env) if env else min(torch.cuda.device_count(), 8)

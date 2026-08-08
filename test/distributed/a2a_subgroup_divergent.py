@@ -2,12 +2,11 @@
 
 a2a_subgroup.py keeps both sp groups on identical shapes, so nothing there covers subgroups
 running independent work. This does: after ``reserve`` has taken every allocation off the call
-path and sealed the pool, the two groups get different shapes, different modes and OPPOSITE call
-orders, and each still has to match dist.all_to_all_single on its own sp group.
+path, the two groups get different shapes, different modes and OPPOSITE call orders, and each
+still has to match dist.all_to_all_single on its own sp group.
 
 What this checks is CORRECTNESS under divergence, not deadlock avoidance -- the two groups here
-have no handshake outstanding when they allocate. The deadlock that lazy allocation does cause,
-when a spin barrier IS in flight, is a separate matter: docs/API.md, under reserve().
+have no handshake outstanding when they allocate.
 
 Needs an even world size >= 4:
     torchrun --nproc_per_node=8 test/distributed/a2a_subgroup_divergent.py
@@ -16,9 +15,8 @@ NEGATIVE CONTROL, for the divergence: make both groups run the table in the SAME
 ``reversed``). Every rank then issues identical shapes at identical points and the worker passes
 on a build that cannot handle divergence at all -- which is the blindness to avoid, not a pass.
 
-NEGATIVE CONTROL, for the seal: comment out ``group.reserve(...)``. The undeclared-tag check at
-the end then FAILS ("was not refused"), because an unsealed pool allocates it happily. Verified:
-that is what it does, and it does not hang.
+The seal this used to check is gone with the static pool: windows are allocated on demand from a
+MemPool and freed back to it, so there is nothing to seal and an undeclared tag simply allocates.
 """
 
 from __future__ import annotations
@@ -73,8 +71,8 @@ def main() -> None:
     )
 
     # Here is the divergence. Group 0 runs the table forwards, group 1 backwards, so the two
-    # groups request different sizes on different tags at every step. Before reserve() this was
-    # a deadlock; the pool is sealed now, so nothing below may allocate.
+    # groups request different sizes on different tags at every step. reserve() above has already
+    # made every window, so nothing below allocates.
     mine = calls if my_tp == 0 else list(reversed(calls))
 
     torch.manual_seed(1234 + rank)
@@ -90,19 +88,6 @@ def main() -> None:
                 print(
                     f"FAIL rank={rank} sp_group={my_tp} it={it} tag={tag} mode={mode}", flush=True
                 )
-
-    # The seal itself: a tag nobody reserved must be refused, not allocated. Rank-local, so no
-    # peer is left waiting -- acquire() raises before anything reaches the stream.
-    sealed_ok = False
-    try:
-        group.all_to_all_single_4d(
-            torch.randn(shape(0, 8), dtype=torch.bfloat16, device=dev), mode=0, tag="undeclared"
-        )
-    except Exception as exc:  # noqa: BLE001 -- the type is torch's, the message is the contract
-        sealed_ok = "sealed" in str(exc)
-    fails += not sealed_ok
-    if not sealed_ok:
-        print(f"FAIL rank={rank}: an undeclared tag was not refused by the sealed pool", flush=True)
 
     nfail = torch.tensor([fails], device=dev)
     dist.all_reduce(nfail)
