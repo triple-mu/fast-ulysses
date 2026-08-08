@@ -151,7 +151,9 @@ def main() -> None:
     check.equal("async", group.all_to_all_4d_async(x, mode=0).wait(), want)
     async_window = group.empty_output(x, mode=0)
     check.equal(
-        "async out=empty_output", group.all_to_all_4d_async(x, mode=0, out=async_window).wait(), want
+        "async out=empty_output",
+        group.all_to_all_4d_async(x, mode=0, out=async_window).wait(),
+        want,
     )
 
     # --- steady state: the window is allocated once and reused ------------------------------

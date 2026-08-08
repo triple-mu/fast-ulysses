@@ -42,7 +42,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from fast_ulysses import UlyssesGroup, _C
+from fast_ulysses import _C, UlyssesGroup
 
 ITERS = 120
 FAULT_US = 2000

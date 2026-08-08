@@ -44,7 +44,6 @@ jobs:
       # Two architectures, not four: this job answers "does it still build and does the plan
       # still hold", and the full arch list is a release concern.
       FAST_ULYSSES_CUDA_ARCH: "90;100"
-      FAST_ULYSSES_RELOCATABLE: "1"
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       # No free-disk-space here: a job-level `container:` is pulled before the first step runs,
@@ -78,7 +77,7 @@ jobs:
         # package directory without a built _C, and test_plan.py skips itself on a failed
         # import -- so from the workspace this would pass by skipping everything.
         #
-        # tests/test_multigpu.py is not runnable on any GitHub-hosted runner (no GPU). It is
+        # test/test_distributed.py is not runnable on any GitHub-hosted runner (no GPU). It is
         # gated manually by tools/preflight_gpu.sh before a tag is pushed.
         run: |
           $PYBIN/pip install dist/*.whl

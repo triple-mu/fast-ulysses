@@ -56,8 +56,7 @@ public:
         return xfer_;
     }
 
-    // Unlike the NVSHMEM teardown this replaced, nothing here is collective: one rank may run it
-    // alone, so the destructor can call it.
+    // Nothing here is collective -- one rank may run it alone -- so the destructor can call it.
     void destroy()
     {
         if (xfer_ != nullptr) {

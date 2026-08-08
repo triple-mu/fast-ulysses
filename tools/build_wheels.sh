@@ -7,7 +7,7 @@
 # the matrix finer would pay the pull three more times to save nothing.
 #
 # The container's CUDA major must match the row's torch CUDA major. Build a cu13 torch in a
-# CUDA 12 image and the extension links libcudart.so.12 while the wheel declares nvshmem-cu13:
+# CUDA 12 image and the extension links libcudart.so.12 against a CUDA 13 runtime:
 # it installs cleanly and dies on import. tools/check_wheel.py is what refuses to let that
 # out, which is why every wheel goes through it here and not only in the release job.
 #
@@ -45,7 +45,6 @@ mkdir -p "${OUTDIR}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-export FAST_ULYSSES_RELOCATABLE=1
 export FAST_ULYSSES_LOCAL_VERSION="${LOCAL_VERSION}"
 export FAST_ULYSSES_CUDA_ARCH="${CUDA_ARCH}"
 # One cache for the whole row: the device objects do not depend on the CPython ABI.

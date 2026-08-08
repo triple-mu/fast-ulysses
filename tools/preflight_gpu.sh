@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The manual gate before pushing a v* tag: run the multi-GPU suite against a real wheel.
 #
-# CI has no GPU runner, so nothing in .github/ ever executes test/test_multigpu.py -- the
+# CI has no GPU runner, so nothing in .github/ ever executes test/test_distributed.py -- the
 # release job proves the wheel is well-formed and imports, and stops there. Everything the
-# operator actually does (NVSHMEM bring-up, the symmetric heap, the barriers) is only ever
+# operator actually does (the symmetric windows, the transfers, the barriers) is only ever
 # exercised here. Nothing else covers it, so a tag pushed without running this is untested.
 #
 # It installs the wheel into a clean venv rather than testing the working tree, because the
@@ -62,7 +62,7 @@ fi
 meta="$(cd "${WORK}" && "${VENV}/bin/python" -c '
 from fast_ulysses import _build_meta as m
 print(f"version={m.VERSION} torch={m.TORCH_VERSION} cuda={m.CUDA_VERSION} "
-      f"arch={m.CUDA_ARCH_LIST} nvshmem={m.NVSHMEM_VERSION} work_registry={m.HAS_WORK_REGISTRY}")
+      f"arch={m.CUDA_ARCH_LIST} work_registry={m.HAS_WORK_REGISTRY}")
 ')"
 py_version="$(cd "${WORK}" && "${VENV}/bin/python" -c \
     'import platform; print(platform.python_version())')"
@@ -80,7 +80,7 @@ set -e
 suite_log="${WORK}/multigpu.log"
 set +e
 (cd "${WORK}" && "${REPO}/tools/exclusive.sh" "${GPUS}" -- \
-    "${VENV}/bin/pytest" "${REPO}/test/test_multigpu.py" -q) 2>&1 | tee "${suite_log}"
+    "${VENV}/bin/pytest" "${REPO}/test/test_distributed.py" -q) 2>&1 | tee "${suite_log}"
 suite_status="${PIPESTATUS[0]}"
 set -e
 

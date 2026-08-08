@@ -240,7 +240,15 @@ class UlyssesGroup:
         x = x.contiguous()
         win = self._window_for(x, mode, out, seq_splits, head_splits, "sync")
         return torch.ops.fast_ulysses.all_to_all_4d(
-            self._handle, x, mode, win.peer_ptrs, win.flag_ptrs, win.numel, seq_splits, head_splits, out
+            self._handle,
+            x,
+            mode,
+            win.peer_ptrs,
+            win.flag_ptrs,
+            win.numel,
+            seq_splits,
+            head_splits,
+            out,
         )
 
     def all_to_all_4d_async(

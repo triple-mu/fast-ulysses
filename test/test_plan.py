@@ -7,9 +7,8 @@ every Ulysses implementation agrees on. If this passes, the addressing is right 
 failure is a transport or synchronisation bug, not a layout bug.
 
 The window holds the whole output here: every rank sends its own share through it like any
-other peer's. ``all_to_all_single_4d_borrowed`` returns that window as-is and
-``all_to_all_single_4d`` copies all of it out in one flat copy, so neither adds addressing this
-replay would have to model.
+other peer's. The zero-copy path returns that window as-is and the copying path moves all of it
+out in one flat copy, so neither adds addressing this replay would have to model.
 """
 
 from __future__ import annotations

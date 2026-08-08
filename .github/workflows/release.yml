@@ -22,16 +22,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Tag must match __version__
+      - name: Tag must match VERSION
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          lit=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' fast_ulysses/__init__.py)
+          lit=$(tr -d '[:space:]' < VERSION)
           if [[ "${tag}" != "${lit}" ]]; then
             echo "FATAL: tag is ${GITHUB_REF_NAME} (version ${tag}) but" \
-                 "fast_ulysses/__init__.py says ${lit}. Bump the literal, or retag." >&2
+                 "VERSION says ${lit}. Bump the file, or retag." >&2
             exit 1
           fi
-          echo "tag ${GITHUB_REF_NAME} matches __version__ ${lit}"
+          echo "tag ${GITHUB_REF_NAME} matches VERSION ${lit}"
 
   sdist:
     needs: guard
@@ -95,8 +95,8 @@ jobs:
       matrix:
         # (torch, index, image, cuda major, local version tag). The image's CUDA major has to
         # match the torch build's, or the wheel links the wrong libcudart and is dead on
-        # arrival. torch 2.9 is absent on purpose: it pins nvidia-nvshmem-cu12 3.3.20, below
-        # the minimum setup.py accepts. CUDA 12.6 is absent for the same kind of reason: it
+        # arrival. torch 2.9 is absent on purpose: get_mem_pool and get_mempool_allocator, which
+        # the windows are built on, arrive in 2.10. CUDA 12.6 is absent for a different reason: it
         # predates Blackwell and cannot compile sm_100/sm_120.
         include:
           - {torch: "2.10.0", index: "https://download.pytorch.org/whl/cu128", image: "cuda12.8", cuda_major: "12", tag: "torch210cu128"}

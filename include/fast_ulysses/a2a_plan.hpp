@@ -1,6 +1,7 @@
 #pragma once
-// Addressing for the 4D all-to-all, expressed as pitched copies. Pure host arithmetic with no CUDA
-// and no NVSHMEM in it, so the layout contract can be tested on its own (test/test_plan.py replays
+// Addressing for the 4D all-to-all, expressed as pitched copies. Pure host arithmetic with no CUDA,
+// no torch and no communication library in it, so the layout contract can be tested on its own
+// (test/test_plan.py replays
 // a plan over numpy buffers). UNEVEN splits are the general case -- even splits are just
 // seq_splits = [s/P]*P and head_splits = [n/P]*P -- so there is a single code path to get right.
 #include <cstdint>
@@ -59,8 +60,8 @@ struct A2APlan {
 };
 
 // One plan serves both entry points: `ops` covers all world_size destinations, so this rank's own
-// share travels through the window like every peer's -- which is what the borrowed form needs, its
-// result BEING the window, and what makes the copying form's copy-out one flat copy.
+// share travels through the window like every peer's -- which is what the zero-copy path needs, the
+// window BEING the caller's output, and what makes the copying path's copy-out one flat copy.
 A2APlan build_plan(const A2ADims& dims, int mode, int64_t elem_size);
 
 }  // namespace ulysses

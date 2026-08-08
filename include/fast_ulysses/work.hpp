@@ -2,8 +2,8 @@
 // Binds a result completing on the comm stream to torch's functional-collective machinery, so an
 // async call can return an AsyncCollectiveTensor whose .wait() -- or first use by any aten op --
 // inserts the cross-stream dependency instead of silently reading a buffer still being written.
-// wait_tensor waits every c10d::Work registered against a tensor's STORAGE, and a borrowed result
-// is a fresh at::from_blob view per call, so an entry belongs to that CALL, not to the window.
+// wait_tensor waits every c10d::Work registered against a tensor's STORAGE, so an entry belongs
+// to the call that produced the result, not to the buffer it happens to occupy.
 #include <ATen/ATen.h>
 #include <cuda_runtime.h>
 

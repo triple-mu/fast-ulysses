@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fast-ulysses"
-description = "Ulysses sequence-parallel all-to-all over the NVSHMEM symmetric heap with NVLink P2P"
+description = "Ulysses sequence-parallel all-to-all over NVLink, moved by the GPU copy engines"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

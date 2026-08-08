@@ -33,16 +33,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-# The RUNPATH the extension must carry, byte for byte. Four nvidia directories because the
-# cudart wheel layout differs across torch releases; all of them are $ORIGIN-relative so the
-# wheel works from any site-packages.
-EXPECTED_RUNPATH = (
-    "$ORIGIN/../nvidia/nvshmem/lib:"
-    "$ORIGIN/../nvidia/cu13/lib:"
-    "$ORIGIN/../nvidia/cu12/lib:"
-    "$ORIGIN/../nvidia/cuda_runtime/lib:"
-    "$ORIGIN/../torch/lib"
-)
+# The RUNPATH the extension must carry, byte for byte. torch's lib directory is the only thing
+# it links that is not on a default search path, and it is $ORIGIN-relative so the wheel works
+# from any site-packages.
+EXPECTED_RUNPATH = "$ORIGIN/../torch/lib"
 
 # Every one of these must be present, and anything outside REQUIRED | OPTIONAL fails, so a NEW
 # external dependency is as loud as a missing one. libcudart.so.<major> and libnvrtc.so.<major>
@@ -55,7 +49,6 @@ REQUIRED_NEEDED = {
     "libc10.so",
     "libc10_cuda.so",
     "libtorch_python.so",
-    "libnvshmem_host.so.3",
     "libtorch_cpu.so",
     "libtorch_cuda.so",
     "libstdc++.so.6",
@@ -88,13 +81,11 @@ AUDITWHEEL_EXCLUDES = [
     "libcudart.so.13",
     "libnvrtc.so.12",
     "libnvrtc.so.13",
-    "libnvshmem_host.so.3",
 ]
 
 MAX_GLIBC = (2, 28)  # manylinux_2_28
 MAX_GLIBCXX = (3, 4, 25)  # the GCC 9 / devtoolset-9 ABI manylinux_2_28 guarantees
 REQUIRED_PLATFORM = "manylinux_2_28_x86_64"
-NVSHMEM_MIN = "3.4.5"
 # Substrings that only ever appear in a path that belongs to the machine that did the build.
 BUILD_HOST_MARKERS = ("/opt/", "/tmp/", "/home/", "site-packages")
 
@@ -203,16 +194,13 @@ def _check_metadata(zf: zipfile.ZipFile, version: str, abi: str, cuda_major: str
         )
 
     requires = [line.strip() for line in re.findall(r"^Requires-Dist:\s*(.+)$", text, re.M)]
-    torch_abi = meta.get("TORCH_ABI", "")
-    expected_torch = f"torch=={torch_abi}.*"
-    expected_nvshmem = f"nvidia-nvshmem-cu{cuda_major}>={NVSHMEM_MIN}"
-    for want in (expected_torch, expected_nvshmem):
-        if want not in requires:
-            problems.append(f"Requires-Dist has no {want!r}; it declares {requires}")
+    expected_torch = f"torch=={meta.get('TORCH_ABI', '')}.*"
+    if expected_torch not in requires:
+        problems.append(f"Requires-Dist has no {expected_torch!r}; it declares {requires}")
 
     # The wheel's own metadata has to agree with the container it was built in. A cu13 torch
-    # built in a CUDA 12 image links libcudart.so.12 while pulling nvidia-nvshmem-cu13 -- it
-    # installs and then dies on import, and nothing downstream of here can tell.
+    # built in a CUDA 12 image links libcudart.so.12 and then dies on import against a cu13
+    # runtime, and nothing downstream of here can tell.
     built_cuda = str(meta.get("CUDA_VERSION", "")).split(".")[0]
     if built_cuda != cuda_major:
         problems.append(
