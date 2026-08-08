@@ -149,8 +149,7 @@ A2ADims make_dims_from_shape(at::IntArrayRef                            sizes,
     return dims;
 }
 
-// Validated input, the plan, and the tensor the result will be copied into. `output` is UNDEFINED
-// for a borrowed call, whose result is the window itself.
+// Validated input, the plan, and the tensor the result lands in -- which may be the window itself.
 struct Prepared {
     at::Tensor x;
     at::Tensor output;
@@ -165,20 +164,20 @@ bool intervals_overlap(const void* a, int64_t a_bytes, const void* b, int64_t b_
     return pa < pb + b_bytes && pb < pa + a_bytes;
 }
 
-// Refuse a call whose input or `out` shares bytes with the window it is about to fill. Under EVEN
-// splits the two modes of one window collide -- b*s_total*n_me*d == b*s_me*n_total*d -- so a round
-// trip through one window hands the transport the very buffer every peer is writing. Intervals
-// rather than a pointer comparison, because a borrowed result sliced on its batch axis is
-// contiguous, starts past the base, and is still in the window.
-void check_window_aliasing(const Prepared& prepared, const void* window, int64_t window_bytes)
+// Refuse a call whose input, or whose `out`, shares bytes with the window it is about to fill --
+// it would be read while every peer writes it. `out` BEING the window is the zero-copy path and is
+// the one legitimate case; the caller reaches it by passing a buffer from group.empty_output().
+// Intervals rather than a pointer comparison, because an overlap can start past the window base.
+void check_window_aliasing(const Prepared& prepared, const void* window, int64_t window_bytes, bool out_is_window)
 {
     TORCH_CHECK(!intervals_overlap(prepared.x.data_ptr(), prepared.x.nbytes(), window, window_bytes),
-                "input overlaps the window it is about to fill: it would be read while every peer "
-                "writes it. Use a different tag for the second call, or the copying entry point.");
-    if (prepared.output.defined()) {
+                "input overlaps the window this call fills: it would be read while every peer "
+                "writes it. Pass a separate output buffer, or let the call allocate one.");
+    if (prepared.output.defined() && !out_is_window) {
         TORCH_CHECK(!intervals_overlap(prepared.output.data_ptr(), prepared.output.nbytes(), window, window_bytes),
-                    "out overlaps the window it is about to fill: the copy-out would read and write "
-                    "the same bytes. Pass a tensor outside the symmetric memory pool.");
+                    "out partially overlaps the window this call fills, which neither writes it "
+                    "correctly nor copies out correctly. Pass either the whole window (from "
+                    "group.empty_output()) or a buffer outside the symmetric pool.");
     }
 }
 
@@ -189,8 +188,7 @@ Prepared prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
                  int64_t                                    mode,
                  const std::optional<std::vector<int64_t>>& seq_splits,
                  const std::optional<std::vector<int64_t>>& head_splits,
-                 const std::optional<at::Tensor>&           out,
-                 bool                                       borrowed)
+                 const std::optional<at::Tensor>&           out)
 {
     const int ws = static_cast<int>(group->world_size());
 
@@ -206,9 +204,6 @@ Prepared prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
                                               head_splits);
     prepared.plan      = build_plan(dims, static_cast<int>(mode), prepared.x.element_size());
 
-    if (borrowed) {
-        return prepared;
-    }
     if (out.has_value()) {
         prepared.output = *out;
         TORCH_CHECK(prepared.output.is_cuda() && prepared.output.is_contiguous(),
@@ -253,7 +248,6 @@ void transfer_on_stream(const c10::intrusive_ptr<UlyssesGroup>& group,
                         const Prepared&                         prepared,
                         const std::vector<int64_t>&             window_ptrs,
                         const std::vector<int64_t>&             flag_ptrs,
-                        bool                                    barrier,
                         cudaStream_t                            stream)
 {
     const int                   rank = static_cast<int>(group->rank());
@@ -263,22 +257,16 @@ void transfer_on_stream(const c10::intrusive_ptr<UlyssesGroup>& group,
     // WRITERS WAIT FOR READERS, before writing anything. The window is single-buffered, so this
     // call is about to overwrite what the previous call produced, which a peer may still be
     // reading; the closing barrier below proves everyone's WRITES landed and nothing about their
-    // READS. It guards the START of a call rather than the end of the previous one because a
-    // BORROWED result is read by the caller at a time the operator never sees.
+    // READS. It guards the START of a call rather than the end of the previous one because on the
+    // zero-copy path the result is read by the caller at a time the operator never sees.
     fast_barrier(stream, flags, rank);
 
     launch_a2a_ce(prepared.x.data_ptr(), peers, prepared.plan, group->xfer_stream(), rank, stream);
 
     // That a completed peer memcpy is VISIBLE at the destination when a later kernel's release
-    // store arrives is an ASSUMPTION, not a documented guarantee -- a2a_ce_fault_injection.py is
-    // the negative control for it.
-    //
-    // barrier=false defers the closing handshake to a later barrier=true call on the same stream;
-    // until then the window is NOT safe to read. Only the borrowed entry points expose it: a
-    // deferred copying call would copy the window out before the peers' writes landed.
-    if (barrier) {
-        fast_barrier(stream, flags, rank);
-    }
+    // store arrives is an ASSUMPTION, not a documented guarantee -- test/distributed's CE ordering
+    // worker is the negative control for it.
+    fast_barrier(stream, flags, rank);
 }
 
 // Window -> the caller's tensor, ordered after the closing barrier on the same stream. Every rank's
@@ -295,16 +283,17 @@ void copy_out(const Prepared& prepared, const void* window, cudaStream_t stream)
 
 }  // namespace
 
-// How many elements the window for this call must hold. The Python side allocates by this number,
-// which is the LARGEST rank's output rather than this rank's -- peer offsets only line up while
-// every rank allocates the same size, and each rank can compute the max without communicating.
-int64_t window_numel(std::vector<int64_t>                       sizes,
-                     int64_t                                    mode,
-                     at::ScalarType                             dtype,
-                     int64_t                                    world_size,
-                     int64_t                                    rank,
-                     const std::optional<std::vector<int64_t>>& seq_splits,
-                     const std::optional<std::vector<int64_t>>& head_splits)
+// What the Python side needs before it can allocate: the window capacity and this rank's output
+// shape. The capacity is the LARGEST rank's output rather than this rank's -- peer offsets only
+// line up while every rank allocates the same size, and each rank can compute the max without
+// communicating. Both come from the plan, so neither is re-derived in Python.
+std::tuple<int64_t, std::vector<int64_t>> plan_shapes(std::vector<int64_t>                       sizes,
+                                                      int64_t                                    mode,
+                                                      at::ScalarType                             dtype,
+                                                      int64_t                                    world_size,
+                                                      int64_t                                    rank,
+                                                      const std::optional<std::vector<int64_t>>& seq_splits,
+                                                      const std::optional<std::vector<int64_t>>& head_splits)
 {
     const A2ADims dims = make_dims_from_shape(at::IntArrayRef(sizes),
                                               dtype,
@@ -313,76 +302,59 @@ int64_t window_numel(std::vector<int64_t>                       sizes,
                                               static_cast<int>(rank),
                                               seq_splits,
                                               head_splits);
-    return build_plan(dims, static_cast<int>(mode), static_cast<int64_t>(c10::elementSize(dtype))).window_numel;
+    const A2APlan plan = build_plan(dims, static_cast<int>(mode), static_cast<int64_t>(c10::elementSize(dtype)));
+    return {plan.window_numel, plan.output_shape};
 }
 
-// THE DEFAULT: an ordinary tensor the caller owns, with no rules attached -- it may outlive the
-// next call on this window, be read on another stream, or survive destroy(). Price: the copy-out.
-at::Tensor all_to_all_single_4d(const c10::intrusive_ptr<UlyssesGroup>&    group,
-                                const at::Tensor&                          input,
-                                int64_t                                    mode,
-                                std::vector<int64_t>                       window_ptrs,
-                                std::vector<int64_t>                       flag_ptrs,
-                                int64_t                                    window_numel,
-                                const std::optional<std::vector<int64_t>>& seq_splits,
-                                const std::optional<std::vector<int64_t>>& head_splits,
-                                const std::optional<at::Tensor>&           out)
+// The one collective. The result is always a tensor the caller owns, with no lifetime rules.
+//
+// Two speeds, decided by where `out` points rather than by a second entry point: when `out` IS the
+// window (a buffer from group.empty_output()), the peers write it directly and there is no
+// copy-out; otherwise the transfer lands in a window this group keeps and one flat device-to-device
+// copy moves it out.
+at::Tensor all_to_all_4d(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                         const at::Tensor&                          input,
+                         int64_t                                    mode,
+                         std::vector<int64_t>                       window_ptrs,
+                         std::vector<int64_t>                       flag_ptrs,
+                         int64_t                                    window_numel,
+                         const std::optional<std::vector<int64_t>>& seq_splits,
+                         const std::optional<std::vector<int64_t>>& head_splits,
+                         const std::optional<at::Tensor>&           out)
 {
     const at::cuda::CUDAGuard guard(input.device());
-    const Prepared            prepared = prepare(group, input, mode, seq_splits, head_splits, out, /*borrowed=*/false);
+    const Prepared            prepared = prepare(group, input, mode, seq_splits, head_splits, out);
     const int                 ws       = static_cast<int>(group->world_size());
-    void* window = local_window(prepared, window_ptrs, window_numel, static_cast<int>(group->rank()), ws);
-    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size());
+    void*      window        = local_window(prepared, window_ptrs, window_numel, static_cast<int>(group->rank()), ws);
+    const bool out_is_window = prepared.output.data_ptr() == window;
+    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size(), out_is_window);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    transfer_on_stream(group, prepared, window_ptrs, flag_ptrs, /*barrier=*/true, stream);
-    copy_out(prepared, window, stream);
+    transfer_on_stream(group, prepared, window_ptrs, flag_ptrs, stream);
+    if (!out_is_window) {
+        copy_out(prepared, window, stream);
+    }
     return prepared.output;
-}
-
-// THE FAST PATH, spelled out at the call site: the result IS the window. No copy-out, and NOTHING
-// here enforces the rules that make that safe -- they are on the Python wrapper.
-at::Tensor all_to_all_single_4d_borrowed(const c10::intrusive_ptr<UlyssesGroup>&    group,
-                                         const at::Tensor&                          input,
-                                         int64_t                                    mode,
-                                         std::vector<int64_t>                       window_ptrs,
-                                         std::vector<int64_t>                       flag_ptrs,
-                                         int64_t                                    window_numel,
-                                         bool                                       barrier,
-                                         const std::optional<std::vector<int64_t>>& seq_splits,
-                                         const std::optional<std::vector<int64_t>>& head_splits)
-{
-    const at::cuda::CUDAGuard guard(input.device());
-    const Prepared prepared = prepare(group, input, mode, seq_splits, head_splits, std::nullopt, /*borrowed=*/true);
-    const int      ws       = static_cast<int>(group->world_size());
-    void*          window   = local_window(prepared, window_ptrs, window_numel, static_cast<int>(group->rank()), ws);
-    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size());
-
-    transfer_on_stream(group, prepared, window_ptrs, flag_ptrs, barrier, at::cuda::getCurrentCUDAStream());
-    // The Python side owns the memory; this is a no-op-deleter view of it.
-    return at::from_blob(
-        window, prepared.plan.output_shape, [](void*) {}, prepared.x.options());
 }
 
 // Benchmark-only: the copying call with CUDA events between its stages. `transfer` covers the peer
 // copies plus this rank's own share, which runs on the caller's stream underneath them and so
 // cannot be timed apart. Strictly ordered on one stream, so the stages sum to the whole call.
-std::tuple<at::Tensor, std::vector<double>>
-all_to_all_single_4d_timed(const c10::intrusive_ptr<UlyssesGroup>&    group,
-                           const at::Tensor&                          input,
-                           int64_t                                    mode,
-                           std::vector<int64_t>                       window_ptrs,
-                           std::vector<int64_t>                       flag_ptrs,
-                           int64_t                                    window_numel,
-                           const std::optional<std::vector<int64_t>>& seq_splits,
-                           const std::optional<std::vector<int64_t>>& head_splits)
+std::tuple<at::Tensor, std::vector<double>> all_to_all_4d_timed(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                                                                const at::Tensor&                          input,
+                                                                int64_t                                    mode,
+                                                                std::vector<int64_t>                       window_ptrs,
+                                                                std::vector<int64_t>                       flag_ptrs,
+                                                                int64_t                                    window_numel,
+                                                                const std::optional<std::vector<int64_t>>& seq_splits,
+                                                                const std::optional<std::vector<int64_t>>& head_splits)
 {
     const at::cuda::CUDAGuard guard(input.device());
-    const Prepared prepared = prepare(group, input, mode, seq_splits, head_splits, std::nullopt, /*borrowed=*/false);
-    const int      rank     = static_cast<int>(group->rank());
-    const int      ws       = static_cast<int>(group->world_size());
-    void*          window   = local_window(prepared, window_ptrs, window_numel, rank, ws);
-    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size());
+    const Prepared            prepared = prepare(group, input, mode, seq_splits, head_splits, std::nullopt);
+    const int                 rank     = static_cast<int>(group->rank());
+    const int                 ws       = static_cast<int>(group->world_size());
+    void*                     window   = local_window(prepared, window_ptrs, window_numel, rank, ws);
+    check_window_aliasing(prepared, window, window_numel * prepared.x.element_size(), /*out_is_window=*/false);
 
     const std::vector<uint64_t> peers(window_ptrs.begin(), window_ptrs.end());
     const std::vector<uint64_t> flags(flag_ptrs.begin(), flag_ptrs.end());
@@ -424,30 +396,21 @@ TORCH_LIBRARY(fast_ulysses, m)
         .def(torch::init<int64_t, int64_t>())
         .def("destroy", &ulysses::UlyssesGroup::destroy);
 
-    m.def("window_numel(int[] sizes, int mode, ScalarType dtype, int world_size, int rank, "
-          "int[]? seq_splits=None, int[]? head_splits=None) -> int");
-    m.impl("window_numel", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::window_numel);
+    m.def("plan_shapes(int[] sizes, int mode, ScalarType dtype, int world_size, int rank, "
+          "int[]? seq_splits=None, int[]? head_splits=None) -> (int, int[])");
+    m.impl("plan_shapes", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::plan_shapes);
 
-    // `out` is an optional preallocated destination. No `barrier` flag -- deferring the closing
-    // handshake would make the copy-out read the window before the peers' writes had landed.
-    m.def("all_to_all_single_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
+    // `out` is an optional preallocated destination; passing the window itself is the zero-copy
+    // path. The Python side is what knows which buffers are windows.
+    m.def("all_to_all_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[] window_ptrs, int[] flag_ptrs, int window_numel, "
           "int[]? seq_splits=None, int[]? head_splits=None, Tensor? out=None) -> Tensor");
-    m.impl("all_to_all_single_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_single_4d);
+    m.impl("all_to_all_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d);
 
-    m.def("all_to_all_single_4d_borrowed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
-          "Tensor input, int mode, int[] window_ptrs, int[] flag_ptrs, int window_numel, "
-          "bool barrier=True, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
-    m.impl("all_to_all_single_4d_borrowed",
-           c10::DispatchKey::CompositeExplicitAutograd,
-           &ulysses::all_to_all_single_4d_borrowed);
-
-    m.def("all_to_all_single_4d_timed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
+    m.def("all_to_all_4d_timed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[] window_ptrs, int[] flag_ptrs, int window_numel, "
           "int[]? seq_splits=None, int[]? head_splits=None) -> (Tensor, float[])");
-    m.impl("all_to_all_single_4d_timed",
-           c10::DispatchKey::CompositeExplicitAutograd,
-           &ulysses::all_to_all_single_4d_timed);
+    m.impl("all_to_all_4d_timed", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_timed);
 }
 
 // Python `import _C` needs PyInit__C; TORCH_LIBRARY already registered at dlopen time.
