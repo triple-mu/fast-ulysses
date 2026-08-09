@@ -3,6 +3,17 @@
 /// Error checking shared by every translation unit here.
 #include <c10/util/Exception.h>
 #include <cuda_runtime.h>
+#include <torch/version.h>
+
+// torch 2.10 is the floor, checked here because every translation unit that touches torch includes
+// this header. Below it the build fails in src/group.cc on a name lookup --
+// c10d::symmetric_memory::get_signal_pad_size() becomes a free TORCH_API function in 2.10, and the
+// handshake's placement inside the signal pad is computed from it -- which names neither torch nor
+// a version.
+static_assert(TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 10),
+              "fast-ulysses requires torch 2.10 or newer: the symmetric-memory signal pad size is "
+              "read through c10d::symmetric_memory::get_signal_pad_size(), a free function only "
+              "from 2.10 on. No version of this package builds against an older torch.");
 
 namespace ulysses {
 

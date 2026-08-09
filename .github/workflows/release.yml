@@ -230,6 +230,101 @@ jobs:
           files: release/*
           generate_release_notes: true
 
+  index:
+    # The PEP 503 index, published to the gh-pages branch. AFTER github-release, never beside
+    # it: every anchor points at a release asset, and an index published before the release
+    # exists answers 404 for as long as that job takes.
+    #
+    # Not a substitute for PyPI. PyPI carries the one wheel with no local version; this carries
+    # the 32 that have one, which PyPI rejects and which cannot be resolved from a flat list --
+    # 0.2.0+torch213cu130 is the highest 0.2.0 that exists, so a merged list hands it to
+    # everyone. tools/make_index.py's header has the whole argument.
+    #
+    # Pushing gh-pages does not publish it: Pages has to be pointed at the branch once per
+    # repository, and until it is, the branch exists, this job is green, and every --index-url
+    # https://<owner>.github.io/<repo>/whl/... in README.md and docs/install.md answers 404. The
+    # last step does it through the API rather than leaving it as a note nobody reads.
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # pushes the generated tree to gh-pages
+      pages: write # points Pages at that branch the first time; a no-op afterwards
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: collected
+
+      - name: Check out the published index, or start one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --depth 1: the branch is generated content and its history is of no use to this job.
+        # A missing branch is the first publish, not an error.
+        run: |
+          git init -q -b gh-pages site
+          git -C site remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C site config user.name "github-actions[bot]"
+          git -C site config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          if git -C site fetch --depth 1 origin gh-pages; then
+            git -C site reset -q --hard FETCH_HEAD
+          else
+            echo "gh-pages does not exist yet; this publish creates it"
+          fi
+
+      - name: Generate the index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # make_index.py merges into what is already there, which is what makes a v0.3.0 publish
+        # additive: v0.2.0's links keep pointing at v0.2.0's assets, so every version already
+        # written down in someone's requirements file keeps resolving.
+        run: |
+          # Where the tree is actually served, for the landing page's own URLs. The API knows,
+          # including a custom domain, which <owner>.github.io/<repo> would get wrong; it does
+          # not know it yet on the publish that creates the branch, hence the fallback.
+          site_url=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.html_url' 2>/dev/null || true)
+          python3 tools/make_index.py \
+            --out site \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            --site-url "${site_url:-https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}}" \
+            collected
+
+      - name: Publish
+        # No --force. A rejected push means another tag's release job pushed in between, and
+        # overwriting it would delete that release's links; re-running this job merges instead.
+        run: |
+          cd site
+          git add -A
+          if git diff --cached --quiet; then
+            echo "index unchanged"
+            exit 0
+          fi
+          git commit -q -m "index: ${GITHUB_REF_NAME}"
+          git push origin gh-pages
+
+      - name: Point Pages at the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The one failure the index cannot report about itself: a pushed branch that nothing
+        # serves. Idempotent, and it needs the branch to exist, so it runs after the push and
+        # not before the generator. If the token may not enable Pages, say which setting to
+        # click -- the release is already out by here, so failing costs nothing but is loud.
+        run: |
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pages" >/dev/null 2>&1; then
+            echo '{"source":{"branch":"gh-pages","path":"/"}}' \
+              | gh api -X POST "repos/${GITHUB_REPOSITORY}/pages" --input - || {
+                echo "FATAL: Pages is not enabled and this token could not enable it." >&2
+                echo "  Settings -> Pages -> Build and deployment -> Deploy from a branch" >&2
+                echo "                    -> gh-pages / (root)" >&2
+                echo "  Until then every --index-url in README.md and docs/install.md is a 404." >&2
+                exit 1
+              }
+          fi
+          # The first build after enabling takes about a minute; this prints where, not whether.
+          gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.html_url'
+
   pypi:
     needs: [verify, github-release]
     runs-on: ubuntu-latest

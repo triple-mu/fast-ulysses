@@ -82,9 +82,14 @@ jobs:
         #
         # test/test_distributed.py is not runnable on any GitHub-hosted runner (no GPU). It is
         # gated manually by tools/preflight_gpu.sh before a tag is pushed.
+        #
+        # test_wheel_matrix.py reads the workspace, not the installed package: it is the only
+        # check that the matrix `fast-ulysses wheel-url` prints from is the matrix release.yml
+        # builds. A drift there prints an install command for a wheel nobody ever built.
         run: |
           $PYBIN/pip install dist/*.whl
-          cd /tmp && $PYBIN/pytest "$GITHUB_WORKSPACE/test/test_plan.py" -q
+          cd /tmp && $PYBIN/pytest -q \
+            "$GITHUB_WORKSPACE/test/test_plan.py" "$GITHUB_WORKSPACE/test/test_wheel_matrix.py"
 
   matrix-smoke:
     # Weekly, or on demand. Same rows as release.yml's wheels matrix -- keep the two lists in
@@ -115,11 +120,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build and check the row
+        # No LOCAL_VERSION. check_wheel.py's assertion 11 parses the local version in the
+        # filename as torch<major><minor>cu<major><minor> and cross-checks it against the
+        # build's own facts, so any other label -- "weekly" was one -- fails every row here
+        # while saying nothing about the row. An empty one is the PyPI set's shape, which that
+        # assertion skips, and nothing is uploaded from this job anyway.
         run: |
           docker run --rm -v "$PWD:/io" -w /io \
             -e TORCH_VERSION=${{ matrix.torch }} \
             -e TORCH_INDEX=${{ matrix.index }} \
             -e CUDA_MAJOR=${{ matrix.cuda_major }} \
             -e PYTHONS=cp312 \
-            -e LOCAL_VERSION=weekly \
             pytorch/manylinux2_28-builder:${{ matrix.image }} bash tools/build_wheels.sh

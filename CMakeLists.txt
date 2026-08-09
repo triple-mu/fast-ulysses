@@ -4,11 +4,22 @@ cmake_minimum_required(VERSION 3.18)
 if (NOT DEFINED CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX} AND EXISTS /usr/local/cuda/bin/nvcc)
     set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
 endif ()
+# Snapshot the caller's request BEFORE project(). project(LANGUAGES CUDA) always leaves
+# CMAKE_CUDA_ARCHITECTURES defined -- it falls back to the compiler's own default, which is 52 --
+# so a test placed after it cannot tell "nothing was asked for" from "52 was asked for", and the
+# default below never applied to a bare `cmake -S . -B build`: that produced a .so holding
+# sm_52 alone, which no supported device can run. Left unset here on purpose, so project()'s
+# compiler check still compiles for the default arch: seeding it with the Blackwell entries would
+# make an old toolkit fail inside that check, with nvcc's own message, before the guard below can
+# name the toolkit and the way out.
+set(FAST_ULYSSES_ARCH_REQUESTED "${CMAKE_CUDA_ARCHITECTURES}")
 project(fast_ulysses LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
-if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+if ("${FAST_ULYSSES_ARCH_REQUESTED}" STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES "80;90;100;120")
+else ()
+    set(CMAKE_CUDA_ARCHITECTURES "${FAST_ULYSSES_ARCH_REQUESTED}")
 endif ()
 # Snapshot it HERE. find_package(Torch) below sets CMAKE_CUDA_ARCHITECTURES to OFF and drives the
 # arch selection from TORCH_CUDA_ARCH_LIST via its own -gencode flags instead, so anything read
@@ -24,6 +35,38 @@ if (NOT DEFINED ENV{TORCH_CUDA_ARCH_LIST})
     endforeach ()
     string(REPLACE ";" " " _arch_dotted "${_arch_dotted}")
     set(ENV{TORCH_CUDA_ARCH_LIST} "${_arch_dotted}")
+endif ()
+
+# ---- Is this toolkit new enough for the architectures that were asked for? ----
+# Only Blackwell forces a floor: CUDA 12.6 and below cannot emit sm_100/sm_120 and nvcc says so
+# with "unsupported gpu architecture 'compute_100'", which names neither the toolkit version nor
+# the way out. Gated on the list, because FAST_ULYSSES_CUDA_ARCH=80;90 on CUDA 12.4 builds and
+# runs -- docs/install.md states 12.8 as the supported floor, and this refuses only what nvcc
+# provably cannot emit. Runs before the torch discovery, so it costs nothing.
+#
+# CMAKE_CUDA_COMPILER_VERSION, not CUDAToolkit_VERSION: project(LANGUAGES CUDA) above already set
+# it, and it is by construction the version of the nvcc named in the message. Reading it needs no
+# find_package, so the guard cannot itself fail to resolve, and an unset version cannot make
+# VERSION_LESS compare an empty string and abort a good toolkit.
+set(_blackwell "")
+foreach (a IN LISTS FAST_ULYSSES_ARCH_LIST)
+    string(REGEX MATCH "^[0-9]+" _sm "${a}")  # 100a, 120-real -> 100, 120
+    if (_sm AND _sm GREATER_EQUAL 100)
+        list(APPEND _blackwell "sm_${_sm}")
+    endif ()
+endforeach ()
+if (_blackwell AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8)
+    string(REPLACE ";" ", " _blackwell "${_blackwell}")
+    message(FATAL_ERROR
+            "CUDA ${CMAKE_CUDA_COMPILER_VERSION} (nvcc: ${CMAKE_CUDA_COMPILER}) cannot compile "
+            "for ${_blackwell}: Blackwell needs CUDA 12.8 or newer, and any CUDA 13 also "
+            "qualifies.\n"
+            "If the GPU you will run on is Blackwell, a newer toolkit is the only fix -- a .so "
+            "without its arch loads and then fails at the first launch with 'no kernel image is "
+            "available for execution on the device'.\n"
+            "If it is not, drop the architectures this toolkit cannot emit:\n"
+            "    FAST_ULYSSES_CUDA_ARCH=\"80;90\" pip install -e . --no-build-isolation\n"
+            "Requested architectures: ${FAST_ULYSSES_ARCH_LIST}")
 endif ()
 
 # ccache: wrap CXX/CUDA compilers to cache objects and skip recompiling unchanged TUs (skipped if not installed)

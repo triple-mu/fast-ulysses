@@ -31,7 +31,7 @@ package-dir = { "" = "python" }
 packages = ["fast_ulysses"]
 
 [tool.setuptools.package-data]
-fast_ulysses = ["py.typed"]
+fast_ulysses = ["py.typed", "wheel_matrix.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

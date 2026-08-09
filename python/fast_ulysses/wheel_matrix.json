@@ -1,0 +1,16 @@
+{
+  "machine": "x86_64",
+  "platform_tag": "manylinux_2_28_x86_64",
+  "pythons": ["cp310", "cp311", "cp312", "cp313"],
+  "find_links": "https://github.com/triple-mu/fast-ulysses/releases/expanded_assets/v{version}",
+  "rows": [
+    {"torch": "2.10.0", "cuda": "12.8"},
+    {"torch": "2.10.0", "cuda": "13.0"},
+    {"torch": "2.11.0", "cuda": "12.8"},
+    {"torch": "2.11.0", "cuda": "13.0"},
+    {"torch": "2.12.1", "cuda": "12.9"},
+    {"torch": "2.12.1", "cuda": "13.0"},
+    {"torch": "2.13.0", "cuda": "12.9"},
+    {"torch": "2.13.0", "cuda": "13.0", "pypi": true}
+  ]
+}
