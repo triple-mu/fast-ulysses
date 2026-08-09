@@ -44,19 +44,19 @@ has moved.
 | transport | `src/transfer.cu` | Issues `plan.ops`. Remote peers serialised on ONE stream, this rank's own share on the caller's stream, joined with fresh per-call events. XOR-shift peer order. |
 | sync | `src/barrier.cu` | One-block spin kernel over `uint64 flags[ws]` + `uint64 epoch`, all inside the allocation's signal pad. |
 | op surface | `src/bindings.cc` | Validation, aliasing guard, barrier→transfer→barrier→(copy-out). The group object is **one CUDA stream** plus rank/world_size. |
-| memory + API | `python/fast_ulysses/group.py` | Windows, the handshake state, the async path. |
-| topology | `python/fast_ulysses/nvlink.py` | NVML link-type probing. |
+| memory | `src/group.cc` | Everything that survives a call: the symmetric windows and their handshake state, the plan cache, the staging buffers. |
+| topology | `src/nvlink.cc` | NVML link-type probing, through `dlopen`. |
+| API | `python/fast_ulysses/group.py` | What has no C++ equivalent: the process group's name, the comm stream, `AsyncCollectiveTensor`. 205 lines. |
 
-**Every address the C++ side touches arrives as an argument.** Windows are torch symmetric-memory
-tensors owned by Python; no communication library appears in C++ at all.
+**No communication library appears in C++ at all.** Windows are torch symmetric-memory tensors
+(`c10d::symmetric_memory`), and the only thing Python hands down is the process group's name.
 
 ### Things that are easy to get wrong
 
-- **The MemPool must be the group's own**, not torch's implicit one. `rendezvous` is collective, so
-  the allocation sequence has to be identical on every rank; an unrelated allocation from a shared
-  pool reorders it and one rank rendezvous-es while another does not. `use_on_oom=False,
-  no_split=True` match torch's own symmetric pool and are load-bearing (no_split keeps two windows
-  from sharing a signal pad).
+- **Allocate through `empty_strided_p2p` directly, never through a `MemPool`.** `rendezvous` is
+  collective, so the allocation sequence has to be identical on every rank. Nothing unrelated is
+  served from that entry point, so this group's sequence is every rank's sequence; a shared pool
+  would let an unrelated allocation reorder it and one rank would rendezvous while another did not.
 - **Handshake state is per window**, by construction — it lives in that allocation's signal pad.
   Two calls may share a window only when a stream orders them, which is why sync and async have
   separate internal windows.

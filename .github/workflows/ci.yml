@@ -32,8 +32,8 @@ jobs:
         with:
           python-version: "3.12"
       # .pre-commit-config.yaml is the single lint entry point. It already pins ruff and the
-      # exact clang-format release csrc/ is formatted with, so running either tool directly
-      # here would eventually disagree with what contributors get locally.
+      # exact clang-format release include/ and src/ are formatted with, so running either tool
+      # directly here would eventually disagree with what contributors get locally.
       - uses: pre-commit/action@v3.0.1
 
   build-and-test:

@@ -3,7 +3,7 @@ include CMakeLists.txt
 include .clang-format
 graft include
 graft src
-# setuptools already picks up test/test*.py on its own, which ships test_multigpu.py without
+# setuptools already picks up test/test*.py on its own, which ships test_distributed.py without
 # the test/distributed/ workers it launches as subprocesses. Take the whole tree instead.
 recursive-include test *.py
 # _build_meta.py is generated at build time and describes the machine that built it; shipping

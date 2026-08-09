@@ -7,9 +7,10 @@
 - sm80 / sm90 / sm100 / sm120, NVLink-joined
 - For a source build only: CMake ≥ 3.18 and `nvcc`. `ccache` is used when present.
 
-torch is the only runtime dependency. Windows come from `torch.distributed._symmetric_memory`,
-whose `get_mem_pool` / `get_mempool_allocator` arrive in torch 2.10 — that is where the floor comes
-from. CUDA 12.6 and below cannot emit `sm_100` / `sm_120`.
+torch is the only runtime dependency. Windows come from `c10d::symmetric_memory`, and the floor is
+`get_signal_pad_size()`, which becomes a free `TORCH_API` function in torch 2.10 — that is what the
+handshake's placement in the pad is computed from. `empty_strided_p2p` and `rendezvous` themselves
+go back further. CUDA 12.6 and below cannot emit `sm_100` / `sm_120`.
 
 ## Install
 

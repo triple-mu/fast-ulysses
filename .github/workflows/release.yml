@@ -16,9 +16,9 @@ defaults:
 jobs:
   guard:
     # Nothing downstream can catch a tag that disagrees with the version literal: every artifact
-    # takes its version from fast_ulysses/__init__.py, so they all agree with each other and none
-    # of them agrees with the tag. The release would be named v0.1.1 and would publish 0.1.0 --
-    # permanently, since PyPI never lets a version be replaced. So check it before anything runs.
+    # takes its version from ./VERSION, so they all agree with each other and none of them agrees
+    # with the tag. The release would be named v0.2.1 and would publish 0.2.0 -- permanently,
+    # since PyPI never lets a version be replaced. So check it before anything runs.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,9 +95,10 @@ jobs:
       matrix:
         # (torch, index, image, cuda major, local version tag). The image's CUDA major has to
         # match the torch build's, or the wheel links the wrong libcudart and is dead on
-        # arrival. torch 2.9 is absent on purpose: get_mem_pool and get_mempool_allocator, which
-        # the windows are built on, arrive in 2.10. CUDA 12.6 is absent for a different reason: it
-        # predates Blackwell and cannot compile sm_100/sm_120.
+        # arrival. torch 2.9 is absent on purpose: c10d::symmetric_memory::get_signal_pad_size(),
+        # which the handshake's placement is computed from, becomes a free function in 2.10. CUDA
+        # 12.6 is absent for a different reason: it predates Blackwell and cannot compile
+        # sm_100/sm_120.
         include:
           - {torch: "2.10.0", index: "https://download.pytorch.org/whl/cu128", image: "cuda12.8", cuda_major: "12", tag: "torch210cu128"}
           - {torch: "2.10.0", index: "https://download.pytorch.org/whl/cu130", image: "cuda13.0", cuda_major: "13", tag: "torch210cu130"}

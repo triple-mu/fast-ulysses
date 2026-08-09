@@ -18,7 +18,8 @@ src/                    a2a_plan.cc (pure host addressing), transfer.cu, barrier
                         group.cc (windows, plans, staging), nvlink.cc, bindings.cc
 python/fast_ulysses/    group.py (the API surface), cli.py, _diagnose.py
 test/                   test_plan.py (host-only); distributed/ holds the torchrun workers
-benchmark/bench_a2a.py  stages, GEMM overlap, padding cost
+benchmark/              bench_a2a.py --mode {stages,zerocopy,sweep,link,overlap,padding};
+                        collect.sh runs all of them with the environment recorded next to them
 tools/                  GPU-exclusivity wrapper, wheel build and gate, release preflight
 docs/
 ```

@@ -22,7 +22,14 @@ Violating these hangs the group. Nothing raises and nothing times out.
 | `require_nvlink` | Refuse a group whose GPUs are not all NVLink-joined. `False` is for measuring that case, not for running in it. |
 
 The NVLink check reads the link type from NVML. Both a direct GPU-to-GPU link and two GPUs on one
-NVSwitch fabric count. When NVML cannot answer, the group is built and nothing is claimed.
+NVSwitch fabric count. When NVML cannot answer, the group is built and nothing is claimed. It is
+also skipped when two ranks share a GPU, which is not a topology it can say anything about.
+
+## `fast_ulysses.nvlink_matrix(devices) -> dict[(int, int), bool] | None`
+
+The same probe, on its own: for a list of CUDA device indices, which ordered pairs are NVLink-joined.
+`None` when NVML cannot answer at all. Not collective, and it takes no group — `fast-ulysses doctor`
+prints it as a matrix.
 
 ## `all_to_all_4d(x, *, mode=0, out=None, seq_splits=None, head_splits=None) -> Tensor`
 
