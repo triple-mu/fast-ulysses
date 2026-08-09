@@ -12,6 +12,7 @@ except ImportError as exc:  # ld.so names a symbol; _diagnose names the cause
 # Written by setup.py from ./VERSION; present whenever _C is, since the same build emits both.
 from ._build_meta import VERSION as __version__  # noqa: F401,E402
 from .group import CompletedHandle, UlyssesGroup  # noqa: E402
-from .nvlink import nvlink_matrix  # noqa: E402
+
+nvlink_matrix = _C.nvlink_matrix
 
 __all__ = ["UlyssesGroup", "CompletedHandle", "nvlink_matrix"]

@@ -139,19 +139,17 @@ def run_stages(group, pg, rank, ws, args) -> None:
     for label, img, heads, d, txt in SHAPES:
         s_total = img + txt
         s_total -= s_total % ws  # the padded shard the baseline needs
-        x = torch.randn(
-            (args.batch, s_total // ws, heads, d), dtype=torch.bfloat16, device=dev
-        )
+        x = torch.randn((args.batch, s_total // ws, heads, d), dtype=torch.bfloat16, device=dev)
         mb = x.numel() * x.element_size() / 1e6
         flat = x.numel()
         send = torch.empty(flat, dtype=torch.bfloat16, device=dev)
         recv = torch.empty(flat, dtype=torch.bfloat16, device=dev)
 
         base = median_of(lambda: baseline_stages(x, pg, ws, recv), args.iters, args.warmup)
-        ours = median_of(
-            lambda: list(group._timed(x, mode=0)[1].values()), args.iters, args.warmup
+        ours = median_of(lambda: list(group._timed(x, mode=0)[1].values()), args.iters, args.warmup)
+        raw = median_ms(
+            lambda: dist.all_to_all_single(recv, send, group=pg), args.iters, args.warmup
         )
-        raw = median_ms(lambda: dist.all_to_all_single(recv, send, group=pg), args.iters, args.warmup)
         submit = submit_us(lambda: group.all_to_all_4d(x, mode=0), args.iters, args.warmup)
 
         base_total, ours_total = sum(base), sum(ours)
@@ -241,9 +239,7 @@ def run_padding(group, pg, rank, ws, args) -> None:
         )
         ours_pad = median_ms(lambda: group.all_to_all_4d(xp, mode=0), args.iters, args.warmup)
         ours_unpad = median_ms(
-            lambda: group.all_to_all_4d(
-                xu, mode=0, seq_splits=uneven, head_splits=head_splits
-            ),
+            lambda: group.all_to_all_4d(xu, mode=0, seq_splits=uneven, head_splits=head_splits),
             args.iters,
             args.warmup,
         )

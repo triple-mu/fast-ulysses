@@ -50,7 +50,7 @@ def _doctor() -> int:
         mark = "" if arch in built else "  <-- NOT IN THIS BUILD"
         print(f"  [{i}] {p.name}  sm_{arch}  {p.total_memory >> 30} GiB{mark}")
 
-    matrix = pkg.nvlink_matrix(list(range(n)))
+    matrix = pkg._C.nvlink_matrix(list(range(n)))
     if matrix is None:
         print("\nNVLink: NVML could not report the link topology on this machine.")
         print("UlyssesGroup will build anyway; nothing here can say whether it should.")
