@@ -25,12 +25,15 @@ FAST_ULYSSES_TEST_NPROC=3 pytest -m multigpu     # force an odd world size
 
 # Workers run directly — this is the debugging path:
 torchrun --nproc_per_node=8 test/distributed/correctness.py
+torchrun --nproc_per_node=8 test/distributed/validation.py
 torchrun --nproc_per_node=8 test/distributed/ce_ordering.py
+torchrun --nproc_per_node=8 test/distributed/cudagraph.py
 
 fast-ulysses doctor               # build facts, devices, NVLink matrix
 
 # Benchmarks MUST go through exclusive.sh; a CONTENDED number is not a number.
-./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py [--overlap|--padding]
+./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py \
+    --mode {stages,overlap,padding,zerocopy,sweep,link}
 ```
 
 `build/` is a persistent CMake tree, so rebuilds are incremental. `rm -rf build` only when the repo
@@ -73,29 +76,48 @@ has moved.
 
 ### Tests
 
-Two workers, both bit-exact-or-fail. `ce_ordering.py` is the only adversarial one and is worth
-exactly as much as the timing it builds — its predecessor went blind for several commits when an
+Four workers. `correctness.py` is bit-exact-or-fail on every path including the backward;
+`validation.py` covers the rejection paths and that they happen before the first handshake;
+`cudagraph.py` checks a captured replay and reports an uncaptured run as having checked NOTHING.
+`ce_ordering.py` is the adversarial one and is worth exactly as much as the timing it builds — its predecessor went blind for several commits when an
 opening barrier was added. Re-read its docstring after any barrier or ordering change; a run whose
 armed control tears nothing is a **blind** run, not a passing one.
 
 ### Documentation
 
 `docs/*.md` are English only, lowercase filenames. Style: state the function, the number and the
-limit. No rhetorical build-ups, no personification. `docs/benchmark.md` is deliberately a skeleton
-with `pending` in the number cells — the v0.2 measurements are taken in one pass when the maintainer
-schedules the machines.
+limit. No rhetorical build-ups, no personification. `docs/benchmark.md` carries the v0.2 measurements; only the
+H100 row is still `pending`.
 
 ## Known limits
 
 - `world_size ≤ 8` is structural: `BarPeers::p[8]` in `src/barrier.cu`.
 - Single node, NVLink only. The constructor refuses a non-NVLink group; over PCIe across a socket
   `torch.distributed` is genuinely faster and the reason is in `docs/design.md`.
-- No backward, no meta impl — so no autograd and no `torch.compile` tracing.
+- No `torch.compile` tracing: the group is a torchbind object with no registered fake class, so
+  Dynamo graph-breaks on it. Backward and `FakeTensor` shape propagation DO work.
+- The async form is not differentiable, by construction — see `docs/api.md`.
 
 ## Test machines
 
-`hyper00` / `hyper01` (8×H200) and `novita-h100` (8×H100), all in containers named
-`sglang-diffusion-triplemu*`. Sync with rsync to `/tmp/fu-v02` then `docker cp` into
-`/workspace/fu-v02` (the container has its own `/tmp`). **All of them need `NCCL_NVLS_ENABLE=0`** —
-Fabric Manager cannot bind NVLink SHARP. Check `nvidia-smi` before benchmarking: these boxes are
-shared and occupancy changes within minutes.
+The **ComputeLab Slurm cluster** (`ssh tailscale-computelab-sc`), through
+`/home/sonlin/scratch/workspace/nvidia/scripts/clab.py`, which wraps salloc + pyxis/enroot:
+
+```bash
+./clab.py -p b200x4 alloc      # or h200x8 / pro6000x8; b200 is capped at 4h by its partitions
+./clab.py -p b200x4 exec -- bash /workspace/<script>.sh
+./clab.py -p b200x4 cancel     # NOT optional: an allocation bills until it is released
+```
+
+`tools/sync_to_cluster.sh <host> /home/sonlin/scratch/workspace/nvidia/fu-v02` puts the tree where
+the container sees it as `/workspace/fu-v02`. Four things bite:
+
+- the login shell is **csh**, so `2>&1` in a remote command gives `Ambiguous output redirect` — wrap
+  remote commands in `bash -lc`;
+- the ssh host sets `RemoteCommand`, so any non-interactive use needs `-o RemoteCommand=none`
+  (`sync_to_cluster.sh` already passes it);
+- the container's python is externally managed: `pip install -e .` needs `--break-system-packages`;
+- `sync_to_cluster.sh` runs `rsync --delete`, so scratch scripts belong OUTSIDE the synced tree.
+
+**`NCCL_NVLS_ENABLE=0` everywhere** — Fabric Manager cannot bind NVLink SHARP. A benchmark still
+has to go through `tools/exclusive.sh`; a 4-GPU allocation on an 8-GPU node has neighbours.

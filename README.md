@@ -92,9 +92,14 @@ this way, and what it rests on that is not guaranteed: [docs/design.md](docs/des
 - **NVLink, one node, `world_size` in [1, 8]**, including odd sizes. Over PCIe — especially across
   a CPU socket — `torch.distributed` is faster, because it routes around the link and this
   transport always writes peer memory directly. The constructor refuses such a group.
-- `float16` / `bfloat16`, and `d * elem_size` must be 16-byte aligned.
-- Forward only: no backward and no meta implementation, so no autograd and no `torch.compile`
-  tracing.
+- `float16` / `bfloat16` / `float32` / `float8_e4m3fn` / `float8_e5m2` / `int8` / `uint8`, and
+  `d * elem_size` must be 16-byte aligned — so `d % 8` at bfloat16, `d % 16` at float8.
+- Differentiable, and it propagates shapes under `FakeTensor`. Not traceable by `torch.compile`:
+  the group is a torchbind object with no registered fake class, so Dynamo graph-breaks on it.
+- The **async** form is not differentiable and says so: its `AsyncCollectiveTensor` is a leaf, so a
+  gradient would be dropped silently. Use `all_to_all_4d` when you need one.
+- CUDA-graph capture covers the sync call on an already-warmed shape; see
+  [docs/design.md](docs/design.md).
 
 ## Install
 

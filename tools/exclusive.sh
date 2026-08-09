@@ -8,7 +8,7 @@
 # benchmark in a way that is invisible in the output.
 #
 # Usage:
-#   ./tools/exclusive.sh 4,5,6,7 -- torchrun --nproc_per_node=4 benchmark/bench_stages.py
+#   ./tools/exclusive.sh 4,5,6,7 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py --mode stages
 #   WAIT_SECS=1800 ./tools/exclusive.sh 4,5,6,7 -- <cmd>     # wait up to 30 min for idle
 set -uo pipefail
 

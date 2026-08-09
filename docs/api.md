@@ -10,6 +10,11 @@ Violating these hangs the group. Nothing raises and nothing times out.
 - **Every rank must issue the same sequence of shapes.** A window is allocated on the first call
   that needs one, and that allocation is collective.
 - **Construction, `empty_output()` and `destroy()` are collective** over `process_group`.
+- **Every rank must issue the same sequence of dtypes**, for the same reason as shapes: a window is
+  allocated per `(role, dtype)`.
+- **With autograd, every rank's engine must reach the backward node in the same order.** In
+  sequence parallelism it does, because every rank runs the same graph — but it is a new way to
+  hang, and the graph holds the group alive, so a graph replayed after `destroy()` raises.
 - **One buffer, one call at a time.** A call overwrites the buffer it writes into, so two
   concurrent calls need two `empty_output()` buffers.
 
@@ -38,8 +43,20 @@ prints it as a matrix.
 | 0 — scatter heads, gather sequence | `(b, s_local, n_global, d)` | `(b, s_global, n_local, d)` |
 | 1 — the inverse | `(b, s_global, n_local, d)` | `(b, s_local, n_global, d)` |
 
-`x` is 4D CUDA `float16`/`bfloat16` with `d * elem_size` 16-byte aligned; `.contiguous()` is
-applied internally.
+`x` is 4D CUDA, one of `float16` / `bfloat16` / `float32` / `float8_e4m3fn` / `float8_e5m2` /
+`int8` / `uint8`, with `d * elem_size` 16-byte aligned; `.contiguous()` is applied internally.
+Note the alignment rule tightens as the element shrinks: `d % 8` at float16, `d % 4` at float32,
+`d % 16` at float8 and int8. Nothing below the check is dtype-specific — the transport moves bytes.
+
+**Differentiable.** The vjp of a permutation is the inverse permutation, so the backward is the
+other `mode` with the **same** splits. That last part is worth reading twice: `all_to_all_single`'s
+backward swaps its split sizes, because those describe one call's send and receive counts;
+`seq_splits` / `head_splits` describe the group's geometry, which holds whichever way the data
+moves. Backward always takes the copying path, never `out=`.
+
+A **meta** kernel propagates shapes under `FakeTensor` and AOTAutograd. `torch.compile` over a
+module that holds an `UlyssesGroup` still graph-breaks: the group is a torchbind object with no
+registered fake class. `empty_output()` refuses to be traced at all, with a message saying why.
 
 **`out`** decides the speed:
 
@@ -59,15 +76,21 @@ lets shards differ arbitrarily, which is what lets a caller drop sequence paddin
 
 `RuntimeError`, from validation that runs **before the call's first barrier**, so a rejected
 argument leaves no rank waiting on peers that did not reject it: `x` not 4D or not CUDA; dtype not
-`float16`/`bfloat16`; `d * elem_size` not 16 B-aligned; `mode` not 0 or 1; `world_size` outside
+not in the dtype list above; `d * elem_size` not 16 B-aligned; `mode` not 0 or 1; `world_size` outside
 `[1, 8]`; one of the splits without the other, or splits contradicting `x`'s shape; no splits and
 the scattered axis does not divide; `out` not contiguous CUDA, or its dtype or shape not the
 output's; `x` overlapping the window, or `out` partially overlapping it.
 
 ## `all_to_all_4d_async(x, *, mode=0, out=None, seq_splits=None, head_splits=None)`
 
-The same call on the group's high-priority comm stream, returning immediately. The result is an
-`AsyncCollectiveTensor`: `.wait()` returns the plain tensor, and so does the **first use by any
+The same call on the group's high-priority comm stream, returning immediately.
+
+**Not differentiable, and it refuses rather than pretending.** An `AsyncCollectiveTensor` is built
+with `requires_grad` on the wrapper, which makes it a leaf: autograd runs above the subclass and
+never sees the wrapped tensor's history, so a `backward()` through it would run to completion and
+leave `x.grad` as `None`. A grad-requiring input raises instead. Use `all_to_all_4d`.
+
+The result is an `AsyncCollectiveTensor`: `.wait()` returns the plain tensor, and so does the **first use by any
 aten op** — either way the caller's stream waits on the comm stream's completion event GPU-side,
 and the host does not block. A **view op** does not wait; it re-wraps.
 
