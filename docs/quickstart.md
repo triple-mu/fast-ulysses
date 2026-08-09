@@ -6,12 +6,14 @@ The two calls bracket attention: mode 0 trades the sequence shard for a head sha
 it back.
 
 ```python
+import os
+
 import torch
 import torch.distributed as dist
 from fast_ulysses import UlyssesGroup
 
 dist.init_process_group("nccl")
-torch.cuda.set_device(dist.get_rank())
+torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 ws = dist.get_world_size()
 
 group = UlyssesGroup()          # collective; refuses a group that is not NVLink-joined

@@ -47,15 +47,17 @@ Every number was taken twice on different nodes; full tables, per-stage timings 
 
 ## Quick start
 
-`torchrun --nproc_per_node=8 example.py`:
+Save this as `example.py` and run `torchrun --nproc_per_node=8 example.py`:
 
 ```python
+import os
+
 import torch
 import torch.distributed as dist
 from fast_ulysses import UlyssesGroup
 
 dist.init_process_group("nccl")
-torch.cuda.set_device(dist.get_rank())
+torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 group = UlyssesGroup()
 
 b, s_local, heads, d = 1, 4096, 8, 128
@@ -75,10 +77,10 @@ Every rank must issue the same sequence of shapes. More: [docs/quickstart.md](do
 
 | Entry point | Purpose |
 | --- | --- |
-| `UlyssesGroup(process_group=None, device=None, require_nvlink=True)` | Collective. Refuses a group whose GPUs are not NVLink-joined. |
-| `group.all_to_all_4d(x, mode=0, out=None, seq_splits=None, head_splits=None)` | The collective. Returns a tensor the caller owns. |
-| `group.all_to_all_4d_async(...)` | The same, on a comm stream, returning an `AsyncCollectiveTensor`. |
-| `group.empty_output(x, mode=0, ...)` | A symmetric buffer to pass as `out=`, which removes the copy-out. |
+| `UlyssesGroup(process_group=None, device=None, *, require_nvlink=True)` | Collective. Refuses a group whose GPUs are not NVLink-joined. |
+| `group.all_to_all_4d(x, *, mode=0, out=None, seq_splits=None, head_splits=None)` | The collective. Returns a tensor the caller owns. |
+| `group.all_to_all_4d_async(x, *, ...)` | The same, on a comm stream, returning an `AsyncCollectiveTensor`. |
+| `group.empty_output(x, *, mode=0, ...)` | A symmetric buffer to pass as `out=`, which removes the copy-out. |
 | `group.destroy()` | Release the windows. Collective. |
 | `fast-ulysses doctor` | Build, devices, NVLink matrix. |
 
@@ -111,7 +113,8 @@ Wheels for other torch versions, and what to do when the import fails:
 ## Testing
 
 ```bash
-pytest                                                     # auto-skips below 2 GPUs
+pytest                  # the host-only plan tests always run; the GPU workers skip below 2 GPUs
+pytest -m "not multigpu"                                   # host-only, no GPU needed
 torchrun --nproc_per_node=8 test/distributed/correctness.py
 ```
 
