@@ -56,6 +56,18 @@ public:
         return device_index_;
     }
 
+    /// @brief Throw if destroy() has already run.
+    ///
+    /// Call this BEFORE the call's first barrier. The zero-copy path reaches neither window() nor
+    /// make_output(), so without an explicit check a destroyed group would run the whole collective
+    /// and rebuild the transfer stream it had just torn down.
+    void check_alive() const;
+
+    /// @brief Drop the make_output() records whose buffer the caller has released, so the symmetric
+    /// allocation goes back to the allocator. Never call this while a Window& taken from owned_ is
+    /// still live -- it invalidates them.
+    void prune_owned();
+
     /// @brief The plan for this call, built once per distinct (shape, mode, dtype, splits).
     ///
     /// build_plan allocates several vectors, which is a few microseconds of host time on every
@@ -82,7 +94,11 @@ public:
     const at::Tensor& stage(const at::Tensor& x, c10::cuda::CUDAStream caller, cudaStream_t comm);
 
     /// @brief Record, on `comm`, that the last staged buffer may be overwritten again.
-    void release_staging(cudaStream_t comm);
+    ///
+    /// noexcept because it runs from a scope guard that must also fire while an exception from the
+    /// transfer is propagating. Unchecked for the same reason, and it costs nothing: a checked
+    /// record that failed would leave exactly the state an unchecked one does.
+    void release_staging(cudaStream_t comm) noexcept;
 
     cudaStream_t xfer_stream();
 
@@ -92,19 +108,18 @@ public:
 
 private:
     struct PlanKey {
-        std::vector<int64_t> sizes, seq, head;
-        int64_t              mode;
-        at::ScalarType       dtype;
-        bool                 operator<(const PlanKey& o) const;
+        std::vector<int64_t> sizes;
+        // optional, not vector: an absent split list and an EMPTY one are different calls -- the
+        // first is the even special case and the second is an error -- and as bare vectors they
+        // are the same key, so the empty one would hit the even plan and skip its own rejection.
+        std::optional<std::vector<int64_t>> seq, head;
+        int64_t                             mode;
+        at::ScalarType                      dtype;
+        bool                                operator<(const PlanKey& o) const;
     };
 
     /// Allocate `numel` elements of symmetric memory, rendezvous, and clear the handshake region.
     Window allocate(int64_t numel, at::ScalarType dtype);
-
-    /// Drop the make_output() records whose buffer the caller has released. Without this the
-    /// group would keep every buffer it ever handed out alive, which contradicts the contract
-    /// that the caller owns them.
-    void prune_owned();
 
     std::string  group_name_;
     int          rank_, world_size_, device_index_;

@@ -148,6 +148,11 @@ UlyssesGroup::~UlyssesGroup()
     destroy();
 }
 
+void UlyssesGroup::check_alive() const
+{
+    TORCH_CHECK(!destroyed_, "this UlyssesGroup has been destroyed");
+}
+
 const A2APlan& UlyssesGroup::plan(at::IntArrayRef                            sizes,
                                   int64_t                                    mode,
                                   at::ScalarType                             dtype,
@@ -158,12 +163,10 @@ const A2APlan& UlyssesGroup::plan(at::IntArrayRef                            siz
     key.sizes = sizes.vec();
     key.mode  = mode;
     key.dtype = dtype;
-    if (seq_splits.has_value()) {
-        key.seq = *seq_splits;
-    }
-    if (head_splits.has_value()) {
-        key.head = *head_splits;
-    }
+    // Kept optional, so "no splits" and "empty splits" are distinct keys. Collapsing them would
+    // let an even-split call warm the cache for a later empty-split one, which make_dims rejects.
+    key.seq  = seq_splits;
+    key.head = head_splits;
 
     auto it = plans_.find(key);
     if (it != plans_.end()) {
@@ -240,7 +243,7 @@ Window UlyssesGroup::allocate(int64_t numel, at::ScalarType dtype)
 
 const Window& UlyssesGroup::window(WindowRole role, at::ScalarType dtype, int64_t numel)
 {
-    TORCH_CHECK(!destroyed_, "this UlyssesGroup has been destroyed");
+    check_alive();
     const auto key = std::make_pair(static_cast<int64_t>(role), dtype);
     auto       it  = windows_.find(key);
     if (it != windows_.end() && it->second.numel >= numel) {
@@ -254,7 +257,7 @@ const Window& UlyssesGroup::window(WindowRole role, at::ScalarType dtype, int64_
 
 at::Tensor UlyssesGroup::make_output(at::IntArrayRef shape, at::ScalarType dtype, int64_t numel)
 {
-    TORCH_CHECK(!destroyed_, "this UlyssesGroup has been destroyed");
+    check_alive();
     prune_owned();  // before allocating, so a released buffer's memory can be reused right here
     Window     win = allocate(numel, dtype);
     at::Tensor out = win.tensor.narrow(0, 0, c10::multiply_integers(shape)).view(shape);
@@ -289,10 +292,17 @@ const at::Tensor& UlyssesGroup::stage(const at::Tensor& x, c10::cuda::CUDAStream
     // there and the comm stream sees only the staged copy.
     const c10::cuda::CUDAStreamGuard guard(caller);
     if (!s.tensor.defined()) {
+        // Both built into locals and committed together, so a throw from either leaves the entry
+        // untouched and the next call retries it. A half-built entry -- tensor defined, release
+        // still null -- would take the else branch below forever and wait on a null event.
+        //
         // at::empty, not empty_like: empty_like would copy a strided input's layout, and the
         // transport reads the staged buffer as dense.
-        s.tensor = at::empty(x.sizes(), x.options());
-        ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&s.release, cudaEventDisableTiming));
+        at::Tensor  staged  = at::empty(x.sizes(), x.options());
+        cudaEvent_t release = nullptr;
+        ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&release, cudaEventDisableTiming));
+        s.tensor  = std::move(staged);
+        s.release = release;
     }
     else {
         // Wait GPU-side for the comm stream to have finished reading the previous contents.
@@ -302,20 +312,20 @@ const at::Tensor& UlyssesGroup::stage(const at::Tensor& x, c10::cuda::CUDAStream
     // The comm stream must not read the staged copy before that copy has run, and the ready event
     // trails everything already submitted on the caller's stream -- including any earlier consumer
     // of this same buffer.
-    cudaEvent_t ready;
-    ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    const Event ready(cudaEventDisableTiming);
     ULYSSES_CUDA_CHECK(cudaEventRecord(ready, caller));
     ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(comm, ready, 0));
-    ULYSSES_CUDA_CHECK(cudaEventDestroy(ready));
 
     last_staged_ = &s;
     return s.tensor;
 }
 
-void UlyssesGroup::release_staging(cudaStream_t comm)
+void UlyssesGroup::release_staging(cudaStream_t comm) noexcept
 {
     if (last_staged_ != nullptr) {
-        ULYSSES_CUDA_CHECK(cudaEventRecord(last_staged_->release, comm));
+        // See the header: unchecked because this also runs while an exception from the transfer is
+        // propagating, and because a checked record that failed would leave the same state.
+        cudaEventRecord(last_staged_->release, comm);
         last_staged_ = nullptr;
     }
 }

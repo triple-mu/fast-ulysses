@@ -53,6 +53,14 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
              WindowRole                                 role)
 {
     Call call;
+    // Here rather than deeper in: window() and make_output() also check, but the zero-copy path
+    // reaches neither, and by the time anything else would notice the opening barrier has already
+    // been issued -- so the rank that noticed would be waiting on peers instead of throwing.
+    group->check_alive();
+    // Released buffers go back to the allocator here, before this call takes any Window& out of
+    // owned_. make_output() is the only other place that can prune, so a caller who takes one
+    // buffer from empty_output() and drops it would otherwise pin it until destroy().
+    group->prune_owned();
     TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
     // Per-tensor, so it stays out of the plan cache key. The windows live on one device and the
     // barrier kernel dereferences their flag pointers; a tensor from another device would launch
@@ -116,6 +124,20 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
     }
     return call;
 }
+
+// Records the staging release on scope exit, INCLUDING when the transfer throws. Without it a
+// throw after the copies were issued leaves the release event unrecorded, and the next call for
+// that shape overwrites the staging buffer while the comm stream is still reading it -- silently,
+// because waiting on an unrecorded event succeeds and does nothing.
+struct StagingRelease {
+    UlyssesGroup* group;
+    cudaStream_t  comm;
+
+    ~StagingRelease()
+    {
+        group->release_staging(comm);  // noexcept; see the header
+    }
+};
 
 // Barrier, transfer, barrier: everything the call does to the window, ordered on `stream`.
 void transfer_on_stream(const c10::intrusive_ptr<UlyssesGroup>& group, const Call& call, cudaStream_t stream)
@@ -206,10 +228,9 @@ at::Tensor all_to_all_4d_staged(const c10::intrusive_ptr<UlyssesGroup>&    group
     // record_stream would instead pin every freed input until the comm stream caught up. The
     // staging copy also absorbs a strided input, which is why nothing calls contiguous() here:
     // doing so would launch that copy on the comm stream, which is exactly what this avoids.
-    const at::Tensor& staged = group->stage(input, caller, comm);
-    at::Tensor        result = run(group, staged, mode, seq_splits, head_splits, out, kAsyncWindow, comm);
-    group->release_staging(comm);
-    return result;
+    const at::Tensor&    staged = group->stage(input, caller, comm);
+    const StagingRelease release{group.get(), comm};
+    return run(group, staged, mode, seq_splits, head_splits, out, kAsyncWindow, comm);
 }
 
 // A buffer shaped like this call's output, in symmetric memory, for the caller to pass back as
@@ -241,10 +262,8 @@ std::tuple<at::Tensor, std::vector<double>> all_to_all_4d_timed(const c10::intru
     const int                 rank   = static_cast<int>(group->rank());
     cudaStream_t              stream = at::cuda::getCurrentCUDAStream();
 
-    cudaEvent_t marks[5];
-    for (auto& ev : marks) {
-        ULYSSES_CUDA_CHECK(cudaEventCreate(&ev));
-    }
+    // Default flags, not cudaEventDisableTiming: cudaEventElapsedTime below needs the timestamps.
+    const Event marks[5];
     ULYSSES_CUDA_CHECK(cudaEventRecord(marks[0], stream));
     fast_barrier(stream, call.win->flag_ptrs, rank);
     ULYSSES_CUDA_CHECK(cudaEventRecord(marks[1], stream));
@@ -261,9 +280,6 @@ std::tuple<at::Tensor, std::vector<double>> all_to_all_4d_timed(const c10::intru
         float ms = 0.0F;
         ULYSSES_CUDA_CHECK(cudaEventElapsedTime(&ms, marks[i], marks[i + 1]));
         stages[i] = static_cast<double>(ms);
-    }
-    for (auto& ev : marks) {
-        ULYSSES_CUDA_CHECK(cudaEventDestroy(ev));
     }
     return {call.output, stages};
 }

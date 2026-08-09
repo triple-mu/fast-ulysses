@@ -43,14 +43,15 @@ class UlyssesGroup:
     def __init__(
         self,
         process_group: dist.ProcessGroup | None = None,
-        device: torch.device | None = None,
+        device: torch.device | str | int | None = None,
         *,
         require_nvlink: bool = True,
     ) -> None:
         """
         Args:
             process_group: the group this collective runs over; ``None`` uses ``dist.group.WORLD``.
-            device: this rank's CUDA device; ``None`` uses the current device.
+            device: this rank's CUDA device, as anything ``torch.device`` accepts; ``None`` and a
+                device with no index both use the current device.
             require_nvlink: refuse a group whose GPUs are not all NVLink-joined. ``False`` is for
                 measuring that case, not for running in it.
         """
@@ -58,7 +59,13 @@ class UlyssesGroup:
         self.pg = pg
         self.rank = dist.get_rank(pg)
         self.world_size = dist.get_world_size(pg)
-        if device is None:
+        # Normalised, because everything below indexes `device.index`: a bare "cuda:0" string has
+        # no .index attribute, and torch.device("cuda") has one that is None. Both used to fail
+        # several lines later, on a message about neither the device nor this constructor.
+        device = torch.device("cuda" if device is None else device)
+        if device.type != "cuda":
+            raise ValueError(f"device must be a CUDA device, got {device}")
+        if device.index is None:
             device = torch.device("cuda", torch.cuda.current_device())
         self.device = device
         torch.cuda.set_device(device)

@@ -137,11 +137,39 @@ def main() -> None:
         lambda: group.all_to_all_4d(window.view(2, 16, 4 * ws, 128), mode=0, out=window),
     )
 
+    # --- the plan cache must not answer for a call it never saw ------------------------------
+    # An even-split call and an EMPTY-split one differ only in whether the lists are present. Held
+    # as bare vectors the two keys were identical, so the second inherited the first's plan instead
+    # of its own rejection. Warming the cache first is what makes this check mean anything.
+    group.all_to_all_4d(good, mode=0)
+    check.raises(
+        "empty split lists, after an even-split call cached its plan",
+        "seq_splits has 0 entries",
+        lambda: group.all_to_all_4d(good, mode=0, seq_splits=[], head_splits=[]),
+    )
+
+    # --- a destroyed group --------------------------------------------------------------------
+    # `out` from empty_output() takes the zero-copy path, which reaches neither window() nor
+    # make_output() -- the only two places that used to check. Without a check in prepare() this
+    # ran the entire collective on a destroyed group and rebuilt the transfer stream it had just
+    # torn down, leaking it. Held from before destroy(), since empty_output() checks too.
+    dead_out = group.empty_output(good, mode=0)
+    group.destroy()
+    check.raises(
+        "a zero-copy call on a destroyed group",
+        "has been destroyed",
+        lambda: group.all_to_all_4d(good, mode=0, out=dead_out),
+    )
+    check.raises(
+        "a copying call on a destroyed group",
+        "has been destroyed",
+        lambda: group.all_to_all_4d(good, mode=0),
+    )
+
     verdict = torch.tensor([check.failed], device=dev)
     dist.all_reduce(verdict)
     if rank == 0:
         print("ALL PASS" if verdict.item() == 0 else f"FAILED {int(verdict.item())} checks")
-    group.destroy()
     dist.destroy_process_group()
     if verdict.item():
         raise SystemExit(1)

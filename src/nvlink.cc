@@ -139,8 +139,12 @@ std::optional<std::map<std::pair<int64_t, int64_t>, bool>> nvlink_matrix(const s
     }
 
     std::set<int64_t> on_switch;
-    bool              answered = false;
     for (const auto& entry : handles) {
+        // Per DEVICE, not once for the whole sweep. Shared, the first device to answer would let
+        // every later one that NVML refused keep the `false` it was initialised with above -- and
+        // check_nvlink would then refuse the group claiming a link is missing, when the truth is
+        // that nobody asked successfully. The header promises the opposite.
+        bool answered = false;
         for (int link = 0; link < kMaxLinks; ++link) {
             unsigned       active = 0;
             const unsigned rc     = lib.nvlink_state(entry.second, static_cast<unsigned>(link), &active);
@@ -174,11 +178,13 @@ std::optional<std::map<std::pair<int64_t, int64_t>, bool>> nvlink_matrix(const s
                 }
             }
         }
+        // One device we could not probe makes the whole matrix unusable: its row and column would
+        // read as "not linked" and be indistinguishable from a real absence of links.
+        if (!answered) {
+            return std::nullopt;
+        }
     }
 
-    if (!answered) {
-        return std::nullopt;
-    }
     // One fabric per node, so every GPU with a switch link can reach every other one.
     for (int64_t i : on_switch) {
         for (int64_t j : on_switch) {

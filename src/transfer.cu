@@ -83,8 +83,7 @@ void launch_a2a_ce(const void*                  src,
     // streams would only make them contend. This rank's OWN share crosses no link, so it can run
     // alongside them on the caller's stream -- hence the separate emit below. Peers are visited in
     // XOR-shift order, which pairs ranks up without coordination.
-    cudaEvent_t ready;
-    ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    const Event ready(cudaEventDisableTiming);
     ULYSSES_CUDA_CHECK(cudaEventRecord(ready, stream));
 
     auto emit = [&](int p, cudaStream_t on) {
@@ -116,16 +115,14 @@ void launch_a2a_ce(const void*                  src,
     }
     emit(rank, stream);
 
-    cudaEvent_t done;
-    ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&done, cudaEventDisableTiming));
+    const Event done(cudaEventDisableTiming);
     ULYSSES_CUDA_CHECK(cudaEventRecord(done, xfer));
     // Skipping this join is the fault: the caller's stream then reaches the closing barrier, and
     // publishes, without waiting for the remote copies. Nothing else about the call changes.
     if (g_fault_delay_us == 0) {
         ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(stream, done, 0));
     }
-    ULYSSES_CUDA_CHECK(cudaEventDestroy(done));
-    ULYSSES_CUDA_CHECK(cudaEventDestroy(ready));
+    // done and ready are destroyed here, in reverse declaration order, as they were by hand.
 }
 
 }  // namespace ulysses
