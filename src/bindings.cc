@@ -494,7 +494,16 @@ TORCH_LIBRARY(fast_ulysses, m)
 {
     m.class_<ulysses::UlyssesGroup>("UlyssesGroup")
         .def(torch::init<std::string, int64_t, int64_t, int64_t>())
-        .def("destroy", &ulysses::UlyssesGroup::destroy);
+        .def("destroy", &ulysses::UlyssesGroup::destroy)
+        // TESTS ONLY, and a method rather than a pybind function because the group is a torchbind
+        // object, which pybind cannot take. test/distributed/cudagraph.py needs it: torn data is a
+        // SUFFICIENT signal that the handshake died, not a necessary one -- a replay where no peer
+        // happened to be late comes back clean either way, and only the epoch says whether the
+        // barrier was alive. Synchronising; `like` carries the dtype that keys the window.
+        .def("epoch_debug",
+             [](const c10::intrusive_ptr<ulysses::UlyssesGroup>& self, int64_t role, const at::Tensor& like) {
+                 return self->epoch(static_cast<ulysses::WindowRole>(role), like.scalar_type());
+             });
 
     // Functional: no alias, so it can carry an autograd formula and a meta kernel.
     m.def("all_to_all_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
@@ -562,14 +571,6 @@ PYBIND11_MODULE(_C, m)
     // TESTS ONLY. Underscored, and not a torch op, because arming it deliberately breaks the
     // operator: it is the negative control for test/distributed/ce_ordering.py.
     m.def("_set_ce_fault", &ulysses::set_ce_fault);
-
-    // TESTS ONLY, and underscored for the same reason: it synchronises, and it exposes a counter
-    // the barrier kernel owns. a2a_cudagraph.py needs it because torn data is a SUFFICIENT signal
-    // that the handshake died, not a necessary one -- a replay where no peer happened to be late
-    // comes back clean either way, and only the epoch says whether the barrier was alive.
-    m.def("_epoch", [](const c10::intrusive_ptr<ulysses::UlyssesGroup>& group, int64_t role, const at::Tensor& like) {
-        return group->epoch(static_cast<ulysses::WindowRole>(role), like.scalar_type());
-    });
 
     m.def("build_info", []() {
         std::map<std::string, std::string> out;

@@ -49,7 +49,7 @@ import torch
 import torch.distributed as dist
 from correctness import reference_even  # sibling worker; torchrun puts this dir on sys.path
 
-from fast_ulysses import UlyssesGroup, _C
+from fast_ulysses import UlyssesGroup
 
 REPLAYS = 8
 BALLAST = 24  # GEMMs on rank 0 per replay; enough to let the others get ahead
@@ -93,7 +93,7 @@ def main() -> None:
 
     failed = 0
     if captured:
-        epochs = [_C._epoch(group._handle, 0, x)]
+        epochs = [group._handle.epoch_debug(0, x)]
         for i in range(REPLAYS):
             # New input every replay, so a stale window is a WRONG answer rather than the same one.
             x.normal_()
@@ -108,14 +108,16 @@ def main() -> None:
                 failed += 1
                 n = int((out != want).sum().item())
                 print(f"FAIL rank={rank} replay {i}: {n} elements differ", flush=True)
-            epochs.append(_C._epoch(group._handle, 0, x))
+            epochs.append(group._handle.epoch_debug(0, x))
 
         # The necessary check: two barriers per call, so the epoch must move by 2 every replay. A
         # constant epoch is a dead handshake even on a replay where nothing happened to tear.
         steps = [b - a for a, b in zip(epochs, epochs[1:], strict=True)]
         if any(s <= 0 for s in steps):
             failed += 1
-            print(f"FAIL rank={rank}: the epoch did not advance on every replay: {epochs}", flush=True)
+            print(
+                f"FAIL rank={rank}: the epoch did not advance on every replay: {epochs}", flush=True
+            )
         elif rank == 0:
             print(f"OK ws={ws} epoch advanced {steps} over {REPLAYS} replays", flush=True)
 
