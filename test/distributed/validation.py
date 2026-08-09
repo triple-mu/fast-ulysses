@@ -65,11 +65,19 @@ def main() -> None:
     check.raises(
         "a 3D input", "must be 4D", lambda: group.all_to_all_4d(torch.randn(2, 16, 128, **kw16))
     )
-    check.raises("float32", "float16 or bfloat16", lambda: group.all_to_all_4d(good.float()))
+    # float32 is SUPPORTED now; float64 stands in as a dtype that is still out.
+    check.raises("float64", "dtype must be", lambda: group.all_to_all_4d(good.double()))
+    check.raises("int32", "dtype must be", lambda: group.all_to_all_4d(good.to(torch.int32)))
     check.raises(
         "a head dim that is not 16B-aligned",
         "16-byte aligned",
         lambda: group.all_to_all_4d(torch.randn(2, 16, 4 * ws, 4, **kw16)),
+    )
+    # The alignment rule tightens as the element shrinks: 8 halves are 16 B, 8 fp8 are 8 B.
+    check.raises(
+        "a head dim that is aligned at bfloat16 but not at float8",
+        "16-byte aligned",
+        lambda: group.all_to_all_4d(torch.randn(2, 16, 4 * ws, 8, **kw16).to(torch.float8_e4m3fn)),
     )
     check.raises("mode 2", "mode must be 0 or 1", lambda: group.all_to_all_4d(good, mode=2))
     check.raises("a CPU input", "must be a CUDA tensor", lambda: group.all_to_all_4d(good.cpu()))
@@ -135,6 +143,15 @@ def main() -> None:
         "an input that is a view of the window it fills",
         "input overlaps the window",
         lambda: group.all_to_all_4d(window.view(2, 16, 4 * ws, 128), mode=0, out=window),
+    )
+
+    # --- autograd -----------------------------------------------------------------------------
+    # The async result is an AsyncCollectiveTensor, which is a leaf: backward() through it would
+    # run to completion and leave x.grad as None. Refused rather than silently wrong.
+    check.raises(
+        "an async call on an input that requires grad",
+        "does not support autograd",
+        lambda: group.all_to_all_4d_async(good.detach().requires_grad_(True)),
     )
 
     # --- the plan cache must not answer for a call it never saw ------------------------------

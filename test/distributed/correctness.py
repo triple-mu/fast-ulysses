@@ -14,6 +14,7 @@ from itertools import accumulate
 
 import torch
 import torch.distributed as dist
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from fast_ulysses import UlyssesGroup
 
@@ -174,6 +175,72 @@ def main() -> None:
     for _ in range(20):
         check_out = group.all_to_all_4d(x, mode=0)
     check.equal("20 rounds on one window", check_out, want)
+
+    # --- the dtypes that are not float16/bfloat16 -------------------------------------------
+    # The transport is byte-oriented all the way down, so these differ from the sweep above only
+    # in element size. Compared as bytes: all_to_all_single carries no float8, and the reference
+    # for a permutation does not need to know what the bytes mean.
+    for dtype in (torch.float32, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8):
+        seed = torch.randn(B, 16, 4 * ws, 128, dtype=torch.float32, device=dev)
+        xd = seed.to(dtype) if dtype != torch.int8 else (seed * 50).to(torch.int8)
+        back = group.all_to_all_4d(group.all_to_all_4d(xd, mode=0), mode=1)
+        check.equal(
+            f"round trip {str(dtype).split('.')[-1]}",
+            back.view(torch.uint8),
+            xd.view(torch.uint8),
+        )
+
+    # --- autograd: the vjp of a permutation is the inverse permutation ------------------------
+    # Bit-exact, like everything else here -- the backward moves the same bytes, it does not
+    # recompute anything, so "close" would hide a wrong plan.
+    for mode in (0, 1):
+        shape = (B, 16, 4 * ws, 128) if mode == 0 else (B, 16 * ws, 4, 128)
+        xg = torch.randn(shape, dtype=torch.bfloat16, device=dev, requires_grad=True)
+        upstream = torch.randn_like(group.all_to_all_4d(xg.detach(), mode=mode))
+        group.all_to_all_4d(xg, mode=mode).backward(upstream)
+        check.equal(
+            f"backward mode={mode} is forward mode={1 - mode}",
+            xg.grad,
+            group.all_to_all_4d(upstream, mode=1 - mode),
+        )
+
+    # The splits pass through the reversal UNCHANGED. This is the check that fails if someone
+    # "fixes" the backward by swapping them the way all_to_all_single's backward does -- and with
+    # a skewed split it fails on the shape, not just the values.
+    seq_splits = [s_total - (ws - 1)] + [1] * (ws - 1)
+    head_splits = [4] * ws
+    xu = torch.randn(
+        B, seq_splits[rank], sum(head_splits), 128, dtype=torch.bfloat16, device=dev
+    ).requires_grad_(True)
+    kw = {"seq_splits": seq_splits, "head_splits": head_splits}
+    up = torch.randn_like(group.all_to_all_4d(xu.detach(), mode=0, **kw))
+    group.all_to_all_4d(xu, mode=0, **kw).backward(up)
+    check.equal(
+        "backward with skewed splits, passed through",
+        xu.grad,
+        group.all_to_all_4d(up, mode=1, **kw),
+    )
+
+    # `out=` must not silently detach: the out-variant is not differentiable, so a grad-requiring
+    # input has to come back with grad_fn absent rather than with a gradient that goes nowhere.
+    xo = torch.randn(B, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev, requires_grad=True)
+    res = group.all_to_all_4d(xo, mode=0, out=torch.empty_like(want))
+    if res.grad_fn is not None or res.requires_grad:
+        check.failed += 1
+        print(f"FAIL rank={rank} out= claims to be differentiable but the op is not")
+    elif rank == 0:
+        print(f"OK ws={ws} out= does not claim a gradient it cannot deliver", flush=True)
+    dist.barrier()
+
+    # --- meta: shape propagation without touching the device ---------------------------------
+    with FakeTensorMode() as fake:
+        shaped = group.all_to_all_4d(fake.from_tensor(x), mode=0)
+    if tuple(shaped.shape) != tuple(want.shape) or shaped.device.type != "cuda":
+        check.failed += 1
+        print(f"FAIL rank={rank} meta: {tuple(shaped.shape)} on {shaped.device}")
+    elif rank == 0:
+        print(f"OK ws={ws} meta propagates {tuple(shaped.shape)}", flush=True)
+    dist.barrier()
 
     verdict = torch.tensor([check.failed], device=dev)
     dist.all_reduce(verdict)

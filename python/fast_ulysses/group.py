@@ -122,9 +122,16 @@ class UlyssesGroup:
         neither, identical on every rank and matching the shape handed in. Neither means even
         shards. Collective: every rank must issue the same sequence of shapes.
         """
-        return torch.ops.fast_ulysses.all_to_all_4d(
+        if out is None:
+            return torch.ops.fast_ulysses.all_to_all_4d(
+                self._handle, x, mode, seq_splits, head_splits
+            )
+        # Two ops, one method: the out-variant declares the alias it really has, which is what
+        # keeps the functional one differentiable. See the note in src/bindings.cc.
+        torch.ops.fast_ulysses.all_to_all_4d_out(
             self._handle, x, mode, seq_splits, head_splits, out
         )
+        return out
 
     def all_to_all_4d_async(
         self,
@@ -147,18 +154,40 @@ class UlyssesGroup:
         libtorch with no ``c10d::register_work`` this returns a ``CompletedHandle`` instead --
         correct, no overlap, and a distinct type so it is visible.
         """
+        # Refused rather than silently wrong. AsyncCollectiveTensor is built with
+        # _make_wrapper_subclass(..., requires_grad=elem.requires_grad), which makes the wrapper a
+        # LEAF: autograd runs above the subclass and never sees the wrapped tensor's history, so
+        # backward() would deposit the gradient on the wrapper and leave x.grad as None.
+        if torch.is_grad_enabled() and x.requires_grad:
+            raise RuntimeError(
+                "all_to_all_4d_async does not support autograd: its result is an "
+                "AsyncCollectiveTensor, which is a leaf, so the gradient would be dropped without "
+                "an error. Use all_to_all_4d()."
+            )
         caller = torch.cuda.current_stream()
         with torch.cuda.stream(self._comm_stream):
-            y = torch.ops.fast_ulysses.all_to_all_4d_staged(
-                self._handle,
-                x,
-                mode,
-                seq_splits,
-                head_splits,
-                out,
-                caller.stream_id,
-                caller.device_index,
-            )
+            if out is None:
+                y = torch.ops.fast_ulysses.all_to_all_4d_staged(
+                    self._handle,
+                    x,
+                    mode,
+                    seq_splits,
+                    head_splits,
+                    caller.stream_id,
+                    caller.device_index,
+                )
+            else:
+                torch.ops.fast_ulysses.all_to_all_4d_staged_out(
+                    self._handle,
+                    x,
+                    mode,
+                    seq_splits,
+                    head_splits,
+                    out,
+                    caller.stream_id,
+                    caller.device_index,
+                )
+                y = out
         registered = _C.register_stream_completion(y, self._comm_stream.cuda_stream)
         # Two streams touch the output: one allocated it, the other wrote it, and the caching
         # allocator must know about the cross-stream use before it may recycle the block.

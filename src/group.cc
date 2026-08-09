@@ -51,11 +51,22 @@ A2ADims make_dims(at::IntArrayRef                            sizes,
                   const std::optional<std::vector<int64_t>>& head_splits)
 {
     TORCH_CHECK(sizes.size() == 4, "input must be 4D, got ", sizes.size(), " dims");
-    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "dtype must be float16 or bfloat16, got ", dtype);
+    // Listed, not opened up. Nothing below this line is dtype-specific -- build_plan takes an
+    // elem_size, the transport copies bytes, the window map and the plan key both carry the dtype,
+    // and empty_strided_p2p takes a plain ScalarType -- so the set is a decision, not a constraint.
+    // Leaving the check off entirely would admit kBool, the complex types and the quantized ones,
+    // which nothing here has reasoned about.
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16 || dtype == at::kFloat || dtype == at::kFloat8_e4m3fn
+                    || dtype == at::kFloat8_e5m2 || dtype == at::kChar || dtype == at::kByte,
+                "dtype must be float16, bfloat16, float32, float8_e4m3fn, float8_e5m2, int8 or uint8, got ",
+                dtype);
     const int64_t x1   = sizes[1];
     const int64_t x2   = sizes[2];
     const int64_t d    = sizes[3];
     const int64_t elem = static_cast<int64_t>(c10::elementSize(dtype));
+    // One check covers the whole plan: every byte quantity build_plan emits -- src_offset,
+    // dst_offset, width, both pitches, the batch strides -- is a multiple of d * elem. Note the
+    // rule TIGHTENS as the element shrinks: d % 8 at fp16, d % 4 at fp32, d % 16 at fp8 and int8.
     TORCH_CHECK(
         (d * elem) % 16 == 0, "the head dim must be 16-byte aligned: d=", d, " x ", elem, " B is ", d * elem, " B");
     TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 or 1, got ", mode);

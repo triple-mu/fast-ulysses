@@ -7,6 +7,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <optional>
+#include <torch/csrc/autograd/custom_function.h>
 #include <torch/extension.h>
 #include <torch/library.h>
 
@@ -23,6 +24,13 @@
 namespace ulysses {
 
 namespace {
+
+// Before any CUDAGuard: constructing one from a CPU tensor aborts inside c10 with a message that
+// names neither this library nor the argument. docs/api.md promises this wording.
+void require_cuda(const at::Tensor& input)
+{
+    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
+}
 
 // Byte intervals [a, a+a_bytes) and [b, b+b_bytes) intersect.
 bool intervals_overlap(const void* a, int64_t a_bytes, const void* b, int64_t b_bytes)
@@ -61,7 +69,7 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
     // owned_. make_output() is the only other place that can prune, so a caller who takes one
     // buffer from empty_output() and drops it would otherwise pin it until destroy().
     group->prune_owned();
-    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
+    require_cuda(input);
     // Per-tensor, so it stays out of the plan cache key. The windows live on one device and the
     // barrier kernel dereferences their flag pointers; a tensor from another device would launch
     // that kernel on the wrong one.
@@ -190,34 +198,95 @@ at::Tensor run(const c10::intrusive_ptr<UlyssesGroup>&    group,
 
 }  // namespace
 
-// The one collective. The result is always a tensor the caller owns, with no lifetime rules; `out`
-// from empty_output() removes the copy-out, because the peers then write it directly.
+// The one collective, in two forms.
+//
+// They are two ops rather than one with an optional `out` because a single op cannot be both
+// honest and differentiable. Declaring the alias `out` really has -- Tensor(a!) -- makes the
+// schema mutable, and torch/library.py refuses to register an autograd formula for a mutable
+// operator. Splitting gives the functional form autograd and a meta kernel, and gives the
+// out-variant an annotation that matches what it does. `-> ()` rather than `-> Tensor(a!)`
+// because can_auto_functionalize accepts only that shape, so only that shape can enter a graph.
 at::Tensor all_to_all_4d(const c10::intrusive_ptr<UlyssesGroup>&    group,
                          const at::Tensor&                          input,
                          int64_t                                    mode,
                          const std::optional<std::vector<int64_t>>& seq_splits,
-                         const std::optional<std::vector<int64_t>>& head_splits,
-                         const std::optional<at::Tensor>&           out)
+                         const std::optional<std::vector<int64_t>>& head_splits)
 {
-    // Before the guard: CUDAGuard on a CPU tensor aborts inside c10 with a message that names
-    // neither this library nor the argument.
-    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
+    require_cuda(input);
     const at::cuda::CUDAGuard guard(input.device());
-    return run(group, input, mode, seq_splits, head_splits, out, kSyncWindow, at::cuda::getCurrentCUDAStream());
+    return run(
+        group, input, mode, seq_splits, head_splits, std::nullopt, kSyncWindow, at::cuda::getCurrentCUDAStream());
+}
+
+// Shape propagation for FakeTensor and AOTAutograd. CompositeExplicitAutograd already covers the
+// Meta key, so without this a fake tensor reaches the real kernel and dies on require_cuda -- a
+// message about a CUDA tensor, for what is really an untraceable-op problem. A direct Meta
+// registration takes precedence over the alias.
+//
+// The arithmetic stays in group->plan(): it is pure host code that allocates nothing on the device,
+// so it is safe here, and it runs every shape, dtype and splits check on the way. Rewriting the
+// uneven-splits rule in Python would put a second copy of it somewhere test_plan.py cannot reach --
+// which is the whole reason a2a_plan.cc is a torch-free, CUDA-free translation unit.
+//
+// The group is a real object on this path: FakeTensorMode's conversion only touches tensors, so the
+// ScriptObject arrives intact and world_size is available -- which it is not from the input shape
+// alone when the splits are absent.
+at::Tensor all_to_all_4d_meta(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                              const at::Tensor&                          input,
+                              int64_t                                    mode,
+                              const std::optional<std::vector<int64_t>>& seq_splits,
+                              const std::optional<std::vector<int64_t>>& head_splits)
+{
+    const A2APlan& plan = group->plan(input.sizes(), mode, input.scalar_type(), seq_splits, head_splits);
+    return at::empty(plan.output_shape, input.options());
+}
+
+// empty_output is a COLLECTIVE allocation, so it cannot be traced at all: replaying a trace would
+// put the rendezvous wherever the graph happens to place it rather than where every rank's own
+// program reaches it. Say that, instead of letting it fall through to a CUDA-tensor complaint.
+at::Tensor empty_output_meta(const c10::intrusive_ptr<UlyssesGroup>&,
+                             const at::Tensor&,
+                             int64_t,
+                             const std::optional<std::vector<int64_t>>&,
+                             const std::optional<std::vector<int64_t>>&)
+{
+    TORCH_CHECK(false,
+                "empty_output is a collective allocation and cannot be traced: every rank has to "
+                "reach it at the same point in its own program. Call it eagerly, outside the "
+                "region being traced, and pass the buffer in.");
+}
+
+// Fills `out`. A buffer from empty_output() IS the window, so the peers write it directly and the
+// copy-out disappears; any other contiguous tensor of the output shape is copied into.
+void all_to_all_4d_out(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                       const at::Tensor&                          input,
+                       int64_t                                    mode,
+                       const std::optional<std::vector<int64_t>>& seq_splits,
+                       const std::optional<std::vector<int64_t>>& head_splits,
+                       const at::Tensor&                          out)
+{
+    require_cuda(input);
+    const at::cuda::CUDAGuard guard(input.device());
+    run(group, input, mode, seq_splits, head_splits, out, kSyncWindow, at::cuda::getCurrentCUDAStream());
 }
 
 // The async form's device-side half. Python has already made the comm stream current; `caller` is
 // the stream the user was on, which is where the input is staged.
-at::Tensor all_to_all_4d_staged(const c10::intrusive_ptr<UlyssesGroup>&    group,
-                                const at::Tensor&                          input,
-                                int64_t                                    mode,
-                                const std::optional<std::vector<int64_t>>& seq_splits,
-                                const std::optional<std::vector<int64_t>>& head_splits,
-                                const std::optional<at::Tensor>&           out,
-                                int64_t                                    caller_stream_id,
-                                int64_t                                    caller_device_index)
+//
+// Everything both staged forms share, so the split above costs one wrapper rather than a
+// duplicated body.
+namespace {
+
+at::Tensor run_staged(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                      const at::Tensor&                          input,
+                      int64_t                                    mode,
+                      const std::optional<std::vector<int64_t>>& seq_splits,
+                      const std::optional<std::vector<int64_t>>& head_splits,
+                      const std::optional<at::Tensor>&           out,
+                      int64_t                                    caller_stream_id,
+                      int64_t                                    caller_device_index)
 {
-    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
+    require_cuda(input);
     const at::cuda::CUDAGuard guard(input.device());
     cudaStream_t              comm = at::cuda::getCurrentCUDAStream();
     // Rebuilt from torch's own identifiers rather than wrapped from a raw handle, so the caching
@@ -233,6 +302,125 @@ at::Tensor all_to_all_4d_staged(const c10::intrusive_ptr<UlyssesGroup>&    group
     return run(group, staged, mode, seq_splits, head_splits, out, kAsyncWindow, comm);
 }
 
+}  // namespace
+
+at::Tensor all_to_all_4d_staged(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                                const at::Tensor&                          input,
+                                int64_t                                    mode,
+                                const std::optional<std::vector<int64_t>>& seq_splits,
+                                const std::optional<std::vector<int64_t>>& head_splits,
+                                int64_t                                    caller_stream_id,
+                                int64_t                                    caller_device_index)
+{
+    return run_staged(group, input, mode, seq_splits, head_splits, std::nullopt, caller_stream_id, caller_device_index);
+}
+
+void all_to_all_4d_staged_out(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                              const at::Tensor&                          input,
+                              int64_t                                    mode,
+                              const std::optional<std::vector<int64_t>>& seq_splits,
+                              const std::optional<std::vector<int64_t>>& head_splits,
+                              const at::Tensor&                          out,
+                              int64_t                                    caller_stream_id,
+                              int64_t                                    caller_device_index)
+{
+    run_staged(group, input, mode, seq_splits, head_splits, out, caller_stream_id, caller_device_index);
+}
+
+// The adjoint of the collective is the collective in the other direction.
+//
+// mode 0 is a bijection on the global element set -- rank r's (batch, s, n, k) lands at rank
+// owner(n) position (batch, seq_offset[r]+s, n-head_offset[p], k) -- and mode 1 with the SAME
+// splits is `build_plan`'s scatter branch read right to left, i.e. its inverse. The Jacobian of a
+// permutation is a permutation matrix, whose transpose is its inverse, so the vjp is `1 - mode`.
+//
+// The splits do NOT swap. That is worth stating because all_to_all_single's backward DOES swap its
+// input and output split sizes: those describe one call's send and receive counts, so reversing the
+// direction reverses their roles. seq_splits[p] / head_splits[p] are a different object -- rank p's
+// sequence and head shard, a property of the GROUP that holds whichever way the data moves. `mode`
+// selects which axis arrives already sharded, not what the lists mean. test_plan.py's round trip
+// builds both plans from one pair of genuinely uneven lists and confirms it numerically.
+//
+// Absent splits pass through too: mode 0 with none derives seq=[x1]*ws, head=[x2/ws]*ws, and mode 1
+// with none on that output shape derives the same pair -- and can never fail a divisibility check
+// the forward did not already pass, since the axis it tests is ws times something.
+class A2AFunction: public torch::autograd::Function<A2AFunction> {
+public:
+    static at::Tensor forward(torch::autograd::AutogradContext*          ctx,
+                              const c10::intrusive_ptr<UlyssesGroup>&    group,
+                              const at::Tensor&                          input,
+                              int64_t                                    mode,
+                              const std::optional<std::vector<int64_t>>& seq_splits,
+                              const std::optional<std::vector<int64_t>>& head_splits)
+    {
+        // The graph holds the group alive. A graph that outlives destroy() raises from backward,
+        // which is the right answer -- there is nothing left to run the collective on.
+        ctx->saved_data["group"] = group;
+        ctx->saved_data["mode"]  = mode;
+        ctx->saved_data["seq"]   = seq_splits.has_value() ? c10::IValue(*seq_splits) : c10::IValue();
+        ctx->saved_data["head"]  = head_splits.has_value() ? c10::IValue(*head_splits) : c10::IValue();
+
+        // Back into the DISPATCHER, not a direct call to all_to_all_4d(). Calling the C++ function
+        // would leave dispatch for good, and every key below Autograd -- Python, and through it
+        // FakeTensorMode, and Meta -- would never be consulted: a fake tensor would reach the real
+        // kernel and die in cudaMemcpy3DAsync. Measured: with a direct call, a TorchDispatchMode
+        // sees this op's inner aten::empty and never the op itself.
+        //
+        // The guard excludes the autograd keys for the duration, which is what stops op.call from
+        // arriving back here. Function::apply has already turned grad mode off, but that governs
+        // graph construction, not which kernel the dispatcher picks.
+        at::AutoDispatchBelowADInplaceOrView guard;
+        static auto                          op = c10::Dispatcher::singleton()
+                             .findSchemaOrThrow("fast_ulysses::all_to_all_4d", "")
+                             .typed<at::Tensor(const c10::intrusive_ptr<UlyssesGroup>&,
+                                               const at::Tensor&,
+                                               int64_t,
+                                               const std::optional<std::vector<int64_t>>&,
+                                               const std::optional<std::vector<int64_t>>&)>();
+        return op.call(group, input, mode, seq_splits, head_splits);
+    }
+
+    static torch::autograd::variable_list backward(torch::autograd::AutogradContext* ctx,
+                                                   torch::autograd::variable_list    grads)
+    {
+        // Five entries, one per non-ctx forward argument; only `input` is differentiable.
+        if (!grads[0].defined()) {
+            return {at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor()};
+        }
+        auto          group = ctx->saved_data["group"].toCustomClass<UlyssesGroup>();
+        const int64_t mode  = ctx->saved_data["mode"].toInt();
+
+        std::optional<std::vector<int64_t>> seq, head;
+        if (!ctx->saved_data["seq"].isNone()) {
+            seq = ctx->saved_data["seq"].toIntVector();
+        }
+        if (!ctx->saved_data["head"].isNone()) {
+            head = ctx->saved_data["head"].toIntVector();
+        }
+
+        // The copying form, never `out` from empty_output(): that is a collective allocation, and
+        // putting one inside backward would hand the rendezvous position to the autograd engine's
+        // node order rather than to the caller's own program. A gradient also belongs to the
+        // engine, which may accumulate into it or hold it, while a window is single-buffered.
+        //
+        // apply(), not the plain function, so grad-of-grad routes back through here.
+        return {at::Tensor(),
+                A2AFunction::apply(group, grads[0].contiguous(), 1 - mode, seq, head),
+                at::Tensor(),
+                at::Tensor(),
+                at::Tensor()};
+    }
+};
+
+at::Tensor all_to_all_4d_autograd(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                                  const at::Tensor&                          input,
+                                  int64_t                                    mode,
+                                  const std::optional<std::vector<int64_t>>& seq_splits,
+                                  const std::optional<std::vector<int64_t>>& head_splits)
+{
+    return A2AFunction::apply(group, input, mode, seq_splits, head_splits);
+}
+
 // A buffer shaped like this call's output, in symmetric memory, for the caller to pass back as
 // `out`. COLLECTIVE.
 at::Tensor empty_output(const c10::intrusive_ptr<UlyssesGroup>&    group,
@@ -241,7 +429,7 @@ at::Tensor empty_output(const c10::intrusive_ptr<UlyssesGroup>&    group,
                         const std::optional<std::vector<int64_t>>& seq_splits,
                         const std::optional<std::vector<int64_t>>& head_splits)
 {
-    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
+    require_cuda(input);
     const at::cuda::CUDAGuard guard(input.device());
     const A2APlan&            plan = group->plan(input.sizes(), mode, input.scalar_type(), seq_splits, head_splits);
     return group->make_output(plan.output_shape, input.scalar_type(), plan.window_numel);
@@ -256,7 +444,7 @@ std::tuple<at::Tensor, std::vector<double>> all_to_all_4d_timed(const c10::intru
                                                                 const std::optional<std::vector<int64_t>>& seq_splits,
                                                                 const std::optional<std::vector<int64_t>>& head_splits)
 {
-    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
+    require_cuda(input);
     const at::cuda::CUDAGuard guard(input.device());
     const Call                call   = prepare(group, input, mode, seq_splits, head_splits, std::nullopt, kSyncWindow);
     const int                 rank   = static_cast<int>(group->rank());
@@ -292,18 +480,36 @@ TORCH_LIBRARY(fast_ulysses, m)
         .def(torch::init<std::string, int64_t, int64_t, int64_t>())
         .def("destroy", &ulysses::UlyssesGroup::destroy);
 
+    // Functional: no alias, so it can carry an autograd formula and a meta kernel.
     m.def("all_to_all_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
-          "int mode, int[]? seq_splits=None, int[]? head_splits=None, Tensor? out=None) -> Tensor");
+          "int mode, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
     m.impl("all_to_all_4d", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d);
+    m.impl("all_to_all_4d", c10::DispatchKey::Autograd, &ulysses::all_to_all_4d_autograd);
+    // Explicit Meta, overriding the alias above. Deliberately NOT also torch.library.register_fake:
+    // on 2.13 that silently replaces an existing Meta kernel, leaving two shape rules and no error
+    // saying which one ran.
+    m.impl("all_to_all_4d", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_meta);
+
+    // Mutating, and says so. Not differentiable: the gradient would have to flow back out of a
+    // buffer the caller owns and may already have overwritten.
+    m.def("all_to_all_4d_out(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
+          "int mode, int[]? seq_splits, int[]? head_splits, Tensor(a!) out) -> ()");
+    m.impl("all_to_all_4d_out", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_out);
 
     m.def("all_to_all_4d_staged(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
-          "Tensor input, int mode, int[]? seq_splits, int[]? head_splits, Tensor? out, "
+          "Tensor input, int mode, int[]? seq_splits, int[]? head_splits, "
           "int caller_stream_id, int caller_device_index) -> Tensor");
     m.impl("all_to_all_4d_staged", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_staged);
+
+    m.def("all_to_all_4d_staged_out(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
+          "Tensor input, int mode, int[]? seq_splits, int[]? head_splits, Tensor(a!) out, "
+          "int caller_stream_id, int caller_device_index) -> ()");
+    m.impl("all_to_all_4d_staged_out", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_staged_out);
 
     m.def("empty_output(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
           "int mode, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
     m.impl("empty_output", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::empty_output);
+    m.impl("empty_output", c10::DispatchKey::Meta, &ulysses::empty_output_meta);
 
     m.def("all_to_all_4d_timed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[]? seq_splits=None, int[]? head_splits=None) "
