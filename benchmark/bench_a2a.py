@@ -317,7 +317,7 @@ def run_zerocopy(group, pg, rank, ws, args) -> None:
         print("# zerocopy = out= from empty_output(): the peers write that buffer directly\n")
         head = (
             f"{'shape':<14} {'MB':>6} | {'copying':>9} {'zerocopy':>9} {'saved':>8} {'speedup':>8} | "
-            f"{'copy_out':>9} {'of copying':>11}"
+            f"{'copy_out':>9} {'of stages':>11}"
         )
         print(head)
         print("-" * len(head))

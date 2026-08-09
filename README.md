@@ -28,7 +28,21 @@ This ships that 4D all-to-all as `torch.ops.fast_ulysses.all_to_all_4d`, over NV
 
 ## Performance
 
-`pending` — to be measured in one pass across machines. Method and reproduction commands are in
+8 GPUs, one exclusively allocated node per row, the same wheel and the same `.so` on all of them.
+`base` is `torch.distributed` permute + `all_to_all_single` + permute. Wan 720p, bf16, ms.
+
+| GPU | fabric | base | ours | vs base | transfer | of the fabric |
+|---|---|---|---|---|---|---|
+| H200 | NVLink | 1.569 | **0.860** | **1.82×** | 0.680 | 99% |
+| B200 | NVLink | 1.194 | **0.550** | **2.17×** | 0.410 | 90% |
+| B300 | NVLink | 1.184 | **0.548** | **2.16×** | 0.411 | 90% |
+| H100 | NVLink | pending | | | | |
+
+47–60% of the baseline is relayout that costs nothing here. "Of the fabric" is the transfer against
+what a flat peer copy achieves on the same machine — at 90–99% there is nothing left to schedule.
+`out=` from `empty_output()` removes the copy-out for a further 1.14–1.21×.
+
+Every number was taken twice on different nodes; full tables, per-stage timings and the method:
 [docs/benchmark.md](docs/benchmark.md).
 
 ## Quick start

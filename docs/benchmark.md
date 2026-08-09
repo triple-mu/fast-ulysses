@@ -1,53 +1,55 @@
 # Benchmarks
 
-**Status: `pending`.** The v0.2 numbers will be taken in one pass, on the machines and at the time
-the maintainer schedules; the tables below are the shape they will take. Everything needed to
-reproduce them is here.
+Measured 2026-08-08 on a ComputeLab Slurm cluster. Four of the five GPU models are in; **H100 is
+still queued** and its rows say `pending`.
 
 ## Method
 
-Every number must be taken under `tools/exclusive.sh`, which refuses to start until the requested
-GPUs are free, binds the run to them, samples throughout, and prints `EXCLUSIVE` or `CONTENDED`. A
-`CONTENDED` run is not a result. Numbers from different machines are not compared.
+Every number is taken under `tools/exclusive.sh`, which refuses to start until the requested GPUs
+are free, samples throughout, and prints `EXCLUSIVE` or `CONTENDED`. Every run below reported
+`EXCLUSIVE`. Numbers from different machines are not compared except where the table says so.
 
-bf16, `mode=0`, medians over 25 iterations after 8 warm-up calls, milliseconds.
+- **Whole node, 8 GPUs**, allocated exclusively through Slurm with a GPU health gate.
+- **One binary.** A single wheel built for `80;90;100;120` was installed on every machine
+  (`sha256 5e4e3747…`), so nothing was recompiled between generations.
+- **One image**, `nvcr.io/nvidia/pytorch:26.07-py3` — torch `2.13.0a0+9186a08b2c.nv26.07`, CUDA 13.3.
+- **Correctness first.** `pytest test/` passed on each machine before any measurement; a number
+  from a build that fails its own tests only looks like data.
+- **Two nodes per model.** v0.1 had to withdraw a published row when a second node of the same
+  model disagreed by 5×. Where the two nodes agree, one is shown and the spread is noted; where
+  they do not, both are shown and nothing is averaged.
 
-Shapes are the attention inputs of two real models, QKV packed into one collective so the last dim
-is `3 * head_dim`. `s` includes a 227-token text tail, so it does not divide by the group size.
+bf16, `mode=0`, medians over 25 iterations after 8 warm-up calls, milliseconds. Shapes are the
+attention inputs of two real models, QKV packed into one collective so the last dim is
+`3 * head_dim`. `s` includes a 227-token text tail, so it does not divide by the group size.
 
-| label | s | heads | 3·head_dim |
-|---|---|---|---|
-| wan-720p | 75827 | 40 | 384 |
-| wan-480p | 32987 | 40 | 384 |
-| h3-t2va-5s | 38051 | 56 | 384 |
-
-One machine, everything, with the environment recorded next to the numbers:
+| label | s | heads | 3·head_dim | MB/rank at ws=8 |
+|---|---|---|---|---|
+| wan-720p | 75827 | 40 | 384 | 291 |
+| wan-480p | 32987 | 40 | 384 | 127 |
+| h3-t2va-5s | 38051 | 56 | 384 | 205 |
 
 ```bash
-benchmark/collect.sh <label>          # e.g. b200-node1; writes benchmark-results/<label>.log
-```
-
-It gates on `pytest test/` -- a number from a build that fails its own tests only looks like data
--- then runs every mode through `tools/exclusive.sh`, and refuses to call the run complete if any
-mode failed. Individually:
-
-```bash
+benchmark/collect.sh <label>          # everything, with the environment recorded next to it
 ./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 \
     benchmark/bench_a2a.py --mode {stages|zerocopy|sweep|link|overlap|padding}
 ```
+
+Raw logs, one per (model, node), are archived outside this repo at
+`<cluster scratch>/nvidia/fu-bench/results/`. Each carries its own fingerprint header: node,
+driver, torch, CUDA, `nvidia-smi topo -m`, SM clocks before and after, and the commit.
 
 ## Machines
 
 | machine | fabric | status |
 |---|---|---|
-| 8×H100 | NVLink | pending |
-| 8×H200 | NVSwitch | pending |
-| 8×B200 | NVLink | pending |
-| 8×B300 | NVLink | pending |
-| 8×RTX PRO 6000 | PCIe, 2 sockets | pending — a different question; see "Why not PCIe" |
+| 8×H200 | NVLink | measured, two nodes agree within 3.9% |
+| 8×B200 | NVLink | measured, two nodes agree within 7.9% |
+| 8×B300 SXM6 | NVLink | measured, two nodes agree within 2.6% |
+| 8×RTX PRO 6000 | PCIe, 2 sockets | measured, **two nodes disagree by 5×** — see "Why not PCIe" |
+| 8×H100 | NVLink | pending — queued |
 
-8×A100 appears in the v0.1 section below and is not re-measured here: the cluster these numbers
-come from has no A100.
+8×A100 appears in the v0.1 section and is not re-measured: this cluster has none.
 
 ## Where the time goes
 
@@ -55,87 +57,194 @@ come from has no A100.
 `all_to_all_single` alone — same bytes, no relayout, result in the wrong layout, so it is a
 transport floor rather than an alternative. `a2a` against `transfer` is the like-for-like pair.
 
-| GPU | shape | perm_in | a2a | perm_out | BASE | barr_in | transfer | barr_out | copy_out | OURS | raw | CE/raw | relayout% |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pending | | | | | | | | | | | | | |
+ws=8. The last column is how far the second node's `OURS` was from the first's.
+
+| GPU | shape | perm_in | a2a | perm_out | BASE | barr_in | transfer | barr_out | copy_out | OURS | vs BASE | raw | CE/raw | relayout% | node 2 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| H200 | wan-720p | 0.358 | 0.826 | 0.385 | **1.569** | 0.011 | 0.680 | 0.025 | 0.143 | **0.860** | **1.82×** | 0.859 | 1.26× | 47.3% | 0.8% |
+| H200 | wan-480p | 0.162 | 0.378 | 0.171 | **0.711** | 0.010 | 0.319 | 0.035 | 0.068 | **0.431** | **1.65×** | 0.391 | 1.23× | 46.9% | 3.9% |
+| H200 | h3-t2va-5s | 0.254 | 0.590 | 0.273 | **1.117** | 0.010 | 0.490 | 0.019 | 0.100 | **0.619** | **1.80×** | 0.609 | 1.24× | 47.2% | 1.1% |
+| B200 | wan-720p | 0.347 | 0.478 | 0.369 | **1.194** | 0.030 | 0.410 | 0.013 | 0.097 | **0.550** | **2.17×** | 0.510 | 1.24× | 60.0% | 1.1% |
+| B200 | wan-480p | 0.158 | 0.246 | 0.164 | **0.568** | 0.025 | 0.193 | 0.028 | 0.048 | **0.294** | **1.93×** | 0.263 | 1.36× | 56.7% | 7.1% |
+| B200 | h3-t2va-5s | 0.247 | 0.365 | 0.262 | **0.874** | 0.025 | 0.289 | 0.046 | 0.072 | **0.431** | **2.03×** | 0.379 | 1.31× | 58.3% | 7.9% |
+| B300 | wan-720p | 0.344 | 0.474 | 0.366 | **1.184** | 0.017 | 0.411 | 0.021 | 0.099 | **0.548** | **2.16×** | 0.493 | 1.20× | 59.9% | 1.3% |
+| B300 | wan-480p | 0.156 | 0.227 | 0.163 | **0.546** | 0.011 | 0.199 | 0.044 | 0.048 | **0.302** | **1.81×** | 0.242 | 1.21× | 58.4% | 2.6% |
+| B300 | h3-t2va-5s | 0.245 | 0.347 | 0.261 | **0.854** | 0.013 | 0.295 | 0.015 | 0.071 | **0.395** | **2.16×** | 0.360 | 1.22× | 59.3% | 2.0% |
+| H100 | | | | | pending | | | | | | | | | | |
+
+Across three NVLink generations the shape is the same: **1.65–2.17× the `torch.distributed` path**,
+of which 46.9–60.0% is relayout that costs nothing here, and the transfer alone beats a bare
+`all_to_all_single` by 1.20–1.36×.
+
+The node-2 spread is not in the transport. Where it reaches 7–8% (B200's two smaller shapes) the
+`transfer` stage agrees to within 2% and the difference is in the barriers — that is rank arrival
+skew, which moves between the opening and closing handshake and does not change what was moved.
+
+## How much of the fabric this uses
+
+Flat 64 MiB peer copies, measured through torch symmetric memory rather than through this operator,
+so the ceiling is established independently of what is judged against it. The last column is
+`transfer` at wan-720p over the bytes that actually cross a link (7/8 of 291 MB), against the
+single-flow number.
+
+| GPU | 1 flow | 8 flows, per flow | 8 flows, aggregate | a2a achieves | of the ceiling |
+|---|---|---|---|---|---|
+| H200 | 378.7 GB/s | 376.0 | 3008 GB/s | 375 GB/s | **99%** |
+| B200 | 691.7 GB/s | 689.4 | 5515 GB/s | 621 GB/s | **90%** |
+| B300 | 692.1 GB/s | 686.9 | 5495 GB/s | 620 GB/s | **90%** |
+| H100 | pending | | | | |
+
+Per-flow bandwidth does not drop when all eight flows run at once, on any of them: the fabric is
+not the contended resource. At 90–99% of what a flat copy achieves there is essentially nothing
+left to schedule, which is the useful way to read the `transfer` column above.
+
+## The zero-copy path
+
+`out=` from `empty_output()` removes the `copy_out` stage. The saving is close to that stage but
+consistently a little under it (0.09–0.12 ms saved against a 0.10–0.14 ms `copy_out`), which is
+what you would expect: the two are separate measurements of the whole call, not a subtraction.
+
+The last column is `copy_out` as a share of the four timed stages, which is what the benchmark
+prints; it is not `copy_out / copying`.
+
+| GPU | shape | copying | zero-copy | saved | speedup | copy_out, share of the timed stages |
+|---|---|---|---|---|---|---|
+| H200 | wan-720p | 0.911 | 0.790 | 0.121 | **1.15×** | 16.6% |
+| H200 | wan-480p | 0.418 | 0.351 | 0.067 | **1.19×** | 16.1% |
+| H200 | h3-t2va-5s | 0.627 | 0.521 | 0.106 | **1.20×** | 16.3% |
+| B200 | wan-720p | 0.554 | 0.464 | 0.090 | **1.19×** | 18.4% |
+| B200 | wan-480p | 0.267 | 0.224 | 0.043 | **1.19×** | 17.9% |
+| B200 | h3-t2va-5s | 0.387 | 0.319 | 0.068 | **1.21×** | 18.3% |
+| B300 | wan-720p | 0.567 | 0.475 | 0.093 | **1.20×** | 17.6% |
+| B300 | wan-480p | 0.306 | 0.267 | 0.039 | **1.14×** | 15.6% |
+| B300 | h3-t2va-5s | 0.388 | 0.320 | 0.068 | **1.21×** | 18.2% |
+| H100 | | | | pending | | |
+
+The range is 1.14–1.21×, and the low end is B300's wan-480p, whose `copy_out` share is also the
+smallest at 15.6% — the two move together, which is the check that the saving is the copy-out.
+
+There is a second reason to prefer it, which the times above do not show: `copy_out` is a
+same-device copy, and a same-device copy competes with compute for SMs where a peer copy does not
+(see [design.md](design.md)). The zero-copy path is the one that is actually zero-SM end to end.
 
 ## Hiding the collective under compute
 
 `hidden% = (serial − concurrent) / a2a_alone`, against a concurrent 3-GEMM chain shaped like
-to_q/k/v. This is the claim the zero-SM design exists to support. Read >100% as "fully hidden": the
-metric can exceed 100 because the serial arrangement pays a launch cost the concurrent one avoids.
+to_q/k/v. This is the claim the zero-SM design exists to support.
 
-| GPU | gemm alone | a2a alone | hidden |
-|---|---|---|---|
-| pending | | | |
+**This metric has real spread.** The two nodes of the same model differ by up to 35 points, and the
+benchmark prints the min–max of its own eight alternating samples. Read it as a range.
+
+| GPU | gemm alone | a2a alone | serial | concurrent | hidden (node 1) | hidden (node 2) |
+|---|---|---|---|---|---|---|
+| H200 | 1.793 | 0.876 | 2.971 | 2.320 | **74%** | 71% |
+| B200 | 0.978 | 0.535 | 1.633 | 1.312 | **60%** | 95% |
+| B300 | 0.865 | 0.533 | 1.469 | 1.219 | **47%** | 50% |
+| H100 | | | | | pending | |
+
+H200 hides more than the Blackwell parts because there is more GEMM to hide under: its
+`a2a_alone / gemm_alone` is 0.49 against B200's 0.55 and B300's 0.62. The metric is bounded by how
+much compute is available, not only by how well the collective gets out of the way.
 
 ## Removing the sequence padding
 
 Rounding a sequence up to a multiple of the group size keeps every rank the same length, which is
-what lets the baseline stay on its flat path; the padded tokens then ride through attention and the
-collective on every layer of every step. Per-rank `seq_splits` accepts shards differing by one token
-instead. The pad is at most `world_size − 1` tokens, so the ratio is the number to read, not the
-absolute times.
+what lets the baseline stay on its flat path; the padded tokens then ride through attention and
+the collective on every layer of every step. Per-rank `seq_splits` accepts shards differing by one
+token instead. The pad is at most `world_size − 1` tokens, so the ratio is the number to read.
 
 | GPU | shape | base padded | base unpadded | base cost | ours padded | ours unpadded | ours cost |
 |---|---|---|---|---|---|---|---|
-| pending | | | | | | | |
+| H200 | wan-720p | 1.565 | 1.666 | 1.06× | 0.869 | 0.871 | **1.00×** |
+| H200 | wan-480p | 0.708 | 0.757 | 1.07× | 0.418 | 0.420 | **1.01×** |
+| H200 | h3-t2va-5s | 1.118 | 1.189 | 1.06× | 0.649 | 0.652 | **1.00×** |
+| B200 | wan-720p | 1.187 | 1.251 | 1.05× | 0.533 | 0.537 | **1.01×** |
+| B200 | wan-480p | 0.541 | 0.571 | 1.06× | 0.265 | 0.272 | **1.03×** |
+| B200 | h3-t2va-5s | 0.851 | 0.896 | 1.05× | 0.390 | 0.394 | **1.01×** |
+| B300 | wan-720p | 1.178 | 1.238 | 1.05× | 0.534 | 0.538 | **1.01×** |
+| B300 | wan-480p | 0.538 | 0.569 | 1.06× | 0.267 | 0.273 | **1.02×** |
+| B300 | h3-t2va-5s | 0.843 | 0.891 | 1.06× | 0.394 | 0.395 | **1.00×** |
+| H100 | | | pending | | | | |
 
-## The zero-copy path
-
-`out=` from `empty_output()` removes the `copy_out` stage. Its share of the copying call is the
-number to look at before reaching for it.
-
-| GPU | shape | copying | zero-copy | saving | copy_out share of copying |
-|---|---|---|---|---|---|
-| pending | | | | | |
+Dropping the pad is free here (1.00–1.03×, every shape on every machine) and costs the baseline
+5–7%, because it cannot stay on flat `all_to_all_single` once shards differ at all.
 
 ## Where this stops being the right tool
 
-The barriers cost what they cost regardless of payload, so their share is what says at which
-message size to use something else. Most of that cost is rank arrival skew, which any
-synchronisation pays somewhere — read it as a floor, not as something to optimise away.
+The barriers cost what they cost regardless of payload, so their share says at which message size
+to use something else. Most of that cost is rank arrival skew, which any synchronisation pays
+somewhere — read it as a floor, not as something to optimise away. µs, ws=8, 40 heads, d=384.
 
-| GPU | s_local | MB/rank | barr_in | transfer | barr_out | copy_out | barriers % | GB/s crossed |
-|---|---|---|---|---|---|---|---|---|
-| pending | | | | | | | | |
+| GPU | s_local | MB/rank | barr_in | transfer | barr_out | copy_out | total | barriers | GB/s crossed |
+|---|---|---|---|---|---|---|---|---|---|
+| B200 | 16 | 0.5 | 12.2 | 35.1 | 17.0 | 6.1 | 70.4 | **41.5%** | 12.3 |
+| B200 | 256 | 7.9 | 32.3 | 52.1 | 11.1 | 8.2 | 103.6 | **41.9%** | 132.2 |
+| B200 | 1024 | 31.5 | 31.5 | 89.0 | 20.4 | 12.3 | 153.1 | **33.9%** | 309.3 |
+| B200 | 4096 | 125.8 | 27.6 | 205.0 | 25.6 | 47.1 | 305.2 | **17.4%** | 537.2 |
+| B200 | 9478 | 291.2 | 33.5 | 408.4 | 13.2 | 99.3 | 554.4 | **8.4%** | 623.8 |
+| B200 | 16384 | 503.3 | 31.7 | 653.5 | 21.3 | 161.8 | 868.3 | **6.1%** | 673.9 |
+| H200 | 16 | 0.5 | 28.3 | 29.9 | 13.0 | 4.8 | 76.1 | **54.4%** | 14.4 |
+| H200 | 9478 | 291.2 | 13.3 | 689.2 | 31.7 | 142.9 | 877.2 | **5.1%** | 369.7 |
+| B300 | 16 | 0.5 | 12.4 | 41.2 | 11.1 | 7.2 | 71.9 | **32.6%** | 10.4 |
+| B300 | 9478 | 291.2 | 11.2 | 403.3 | 27.4 | 99.3 | 541.2 | **7.1%** | 631.8 |
 
-## What the fabric can do
+The share depends on the machine as much as on the size, so read the column, not a rule of thumb.
+At half a megabyte per rank the handshakes are 33–54% of the call; at 31.5 MB they are 19–34%; at
+the wan-720p working point (291 MB) they are 5.1–8.4%, and at 503 MB, 2.1–6.4%. B200 carries the
+highest share throughout because its `barr_in` sits around 30 µs against 11–13 µs on the other two
+— that is arrival skew on that pair of nodes, not a property of the part.
 
-Flat 64 MiB peer copies, measured through torch symmetric memory rather than through this
-operator, so the ceiling is established independently of what is judged against it. `transfer`
-over the bytes that actually cross a link, against the per-flow number, is how much of the fabric
-the collective is using.
-
-| GPU | flows | ms | GB/s per flow | GB/s aggregate |
-|---|---|---|---|---|
-| pending | | | | |
+This operator is built for the long-sequence video DiT case, hundreds of MB per rank, which is the
+end of that range where the handshakes stop mattering.
 
 ## Why not PCIe
 
-RTX PRO 6000 is measured for a different reason: it is PCIe with the GPUs split across two CPU
-sockets, which is the topology the constructor refuses. Three things are recorded there — that
-`require_nvlink=True` does refuse it and names the pair, what the operator does anyway with
-`require_nvlink=False`, and the same-socket versus cross-socket contrast that
-[design.md](design.md) rests on.
+RTX PRO 6000 is measured for a different reason: PCIe, GPUs split 4/4 across two CPU sockets, which
+is the topology the constructor refuses. Three things came out of it.
 
-| measurement | result |
-|---|---|
-| pending | |
+**The refusal works.** With the default `require_nvlink=True`, `UlyssesGroup()` raised
+`cuda:0 and cuda:1 are not joined by NVLink`, and `doctor` printed an all-`N` matrix — while
+`pytest test/` passed 51/51 on the same machine, since the tests construct their groups with the
+check off. This is the first confirmation on real hardware that the NVML fix holds: before it,
+"this GPU has no NVLink" was read as "NVML cannot say", and the guard stayed inert on exactly the
+topology it exists for.
+
+That evidence is in `pro6000-refusal-smc521ge-0080.log`, the run that was *stopped* by the
+refusal. The two tables below come from separate runs with `--allow-non-nvlink`, whose logs
+therefore contain no refusal at all.
+
+**The cost of ignoring it, with `--allow-non-nvlink`** — and here the two nodes disagree by 5×, so
+nothing is averaged:
+
+| node | PCIe layout, socket 0 | BASE | transfer | OURS | vs BASE | raw |
+|---|---|---|---|---|---|---|
+| smc521ge-0040 | 2+2 | 14.933 | 22.848 | 24.090 | 0.62× | 14.026 |
+| smc521ge-0080 | 3+1 | 17.525 | 122.250 | 122.750 | 0.14× | 16.540 |
+
+**The fabric is not what differs.** Flat 64 MiB peer copies give 54.6 and 55.9 GB/s single-flow,
+and 52.1 GB/s per flow with all eight running, on *both* nodes. What differs is what the collective
+extracts from it: 11.2 GB/s on one node and 2.1 GB/s on the other — 20% and 4% of the same ceiling,
+against 90–99% on every NVLink machine.
+
+So the PCIe deficit is not bandwidth. It is that the pitched (strided) copy pattern degrades badly
+there, and by an amount that depends on the PCIe switch layout: the fast node has its socket-0 GPUs
+in two pairs, the slow one has three on one switch and one alone.
+
+This also revises a v0.1 conclusion. v0.1 measured 119.2 ms on one RTX PRO 6000 node, could not
+reproduce it on a second, and withdrew the row as a bad node. It reproduces here at 122.25 ms, with
+a second node at 22.85 ms against v0.1's surviving 22.4 ms. **Both modes are real.** v0.1 also
+recorded that "a pitched copy runs at 1.00–1.10× a flat one, never slower, on either path" — that
+was measured on different PCIe machines and does not hold here, where the gap is 25×.
 
 ## Carried over from v0.1
 
-These were measured on the NVSHMEM backend. The transfer path is unchanged — the same pitched
-copies over the same kind of VMM-mapped peer memory — and a same-machine A/B on 2×H200 put the
-`transfer` stage within 0.8% (wan-720p 1.501 → 1.499 ms, wan-480p 0.664 → 0.659, h3 1.061 → 1.061).
-They are recorded as context, not as v0.2 results.
+Measured on the NVSHMEM backend, kept as context. A same-machine A/B on 2×H200 put the `transfer`
+stage within 0.8% across the backend swap, and the v0.2 numbers above land within 1% of the v0.1
+ones on the machines both saw (B200 wan-720p: v0.1 BASE 1.193 / OURS 0.554, v0.2 1.194 / 0.550).
 
-- Across A100, H200 and B200 at 8 ranks: **1.7–2.2× the `torch.distributed` path**. 47–60% of the
-  baseline is relayout that costs nothing here, and the transfer alone beat a bare
-  `all_to_all_single` by 1.12–1.37×.
-- The collective hid essentially completely under a concurrent GEMM chain: 86% on B200, ~105% on
-  A100.
-- Dropping the sequence padding was free (1.00×); the baseline paid 5–8% for the same change.
+- 8×A100-SXM4-80GB: 1.72–1.87× the `torch.distributed` path, CE/raw 1.12–1.37×.
+- The collective hid ~105% under a concurrent GEMM chain on A100 (read >100% as fully hidden: the
+  serial arrangement pays a launch cost the concurrent one avoids).
 
 ## Alternatives tried and not adopted
 
@@ -156,3 +265,4 @@ They are recorded as context, not as v0.2 results.
 - **End-to-end model impact.** These are microbenchmarks — warm L2, no neighbours competing for
   bandwidth. Removing the padding saves attention work and memory this cannot see.
 - **Beyond `world_size = 8`,** or across nodes.
+- **H100**, which was still queued when the rest was taken.
