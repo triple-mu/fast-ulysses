@@ -73,6 +73,16 @@ dist.destroy_process_group()
 
 Every rank must issue the same sequence of shapes. More: [docs/quickstart.md](docs/quickstart.md).
 
+A real one — a DiT attention block, sequence-parallel, forward and backward, checked against the
+same block without sequence parallelism:
+
+```bash
+torchrun --nproc_per_node=8 examples/dit_attention.py
+```
+
+The collective is differentiable, so that block is an ordinary `nn.Module`: no `autograd.Function`
+wrapper, no manual backward.
+
 ## API
 
 | Entry point | Purpose |
