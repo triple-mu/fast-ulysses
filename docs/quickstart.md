@@ -86,6 +86,14 @@ Every rank must issue the same sequence of shapes. The first call with a new sha
 window, and that allocation is collective — if one rank takes a branch the others do not, it waits
 there. This is the same discipline `torch.distributed` collectives already require.
 
+## Coming from another Ulysses
+
+`DistributedAttention`, `UlyssesAttention` and `LongContextAttention` are attention modules, and
+sglang's `usp.py` is called from one; this is only the collective, so a port replaces the module
+with the two calls above plus your own attention. `scatter_idx` / `gather_idx` map to `mode`, the
+`torch.autograd.Function` wrapper is deleted rather than translated, and a caller on `(s, b, n, d)`
+still owes a transpose. Call by call: [migration.md](migration.md).
+
 ## Checking the machine
 
 ```bash

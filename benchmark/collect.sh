@@ -110,7 +110,7 @@ if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
     fi
 fi
 
-for mode in stages zerocopy sweep link overlap padding; do
+for mode in stages zerocopy sweep link zerosm overlap padding; do
     run "${mode}" "${NPROC}"
 done
 

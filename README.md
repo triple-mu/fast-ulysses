@@ -95,7 +95,9 @@ wrapper, no manual backward.
 | `fast-ulysses doctor` | Build, devices, NVLink matrix. |
 
 Shapes, splits and the collective contract: [docs/api.md](docs/api.md). Why the code is shaped
-this way, and what it rests on that is not guaranteed: [docs/design.md](docs/design.md).
+this way, and what it rests on that is not guaranteed: [docs/design.md](docs/design.md). Coming from
+DeepSpeed-Ulysses, sglang's `usp.py` or yunchang — what each call becomes, and what this does not
+have: [docs/migration.md](docs/migration.md).
 
 ## Limits
 
@@ -116,13 +118,30 @@ this way, and what it rests on that is not guaranteed: [docs/design.md](docs/des
 Requires **PyTorch 2.10+**, **CUDA 12.8+ or 13**, and sm80 / sm90 / sm100 / sm120. torch is the
 only runtime dependency.
 
+A wheel is built against one (torch minor, CUDA major) and embeds that torch's C++ ABI, so the pair
+has to match. Install torch first, then pick the index by the CUDA major it was built against:
+
 ```bash
-pip install fast-ulysses                                          # newest torch, from PyPI
+pip install fast-ulysses --index-url https://triple-mu.github.io/fast-ulysses/whl/cu13/   # or cu12
+```
+
+That index carries fast-ulysses and nothing else, so pip cannot move your torch to satisfy it: it
+backtracks to the wheel pinned to the torch minor you already have. `fast-ulysses wheel-url` names
+the row for the environment running now and prints the same install as a fully pinned
+`--find-links` command against the release assets, when you want the file itself.
+
+```bash
+pip install fast-ulysses                                          # PyPI: torch 2.13.x + CUDA 13
 pip install -e . --no-build-isolation                             # from source, all four arches
 FAST_ULYSSES_CUDA_ARCH=90 pip install -e . --no-build-isolation   # one arch, much faster
 ```
 
-Wheels for other torch versions, and what to do when the import fails:
+PyPI carries that one pair, pinned `torch==2.13.*`. On any other torch the first command does not
+fail — pip upgrades torch to 2.13, a different CUDA build than the one you chose.
+
+The one thing to know before reaching for `--find-links`: PEP 440 orders local versions, so an
+install that does not write `+torch210cu128` out in full takes `torch213cu130` whatever torch you
+have, silently. That, the per-row indexes and what to do when the import fails:
 [docs/install.md](docs/install.md).
 
 ## Testing

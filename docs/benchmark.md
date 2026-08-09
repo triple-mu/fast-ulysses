@@ -33,7 +33,7 @@ attention inputs of two real models, QKV packed into one collective so the last 
 ```bash
 benchmark/collect.sh <label>          # everything, with the environment recorded next to it
 ./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 \
-    benchmark/bench_a2a.py --mode {stages|zerocopy|sweep|link|overlap|padding}
+    benchmark/bench_a2a.py --mode {stages|zerocopy|sweep|link|zerosm|overlap|padding}
 ```
 
 Raw logs, one per (model, node), are archived outside this repo at
@@ -75,9 +75,9 @@ ws=8. The last column is how far the second node's `OURS` was from the first's.
 | H100 | wan-480p | 0.171 | 0.376 | 0.178 | **0.726** | 0.014 | 0.325 | 0.023 | 0.093 | **0.454** | **1.60×** | 0.395 | 1.22× | 48.2% | 15.0% |
 | H100 | h3-t2va-5s | 0.270 | 0.595 | 0.284 | **1.148** | 0.015 | 0.511 | 0.026 | 0.140 | **0.692** | **1.66×** | 0.599 | 1.17× | 48.2% | 4.0% |
 
-Across three NVLink generations the shape is the same: **1.65–2.17× the `torch.distributed` path**,
+Across three NVLink generations the shape is the same: **1.60–2.17× the `torch.distributed` path**,
 of which 46.9–60.0% is relayout that costs nothing here, and the transfer alone beats a bare
-`all_to_all_single` by 1.20–1.36×.
+`all_to_all_single` by 1.16–1.36×.
 
 The node-2 spread is not in the transport. Where it reaches 7–8% (B200's two smaller shapes) the
 `transfer` stage agrees to within 2% and the difference is in the barriers — that is rank arrival
@@ -133,7 +133,8 @@ device-to-device copy against the slowest fabric here.
 
 There is a second reason to prefer it, which the times above do not show: `copy_out` is a
 same-device copy, and a same-device copy competes with compute for SMs where a peer copy does not
-(see [design.md](design.md)). The zero-copy path is the one that is actually zero-SM end to end.
+(see [design.md](design.md); `--mode zerosm` is the A/B, and it is not in this document — see
+"What is not measured"). The zero-copy path is the one that is actually zero-SM end to end.
 
 ## Hiding the collective under compute
 
@@ -196,8 +197,9 @@ no second-node column.
 | H100 | wan-480p | 0.331 | 0.642 | 0.350 | **1.323** | 0.010 | 0.510 | 0.008 | 0.172 | **0.701** | **1.89×** | 0.688 | 51.5% |
 | H100 | h3-t2va-5s | 0.529 | 1.034 | 0.560 | **2.123** | 0.013 | 0.934 | 0.010 | 0.275 | **1.233** | **1.72×** | 0.948 | 51.3% |
 
-B200's ratio is higher at ws=4 than at ws=8 (2.6-2.8x against 1.9-2.2x) while H100's is lower
-(1.7-1.9x against 1.6-1.7x, i.e. barely moved), and the reason is the baseline, not this operator. A permute costs the whole tensor whatever the group size, while the collective
+Both ratios are higher at ws=4 than at ws=8 -- B200's by a lot (2.6-2.8x against 1.9-2.2x), H100's
+barely (1.7-1.9x against 1.6-1.7x) -- and the reason is the baseline, not this operator. A permute
+costs the whole tensor whatever the group size, while the collective
 itself moves only `(ws-1)/ws` of it -- 3/4 here against 7/8 at ws=8. So the relayout the baseline
 pays and this path does not is a larger share of a smaller total. Read the `relayout%` column, not
 the multiplier, when comparing across group sizes.
@@ -318,6 +320,11 @@ ones on the machines both saw (B200 wan-720p: v0.1 BASE 1.193 / OURS 0.554, v0.2
 
 ## What is not measured
 
+- **The zero-SM A/B on these machines.** `--mode zerosm` — a peer copy and a same-device copy of
+  the same bytes, each under a GEMM chain matched to its own length, reporting that chain's own
+  slowdown next to the pair's wall clock — was written after this measurement pass, so no table
+  here carries it. The H200 numbers quoted in [design.md](design.md) predate the mode and were not
+  produced by it. `collect.sh` runs it, so the next pass will have them.
 - **End-to-end model impact.** These are microbenchmarks — warm L2, no neighbours competing for
   bandwidth. Removing the padding saves attention work and memory this cannot see.
 - **Beyond `world_size = 8`,** or across nodes. ws=4 is above; ws=2 is not measured.

@@ -4,8 +4,8 @@ Run under tools/exclusive.sh -- a number from a shared GPU is not a number:
 
     ./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py --mode stages
 
-Modes: stages (default), overlap, padding, zerocopy, sweep, link. benchmark/collect.sh runs all
-of them in order and records the environment they ran in.
+Modes: stages (default), overlap, padding, zerocopy, sweep, link, zerosm. benchmark/collect.sh runs
+all of them in order and records the environment they ran in.
 
 stages (default)
     Both paths broken into their parts on one stream, so they sum to the whole call rather than
@@ -43,6 +43,14 @@ link
     Flat peer copies, one pair and all pairs at once, to establish what the fabric can actually
     do. It is what makes `transfer` interpretable: at 80% of this ceiling there is nothing left to
     schedule, and at 30% there is.
+
+zerosm
+    Does a copy take SMs? The same bytes and the same `dst.copy_(src)` twice -- once into a peer's
+    symmetric-memory window, once into this rank's own memory -- the same copy count for both, each
+    under a GEMM chain matched to its own length, and each also run alone. Read the GEMM's own
+    slowdown -- its time with the copy underneath it over its time alone -- together with the pair's
+    wall clock: 1.00x at a 1.00x pair ratio is "that copy used no SMs", while 1.00x at full
+    competition is a copy the GEMM starved. Neither column decides it alone.
 """
 
 from __future__ import annotations
@@ -63,6 +71,14 @@ SHAPES = [
     ("wan-480p", 32760, 40, 384, 227),
     ("h3-t2va-5s", 37824, 56, 384, 227),
 ]
+
+# --mode zerosm. The GEMM is square fp16 at this size on every machine, which is the shape the
+# measurement quoted in docs/design.md used. LONG_MS is the floor the stretched payload is
+# calibrated to, for the shorter of the two arms: at 20 ms a launch gap of tens of microseconds is
+# a tenth of a percent. It is a chosen floor, not a measured noise level.
+GEMM_N = 8192
+LONG_MS = 20.0
+ROUNDS, INNER = 5, 5
 
 
 class Stopwatch:
@@ -427,12 +443,195 @@ def run_link(group, pg, rank, ws, args) -> None:
         print("# per-flow number above, is how much of the fabric the collective is using.")
 
 
+def run_zerosm(group, pg, rank, ws, args) -> None:
+    """Whether a copy takes SMs, as an A/B with a control: peer destination against same-device.
+
+    Goes through torch symmetric memory rather than through the operator, for the reason run_link
+    does and one more: the operator's path also contains two barrier kernels and a copy-out, which
+    are SM work by construction, so a measurement of the whole call cannot attribute anything to
+    the transfer. Here the two arms differ in one thing -- where the destination lives. At equal
+    bytes they do not last equally long, so each gets its own chain matched to its own copy; a
+    chain longer than the copy under it pulls the slowdown towards 1.00x whatever the copy does.
+    Read each arm's copy column against its gemm column before reading its slowdown.
+
+    The GEMM chain's own slowdown is a more direct statement than the pair's wall clock -- it is
+    the compute's own cost, not bounded by how much compute happens to be available, which is what
+    --mode overlap's hidden% is. It is not sufficient on its own: a copy the chain starved never
+    ran under it and leaves the slowdown at 1.00x too, which is why the pair ratio and the
+    full-competition reference are printed next to it and why the header says to read both. They
+    are also what docs/design.md quotes.
+    """
+    import torch.distributed._symmetric_memory as symm_mem
+
+    dev = torch.device("cuda", torch.cuda.current_device())
+    cur = torch.cuda.current_stream()
+    cps = torch.cuda.Stream()
+    lhs = torch.randn((GEMM_N, GEMM_N), dtype=torch.float16, device=dev)
+    rhs = torch.randn((GEMM_N, GEMM_N), dtype=torch.float16, device=dev)
+
+    def gemm_chain(reps):
+        def go():
+            for _ in range(reps):
+                _ = lhs @ rhs
+
+        return go
+
+    def enqueue(src, dst, reps):
+        """The copy under test, on its own stream. Nothing joins it back: pair() needs it left in
+        flight, and alone() adds the join."""
+
+        def go():
+            with torch.cuda.stream(cps):
+                for _ in range(reps):
+                    dst.copy_(src)
+
+        return go
+
+    def alone(copy_go):
+        def go():
+            cps.wait_stream(cur)
+            copy_go()
+            cur.wait_stream(cps)
+
+        return go
+
+    def pair(copy_go, gemm_go):
+        """One concurrent region: the copy queued first on its own stream, the chain on the
+        caller's, with an inner pair of marks around the chain by itself. Returns the region's wall
+        clock and the chain's own time inside it."""
+        w = Stopwatch(4)
+        w.mark()
+        cps.wait_stream(cur)
+        copy_go()
+        w.mark()
+        gemm_go()
+        w.mark()
+        cur.wait_stream(cps)
+        w.mark()
+        parts = w.read()
+        return [sum(parts), parts[1]]
+
+    label0, img, heads, d, txt = SHAPES[0]
+    s_total = img + txt
+    s_total -= s_total % ws
+    design = args.batch * (s_total // ws) * heads * d * 2  # bytes one rank hands the collective
+
+    t_one_gemm = median_ms(gemm_chain(1), args.iters, args.warmup)
+    if rank == 0:
+        print(f"# world_size={ws}, gemm is m=n=k={GEMM_N} fp16. The copy and gemm columns are")
+        print(f"#        medians over {args.iters} iters; the pair columns are medians over")
+        print(f"#        {ROUNDS}x{INNER} = {ROUNDS * INNER} samples with the arms alternating")
+        print(
+            f"# one gemm is {t_one_gemm:.3f} ms; `chain` is how many of them ran under that arm's"
+        )
+        print("#        copy, chosen so the chain lasts about as long as the copy does, and `xN`")
+        print("#        on the payload is how many copies both arms were stretched to. The bytes")
+        print("#        are shared between the arms; the chain is per arm, because the same bytes")
+        print("#        do not take the same time to reach a peer and to reach local memory")
+        print("# peer = dst is rank (r+1)%ws's symmetric-memory window, so the copy crosses a link")
+        print("# same = dst is this rank's own memory. Same bytes, same call, local destination:")
+        print("#        the only difference between the two arms is where the destination is")
+        print("# gemm slowdown = the chain's own time with the copy underneath it, over its time")
+        print("#        alone. 1.00x is 'that copy cost the chain nothing'")
+        print("# pair ratio = concurrent wall clock / max(copy alone, gemm alone); full comp is")
+        print("#        (copy + gemm) over the same max, i.e. what perfect competition would cost")
+        print("# NEITHER COLUMN IS THE RESULT ON ITS OWN. A copy the chain starved also leaves the")
+        print("#        slowdown at 1.00x: overlapped is 1.00x with a 1.00x pair ratio, starved is")
+        print("#        1.00x with a pair ratio at full comp. Only the first is the zero-SM one,")
+        print("#        and it is the pair of columns, read together, that separates them")
+        print("# Both are diluted whenever copy < gemm, since the uncovered part of the chain runs")
+        print("#        at its alone speed -- read the copy and gemm columns first")
+        if ws == 1:
+            print("#")
+            print("# world_size=1: there is no peer, so THE PEER ARM IS NOT MEASURED and this run")
+            print("# does not test the claim. The same-device arm and the gemm baseline are real.")
+            print(
+                "# Two NVLink-joined GPUs are the minimum for the comparison this mode exists for."
+            )
+        head = (
+            f"\n{'payload':<16} {'MB/iter':>8} {'flows':>5} {'arm':<5} {'copy':>8} {'gemm':>8} "
+            f"{'chain':>5} {'pair':>8} {'pair ratio':>11} {'full comp':>10} {'gemm slowdown':>14}"
+        )
+        print(head)
+        print("-" * (len(head) - 1))
+
+    for label, nbytes, stretch in ((f"{label0}/rank", design, False), ("64 MiB", 64 << 20, True)):
+        n = nbytes // 2
+        src = symm_mem.empty(n, dtype=torch.bfloat16, device=dev)
+        src.fill_(1.0)
+        handle = symm_mem.rendezvous(src, pg)
+        arms = [("same", torch.empty(n, dtype=torch.bfloat16, device=dev))]
+        if ws > 1:
+            arms.insert(0, ("peer", handle.get_buffer((rank + 1) % ws, (n,), torch.bfloat16)))
+
+        # creps sets the bytes, and both arms move the same bytes. Calibrated on the *fastest* arm
+        # so the shortest of them still lasts LONG_MS: the same bytes take several times longer to
+        # reach a peer than this rank's own memory (docs/benchmark.md, H200 wan-720p: 689 us of
+        # transfer for 255 MB crossed against 143 us of copy_out for 291 MB local), so one copy
+        # count cannot make both arms last the same. Rank 0's answer is broadcast, because every
+        # rank has to issue the same work.
+        t_one = [median_ms(alone(enqueue(src, dst, 1)), args.iters, args.warmup) for _, dst in arms]
+        creps = max(max(1, round(max(LONG_MS, t_one_gemm) / t)) for t in t_one) if stretch else 1
+        plan = torch.tensor([creps], device=dev, dtype=torch.int64)
+        dist.broadcast(plan, 0)
+        creps = int(plan[0])
+        moved = creps * nbytes / 1e6
+
+        # One flow is rank 0 writing rank 1 with every other rank idle, as in run_link; all pairs
+        # is every rank writing its neighbour and running its own chain. Reported separately: they
+        # are different questions, and at ws=1 they would be the same row.
+        rows = [(1, rank == 0)] + ([(ws, True)] if ws > 1 else [])
+        for flows, mine in rows:
+            copies = {name: enqueue(src, dst, creps if mine else 0) for name, dst in arms}
+            t_copy = {a: median_ms(alone(c), args.iters, args.warmup) for a, c in copies.items()}
+            # One chain per arm, matched to that arm's own copy, which is the experiment
+            # docs/design.md describes: a chain "of the same duration". A chain longer than the
+            # copy under it pulls the slowdown towards 1.00x whatever the copy does, and with one
+            # shared chain that would hit the same-device arm -- the one that is supposed to
+            # move -- hardest, since it is the shorter of the two at equal bytes.
+            plan = torch.tensor(
+                [max(1, round(t_copy[a] / t_one_gemm)) for a in copies],
+                device=dev,
+                dtype=torch.int64,
+            )
+            dist.broadcast(plan, 0)
+            greps = dict(zip(copies, plan.tolist()))
+            chains = {a: gemm_chain(greps[a] if mine else 0) for a in copies}
+            t_gemm = {a: median_ms(c, args.iters, args.warmup) for a, c in chains.items()}
+            # Alternate the arms and compare medians, so that a drift over the run cannot land on
+            # one arm. The barrier keeps every rank in the same arm at the same time, which is
+            # what makes the all-pairs row an all-pairs measurement.
+            samples = {name: [] for name in copies}
+            for _ in range(ROUNDS):
+                for name in copies:
+                    dist.barrier()
+                    samples[name].append(
+                        median_of(lambda: pair(copies[name], chains[name]), INNER, 1)
+                    )
+            dist.barrier()
+            if rank != 0:
+                continue
+            for name in copies:
+                t_pair = statistics.median(r[0] for r in samples[name])
+                t_under = statistics.median(r[1] for r in samples[name])
+                longer = max(t_copy[name], t_gemm[name])
+                full = (t_copy[name] + t_gemm[name]) / longer
+                shown = f"{label} x{creps}" if creps > 1 else label
+                print(
+                    f"{shown:<16} {moved:8.0f} {flows:>5} {name:<5} "
+                    f"{t_copy[name]:8.3f} {t_gemm[name]:8.3f} {greps[name]:>5} "
+                    f"{t_pair:8.3f} {t_pair / longer:10.2f}x "
+                    f"{full:9.2f}x {t_under / t_gemm[name]:13.2f}x",
+                    flush=True,
+                )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
         default="stages",
-        choices=["stages", "overlap", "padding", "zerocopy", "sweep", "link"],
+        choices=["stages", "overlap", "padding", "zerocopy", "sweep", "link", "zerosm"],
         help="which measurement to run; see the module docstring",
     )
     parser.add_argument("--iters", type=int, default=25)
@@ -459,6 +658,7 @@ def main() -> None:
         "zerocopy": run_zerocopy,
         "sweep": run_sweep,
         "link": run_link,
+        "zerosm": run_zerosm,
     }[args.mode](group, pg, rank, ws, args)
 
     group.destroy()

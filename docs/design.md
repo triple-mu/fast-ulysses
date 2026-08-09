@@ -16,6 +16,28 @@ property is a property of the *remote* copies. Two same-device copies remain: th
 share of the transfer, and the copy-out on the copying path. That is the strongest argument for
 `out=` from `empty_output()`, which removes the second one.
 
+`benchmark/bench_a2a.py --mode zerosm` is that A/B, and is how to check it on a machine here:
+
+```bash
+./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 \
+    benchmark/bench_a2a.py --mode zerosm
+```
+
+The same bytes and the same `dst.copy_(src)`, once into a peer's window and once into this rank's
+own memory, each under its own GEMM chain matched to that copy's length — the same bytes take
+several times longer to reach a peer than to reach local memory (H200 wan-720p in
+[benchmark.md](benchmark.md): 255 MB crossing a link in 689 µs of `transfer`, against 291 MB copied
+locally in 143 µs of `copy_out`), so one chain cannot be the same duration as both. It goes through
+torch symmetric memory rather than through the operator, whose path also contains two barrier
+kernels and a copy-out and so cannot attribute anything to the transfer. Besides the pair ratio and
+the full-competition reference above, it reports the GEMM chain's **own** slowdown with the copy
+underneath it: 1.00× is "that copy cost the chain nothing".
+That column is not sufficient on its own — a copy the chain starved never ran under it and reads
+1.00× too, at a pair ratio equal to full competition — so the two are read together, and the run
+says so in its header. Two GPUs are the minimum: at `world_size = 1` there is no peer arm and the
+run says that too. The numbers in the paragraph above predate the mode and were not produced by it;
+no table in [benchmark.md](benchmark.md) carries them yet.
+
 The sequence/head relayout is expressed as source and destination strides on those copies, so it
 costs nothing beyond the transfer that had to happen anyway. That is why the baseline's two permute
 kernels do not appear on this side at all.

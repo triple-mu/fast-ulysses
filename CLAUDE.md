@@ -33,7 +33,7 @@ fast-ulysses doctor               # build facts, devices, NVLink matrix
 
 # Benchmarks MUST go through exclusive.sh; a CONTENDED number is not a number.
 ./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py \
-    --mode {stages,overlap,padding,zerocopy,sweep,link}
+    --mode {stages,overlap,padding,zerocopy,sweep,link,zerosm}
 ```
 
 `build/` is a persistent CMake tree, so rebuilds are incremental. `rm -rf build` only when the repo
