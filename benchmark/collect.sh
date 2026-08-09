@@ -37,8 +37,15 @@ echo "host          $(hostname)"
 echo "slurm job     ${SLURM_JOB_ID:-<none>}  node=${SLURMD_NODENAME:-<none>}"
 echo "gpus          ${GPUS}  (nproc=${NPROC})"
 echo "repo          ${REPO}"
-echo "commit        $(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo '<not a git tree>')"
-echo "git status    $(git -C "${REPO}" status --porcelain 2>/dev/null | wc -l) modified file(s)"
+# On a cluster the tree is usually rsync'd without .git, so fall back to the COMMIT file the
+# sync writes. A number whose commit is unknown cannot be reproduced or retracted.
+if git -C "${REPO}" rev-parse --short HEAD >/dev/null 2>&1; then
+    echo "commit        $(git -C "${REPO}" rev-parse --short HEAD)  ($(git -C "${REPO}" status --porcelain | wc -l) modified file(s))"
+elif [[ -f "${REPO}/COMMIT" ]]; then
+    echo "commit        $(cat "${REPO}/COMMIT")  (from COMMIT file; tree synced without .git)"
+else
+    echo "commit        UNKNOWN -- this run is not attributable, do not publish from it"
+fi
 echo "driver        $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
 python3 - <<'PY'
 import torch
