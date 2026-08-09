@@ -21,19 +21,33 @@ is `3 * head_dim`. `s` includes a 227-token text tail, so it does not divide by 
 | wan-480p | 32987 | 40 | 384 |
 | h3-t2va-5s | 38051 | 56 | 384 |
 
+One machine, everything, with the environment recorded next to the numbers:
+
 ```bash
-./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 benchmark/bench_a2a.py
-./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 benchmark/bench_a2a.py --overlap
-./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 benchmark/bench_a2a.py --padding
+benchmark/collect.sh <label>          # e.g. b200-node1; writes benchmark-results/<label>.log
+```
+
+It gates on `pytest test/` -- a number from a build that fails its own tests only looks like data
+-- then runs every mode through `tools/exclusive.sh`, and refuses to call the run complete if any
+mode failed. Individually:
+
+```bash
+./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 \
+    benchmark/bench_a2a.py --mode {stages|zerocopy|sweep|link|overlap|padding}
 ```
 
 ## Machines
 
 | machine | fabric | status |
 |---|---|---|
+| 8×H100 | NVLink | pending |
 | 8×H200 | NVSwitch | pending |
-| 8×A100-SXM4-80GB | NVLink | pending |
 | 8×B200 | NVLink | pending |
+| 8×B300 | NVLink | pending |
+| 8×RTX PRO 6000 | PCIe, 2 sockets | pending — a different question; see "Why not PCIe" |
+
+8×A100 appears in the v0.1 section below and is not re-measured here: the cluster these numbers
+come from has no A100.
 
 ## Where the time goes
 
@@ -72,9 +86,42 @@ absolute times.
 `out=` from `empty_output()` removes the `copy_out` stage. Its share of the copying call is the
 number to look at before reaching for it.
 
-| GPU | shape | copying | zero-copy | saving |
+| GPU | shape | copying | zero-copy | saving | copy_out share of copying |
+|---|---|---|---|---|---|
+| pending | | | | | |
+
+## Where this stops being the right tool
+
+The barriers cost what they cost regardless of payload, so their share is what says at which
+message size to use something else. Most of that cost is rank arrival skew, which any
+synchronisation pays somewhere — read it as a floor, not as something to optimise away.
+
+| GPU | s_local | MB/rank | barr_in | transfer | barr_out | copy_out | barriers % | GB/s crossed |
+|---|---|---|---|---|---|---|---|---|
+| pending | | | | | | | | |
+
+## What the fabric can do
+
+Flat 64 MiB peer copies, measured through torch symmetric memory rather than through this
+operator, so the ceiling is established independently of what is judged against it. `transfer`
+over the bytes that actually cross a link, against the per-flow number, is how much of the fabric
+the collective is using.
+
+| GPU | flows | ms | GB/s per flow | GB/s aggregate |
 |---|---|---|---|---|
 | pending | | | | |
+
+## Why not PCIe
+
+RTX PRO 6000 is measured for a different reason: it is PCIe with the GPUs split across two CPU
+sockets, which is the topology the constructor refuses. Three things are recorded there — that
+`require_nvlink=True` does refuse it and names the pair, what the operator does anyway with
+`require_nvlink=False`, and the same-socket versus cross-socket contrast that
+[design.md](design.md) rests on.
+
+| measurement | result |
+|---|---|
+| pending | |
 
 ## Carried over from v0.1
 
@@ -99,7 +146,9 @@ They are recorded as context, not as v0.2 results.
 | `cudaMemcpy3DBatchAsync` | 0.82 ms, and 1.35 ms with `cudaMemcpyFlagPreferOverlapWithCompute`, against the plain `cudaMemcpy3DAsync` used instead. Also rejects the legacy default stream. |
 | Fusing single-row copies into 3D | 0.67 → 2.24 ms at `b=2`. Fusion is applied only to multi-row copies for this reason. |
 | Contiguous per-sender segments instead of strided writes | ~9% below contiguous in a sibling implementation, and not available here regardless: the window is the returned tensor, so there is no local pass to interleave afterwards. |
-| `cuStreamWriteValue64` / `cuStreamWaitValue64` instead of the spin kernel | Concurrent-GEMM overlap fell from +34% to −28%. The waiting form also needs `CU_DEVICE_ATTRIBUTE_CAN_FLUSH_REMOTE_WRITES`, which is 0 on much of the target hardware. |
+| `cuStreamWriteValue64` / `cuStreamWaitValue64` instead of the spin kernel | Concurrent-GEMM overlap fell from +34% to −28%. See [design.md](design.md) for why `CAN_FLUSH_REMOTE_WRITES`, which an earlier note blamed, is not the reason. |
+| Publishing the closing flag as a copy-engine write on the transfer stream (NCCL's kernel-less shape) | Measured 3× slower than the barrier kernel it would replace (7× 8 B peer copies ≈ 16 µs against 4–6 µs), and it only moves the publish — the wait stays in a kernel. |
+| Double-buffering the window to drop the opening barrier | Sound, but worth ~0.7% at the design point: it only helps the copying path, costs 2× window memory, and invalidates the premise of the one adversarial test. |
 | Cross-socket staging through pinned host memory | 2× the link bandwidth on an Intel PCIe machine, 10% on an AMD one — but it needs the receiver to pull, so it is a new transport with a second handshake. Not built; see [design.md](design.md). |
 
 ## What is not measured

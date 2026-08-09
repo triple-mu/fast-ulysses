@@ -1,10 +1,11 @@
-"""Where the time goes, how much of it hides under compute, and what the padding costs.
+"""Where the time goes, how much of it hides under compute, and what each path costs.
 
 Run under tools/exclusive.sh -- a number from a shared GPU is not a number:
 
-    ./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py
-    ./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py --overlap
-    ./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py --padding
+    ./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py --mode stages
+
+Modes: stages (default), overlap, padding, zerocopy, sweep, link. benchmark/collect.sh runs all
+of them in order and records the environment they ran in.
 
 stages (default)
     Both paths broken into their parts on one stream, so they sum to the whole call rather than
@@ -26,6 +27,22 @@ padding
     every step. Per-rank seq_splits accepts shards differing by one token instead. The question is
     whether our uneven path costs the same as our even one -- if it does, dropping the pad is free
     here and whatever it saves elsewhere is profit.
+
+zerocopy
+    What `out=` from empty_output() is worth. The peers then write the caller's buffer directly and
+    there is no copy-out, which matters more than it looks: a same-device copy competes with
+    compute for SMs, while the peer copies do not.
+
+sweep
+    The four stages against message size. The barriers cost what they cost regardless of payload,
+    so their share is what says at which size this operator stops being the right tool. Read the
+    barrier column as a floor, not as something to optimise away -- most of it is rank arrival
+    skew, which any synchronisation would pay somewhere.
+
+link
+    Flat peer copies, one pair and all pairs at once, to establish what the fabric can actually
+    do. It is what makes `transfer` interpretable: at 80% of this ceiling there is nothing left to
+    schedule, and at 30% there is.
 """
 
 from __future__ import annotations
@@ -283,10 +300,129 @@ def _baseline_unpadded(x, pg, ws, rank, seq_splits):
     return torch.cat(chunks, dim=2).permute(1, 2, 0, 3).contiguous()
 
 
+def run_zerocopy(group, pg, rank, ws, args) -> None:
+    """What `out=` from empty_output() removes, and what that is worth end to end."""
+    dev = torch.device("cuda", torch.cuda.current_device())
+    if rank == 0:
+        print(f"# world_size={ws} b={args.batch} iters={args.iters} mode=0 dtype=bfloat16")
+        print("# copying  = the call allocates, transfers into its own window, copies out")
+        print("# zerocopy = out= from empty_output(): the peers write that buffer directly\n")
+        head = (
+            f"{'shape':<14} {'MB':>6} | {'copying':>9} {'zerocopy':>9} {'saved':>8} {'speedup':>8} | "
+            f"{'copy_out':>9} {'of copying':>11}"
+        )
+        print(head)
+        print("-" * len(head))
+
+    for label, img, heads, d, txt in SHAPES:
+        s_total = img + txt
+        s_total -= s_total % ws
+        x = torch.randn((args.batch, s_total // ws, heads, d), dtype=torch.bfloat16, device=dev)
+        mb = x.numel() * x.element_size() / 1e6
+        buf = group.empty_output(x, mode=0)
+
+        copying = median_ms(lambda: group.all_to_all_4d(x, mode=0), args.iters, args.warmup)
+        zero = median_ms(lambda: group.all_to_all_4d(x, mode=0, out=buf), args.iters, args.warmup)
+        # The stage the zero-copy path skips, measured on the copying path for attribution.
+        stages = median_of(
+            lambda: list(group._timed(x, mode=0)[1].values()), args.iters, args.warmup
+        )
+        if rank == 0:
+            print(
+                f"{label:<14} {mb:6.0f} | {copying:9.3f} {zero:9.3f} {copying - zero:8.3f} "
+                f"{copying / zero:7.2f}x | {stages[3]:9.3f} {stages[3] / sum(stages) * 100:10.1f}%",
+                flush=True,
+            )
+        dist.barrier()
+
+
+def run_sweep(group, pg, rank, ws, args) -> None:
+    """Every stage against message size, so the barrier share is a curve rather than one point."""
+    dev = torch.device("cuda", torch.cuda.current_device())
+    heads = ((40 + ws - 1) // ws) * ws  # mode 0 scatters the head axis, so it must divide
+    d = 384
+    if rank == 0:
+        print(f"# world_size={ws} heads={heads} d={d} bf16, medians over {args.iters} iters")
+        head = (
+            f"{'s_local':>8} {'MB/rank':>8} | {'barr_in':>8} {'transfer':>9} {'barr_out':>9} "
+            f"{'copy_out':>9} {'total':>9} | {'barriers':>9} {'GB/s':>7}"
+        )
+        print(head)
+        print("-" * len(head))
+
+    biggest = (75600 + 227) // ws
+    for s_local in (16, 64, 256, 1024, 4096, 16384, biggest):
+        x = torch.randn((1, s_local, heads, d), dtype=torch.bfloat16, device=dev)
+        mb = x.numel() * x.element_size() / 1e6
+        stages = median_of(
+            lambda: list(group._timed(x, mode=0)[1].values()), args.iters, args.warmup
+        )
+        total = sum(stages)
+        if rank == 0:
+            bar = stages[0] + stages[2]
+            # Bytes that actually cross a link: everything except this rank's own share.
+            crossed = mb * (ws - 1) / ws / 1e3
+            print(
+                f"{s_local:>8} {mb:>8.1f} | {stages[0] * 1e3:>8.1f} {stages[1] * 1e3:>9.1f} "
+                f"{stages[2] * 1e3:>9.1f} {stages[3] * 1e3:>9.1f} {total * 1e3:>9.1f} | "
+                f"{bar / total * 100:>8.1f}% {crossed / (stages[1] / 1e3):>7.1f}",
+                flush=True,
+            )
+        dist.barrier()
+
+
+def run_link(group, pg, rank, ws, args) -> None:
+    """What the fabric does on flat peer copies, which is the ceiling `transfer` is measured against.
+
+    Uses torch symmetric memory directly rather than the operator, so the ceiling is established
+    independently of the thing being judged against it.
+    """
+    import torch.distributed._symmetric_memory as symm_mem
+
+    dev = torch.device("cuda", torch.cuda.current_device())
+    n = (64 << 20) // 2  # 64 MiB of bfloat16
+    src = symm_mem.empty(n, dtype=torch.bfloat16, device=dev)
+    src.fill_(1.0)
+    handle = symm_mem.rendezvous(src, pg)
+    peer = (rank + 1) % ws
+    dst = handle.get_buffer(peer, (n,), torch.bfloat16)
+    gb = n * 2 / 1e9  # bytes moved per copy, in GB
+
+    def one_pair():
+        # Only rank 0 writes, so the fabric carries a single flow.
+        if rank == 0:
+            dst.copy_(src)
+
+    def all_pairs():
+        dst.copy_(src)
+
+    if ws == 1:
+        if rank == 0:
+            print("# world_size=1: no link to measure")
+        return
+
+    t1 = median_ms(one_pair, args.iters, args.warmup)
+    dist.barrier()
+    tn = median_ms(all_pairs, args.iters, args.warmup)
+    dist.barrier()
+    if rank == 0:
+        print(f"# world_size={ws}, flat 64 MiB peer copy, rank r -> rank (r+1)%ws\n")
+        print(f"{'flows':<10} {'ms':>8} {'GB/s per flow':>15} {'GB/s aggregate':>16}")
+        print("-" * 52)
+        print(f"{'1':<10} {t1:8.3f} {gb / (t1 / 1e3):>15.1f} {gb / (t1 / 1e3):>16.1f}")
+        print(f"{ws:<10} {tn:8.3f} {gb / (tn / 1e3):>15.1f} {gb * ws / (tn / 1e3):>16.1f}")
+        print("\n# `transfer` in --mode stages, over the bytes that cross a link, against the")
+        print("# per-flow number above, is how much of the fabric the collective is using.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--overlap", action="store_true", help="GEMM overlap instead of stages")
-    parser.add_argument("--padding", action="store_true", help="padding cost instead of stages")
+    parser.add_argument(
+        "--mode",
+        default="stages",
+        choices=["stages", "overlap", "padding", "zerocopy", "sweep", "link"],
+        help="which measurement to run; see the module docstring",
+    )
     parser.add_argument("--iters", type=int, default=25)
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--batch", type=int, default=1)
@@ -298,12 +434,14 @@ def main() -> None:
     pg = dist.group.WORLD
     group = UlyssesGroup(process_group=pg)
 
-    if args.overlap:
-        run_overlap(group, pg, rank, ws, args)
-    elif args.padding:
-        run_padding(group, pg, rank, ws, args)
-    else:
-        run_stages(group, pg, rank, ws, args)
+    {
+        "stages": run_stages,
+        "overlap": run_overlap,
+        "padding": run_padding,
+        "zerocopy": run_zerocopy,
+        "sweep": run_sweep,
+        "link": run_link,
+    }[args.mode](group, pg, rank, ws, args)
 
     group.destroy()
     dist.destroy_process_group()
