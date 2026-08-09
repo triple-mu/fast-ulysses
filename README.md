@@ -16,8 +16,10 @@ This ships that 4D all-to-all as `torch.ops.fast_ulysses.all_to_all_4d`, over NV
 
 ## Key features
 
-- **No SMs.** The transfer is pitched `cudaMemcpy2D/3DAsync` straight into peers' symmetric-memory
-  addresses, so it runs on the copy engines while compute kernels hold every SM.
+- **No SMs.** The peer transfers are pitched `cudaMemcpy2D/3DAsync` straight into peers'
+  symmetric-memory addresses, so they run on the copy engines while compute kernels hold every SM.
+  (Measured: a peer copy overlaps a concurrent GEMM completely; a same-device copy does not, which
+  is why `out=` from `empty_output()` — which removes the copy-out — is the faster path.)
 - **Relayout for free.** The sequence/head permutation is expressed as source and destination
   strides on those copies, not as two permute kernels. That is roughly half of what the
   `torch.distributed` path spends.

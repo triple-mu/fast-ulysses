@@ -62,19 +62,17 @@ def main() -> None:
     good = torch.randn(2, 16, 4 * ws, 128, **kw16)
 
     # --- shape, dtype and mode -----------------------------------------------------------
-    check.raises("a 3D input", "must be 4D", lambda: group.all_to_all_4d(torch.randn(2, 16, 128, **kw16)))
     check.raises(
-        "float32", "float16 or bfloat16", lambda: group.all_to_all_4d(good.float())
+        "a 3D input", "must be 4D", lambda: group.all_to_all_4d(torch.randn(2, 16, 128, **kw16))
     )
+    check.raises("float32", "float16 or bfloat16", lambda: group.all_to_all_4d(good.float()))
     check.raises(
         "a head dim that is not 16B-aligned",
         "16-byte aligned",
         lambda: group.all_to_all_4d(torch.randn(2, 16, 4 * ws, 4, **kw16)),
     )
     check.raises("mode 2", "mode must be 0 or 1", lambda: group.all_to_all_4d(good, mode=2))
-    check.raises(
-        "a CPU input", "must be a CUDA tensor", lambda: group.all_to_all_4d(good.cpu())
-    )
+    check.raises("a CPU input", "must be a CUDA tensor", lambda: group.all_to_all_4d(good.cpu()))
 
     # --- splits ---------------------------------------------------------------------------
     check.raises(
@@ -117,7 +115,9 @@ def main() -> None:
     check.raises(
         "out with the wrong dtype",
         "out has dtype",
-        lambda: group.all_to_all_4d(good, out=torch.empty(*want_shape, dtype=torch.float16, device=dev)),
+        lambda: group.all_to_all_4d(
+            good, out=torch.empty(*want_shape, dtype=torch.float16, device=dev)
+        ),
     )
     check.raises(
         "a non-contiguous out",

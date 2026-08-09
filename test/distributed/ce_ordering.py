@@ -8,9 +8,14 @@ announces itself with a release store from the barrier kernel on the same stream
 says the copy has COMPLETED before the kernel launches, but "completed" is defined as a host-side
 property; the Programming Guide's cross-device ordering guarantee is scoped to the NULL stream and
 withdrawn for async copies elsewhere; and PTX scopes ``.release`` to prior operations of the
-current THREAD, which a copy-engine transfer is not. Neither NVSHMEM nor NCCL pairs a host-issued
-CE transfer with an SM release store -- both keep the flag on the data's own path. So a pass here
-is evidence for this machine and this shape, not a proof.
+current THREAD, which a copy-engine transfer is not. So a pass here is evidence for this machine
+and this shape, not a proof.
+
+NVIDIA ships the same shape with weaker ordering (NVSHMEM's on-stream SIGNAL_ADD, and
+TransformerEngine's userbuffers ring_exchange, both publish from a one-thread kernel with no
+fence at all), so this is not a bet only this repo is making. NCCL's kernel-less CE collectives
+avoid it instead, by publishing the flag as a device-to-device copy on the payload's own stream.
+See docs/design.md.
 
 The worker runs the same loop twice and BOTH results have to hold:
 

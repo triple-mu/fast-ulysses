@@ -9,6 +9,13 @@ Peer windows are written with plain `cudaMemcpy2D/3DAsync` into addresses obtain
 symmetric memory. That uses the copy engines and **no SMs**, which is the point: an SM-resident
 collective cannot get a block slot while GEMMs hold every SM, and this one does not need one.
 
+Measured on H200, against a concurrent 8192³ fp16 GEMM chain of the same duration: a **peer**
+copy overlaps it completely (67.9 ms alone, 67.9 ms concurrent). A **same-device** copy does not
+— it runs at 1.79× the longer of the two, where full competition would be 1.99×. So the zero-SM
+property is a property of the *remote* copies. Two same-device copies remain: this rank's own
+share of the transfer, and the copy-out on the copying path. That is the strongest argument for
+`out=` from `empty_output()`, which removes the second one.
+
 The sequence/head relayout is expressed as source and destination strides on those copies, so it
 costs nothing beyond the transfer that had to happen anyway. That is why the baseline's two permute
 kernels do not appear on this side at all.
@@ -57,11 +64,19 @@ The epoch is on the device rather than computed on the host so that a CUDA-graph
 correctly — a host-computed epoch would bake a constant into the graph and every replay would be
 satisfied by stale state.
 
-`cuStreamWriteValue64` / `cuStreamWaitValue64` would remove the last kernel launch from the path
-and were tried. Two things against them: they measured worse under concurrent compute, which is the
-regression this operator exists to avoid, and the waiting form needs a remote-write-flush device
-attribute that much of the target hardware does not have. The spin kernel's inline PTX needs only
-`sm_70`.
+`cuStreamWriteValue64` / `cuStreamWaitValue64` would remove the kernel launches from the path and
+were tried. They measured worse under concurrent compute — overlap fell from +34% to −28% — which
+is the regression this operator exists to avoid, and that remains the reason not to use them. The
+CUDA memop documentation offers a mechanism: ordering established through those APIs "is not
+visible to CUDA", so a blocked memop is invisible to the work scheduler and concurrent kernels can
+be queued behind it.
+
+An earlier version of this note also blamed `CU_DEVICE_ATTRIBUTE_CAN_FLUSH_REMOTE_WRITES`. That
+attribute gates only the `_FLUSH` variants, which exist for writes arriving over PCIe from a NIC.
+NVSHMEM's on-stream wait does require it and does use `FLUSH`; NCCL's CE wait uses neither. The
+attribute is therefore not by itself a reason the waiting form cannot be used over NVLink.
+
+The spin kernel's inline PTX needs only `sm_70`.
 
 ## What this rests on that is not documented
 
@@ -73,8 +88,21 @@ store announcing it arrives.** No vendor document says so:
   withdrawn for async copies on a non-default stream;
 - PTX scopes `.release` to "prior operations from the current thread", which a copy-engine transfer
   is not;
-- neither NVSHMEM nor NCCL pairs a host-issued CE transfer with an SM release store; both keep the
-  flag on the data's own path.
+- no vendor documents the ordering either way.
+
+We are not alone in relying on it, which is worth knowing before deciding how much to worry.
+NVIDIA ships this exact shape in at least two places, both with *weaker* ordering than ours:
+NVSHMEM's on-stream `signal_op` takes a CE payload and then publishes the flag from a
+`<<<1,1>>>` kernel doing a bare `atomicAdd_system` with no fence (`sync.cpp` → the
+`signal_op_kernel` it falls back to whenever the op is `SIGNAL_ADD`), and TransformerEngine's
+userbuffers does the same in `ring_exchange`, which is its shipping default. Ours at least
+publishes with `red.release.sys`.
+
+NCCL is the one that avoids the shape rather than accepting it. Its kernel-less CE collectives
+(`ce_coll.cc`, `NCCL_CTA_POLICY_ZERO`, NCCL 2.28+) publish the flag as an 8-byte device-to-device
+`cudaMemcpyAsync` on the same stream as the payload and wait with `cuStreamWaitValue32`, so the
+flag rides the engine the data rode. That is the shape to move to if this assumption ever has to
+go; the cost, and why it is not obviously better, is in the barrier section below.
 
 It holds in testing, which is evidence and not a guarantee.
 `test/distributed/ce_ordering.py` tests it and arms its own negative control on every run, so the

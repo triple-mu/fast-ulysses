@@ -1,6 +1,7 @@
 // CE (copy-engine) transfer path for the 4D all-to-all: pitched cudaMemcpy2D/3DAsync straight into
-// the peers' window addresses. The movement uses DMA engines and zero SMs, so it runs
-// concurrently with compute rather than waiting for a block slot as an SM-resident collective does.
+// the peers' window addresses. The copies that cross a link run on the DMA engines and take no
+// SMs, so they proceed while compute holds every SM rather than waiting for a block slot. This
+// rank's own share does not cross a link and does compete; see transfer.hpp.
 // It computes no offsets -- the addressing comes from build_plan in a2a_plan.cc.
 #include <fast_ulysses/common.hpp>
 #include <fast_ulysses/transfer.hpp>
