@@ -563,6 +563,14 @@ PYBIND11_MODULE(_C, m)
     // operator: it is the negative control for test/distributed/ce_ordering.py.
     m.def("_set_ce_fault", &ulysses::set_ce_fault);
 
+    // TESTS ONLY, and underscored for the same reason: it synchronises, and it exposes a counter
+    // the barrier kernel owns. a2a_cudagraph.py needs it because torn data is a SUFFICIENT signal
+    // that the handshake died, not a necessary one -- a replay where no peer happened to be late
+    // comes back clean either way, and only the epoch says whether the barrier was alive.
+    m.def("_epoch", [](const c10::intrusive_ptr<ulysses::UlyssesGroup>& group, int64_t role, const at::Tensor& like) {
+        return group->epoch(static_cast<ulysses::WindowRole>(role), like.scalar_type());
+    });
+
     m.def("build_info", []() {
         std::map<std::string, std::string> out;
         out["version"]        = FAST_ULYSSES_VERSION;

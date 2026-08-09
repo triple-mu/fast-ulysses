@@ -102,6 +102,11 @@ public:
 
     cudaStream_t xfer_stream();
 
+    /// @brief TESTS ONLY. This rank's barrier epoch for `role`'s window, or -1 when no such window
+    /// exists yet. Synchronising, and it reads a counter the barrier kernel owns -- it is here so a
+    /// CUDA-graph replay can be shown to advance the epoch rather than announce a stale one.
+    int64_t epoch(WindowRole role, at::ScalarType dtype) const;
+
     /// @brief Release the windows and the transfer stream. Buffers handed out by make_output are
     /// the caller's and are unaffected.
     void destroy();

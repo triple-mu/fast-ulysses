@@ -341,6 +341,19 @@ void UlyssesGroup::release_staging(cudaStream_t comm) noexcept
     }
 }
 
+int64_t UlyssesGroup::epoch(WindowRole role, at::ScalarType dtype) const
+{
+    auto it = windows_.find(std::make_pair(static_cast<int64_t>(role), dtype));
+    if (it == windows_.end()) {
+        return -1;
+    }
+    // The epoch sits one slot past the ws flags, which is where barrier_kernel's atomicAdd lands.
+    const auto         addr  = it->second.flag_ptrs[rank_] + static_cast<uint64_t>(world_size_) * 8;
+    unsigned long long value = 0;
+    ULYSSES_CUDA_CHECK(cudaMemcpy(&value, reinterpret_cast<const void*>(addr), sizeof(value), cudaMemcpyDeviceToHost));
+    return static_cast<int64_t>(value);
+}
+
 cudaStream_t UlyssesGroup::xfer_stream()
 {
     if (xfer_ == nullptr) {
