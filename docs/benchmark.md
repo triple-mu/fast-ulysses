@@ -169,6 +169,25 @@ token instead. The pad is at most `world_size − 1` tokens, so the ratio is the
 Dropping the pad is free here (1.00–1.03×, every shape on every machine) and costs the baseline
 5–7%, because it cannot stay on flat `all_to_all_single` once shards differ at all.
 
+## At world_size 4
+
+The tables above are ws=8 throughout. `collect.sh` also runs ws=4, which had not been published.
+One node, four of its eight B200s, certified exclusive by `tools/exclusive.sh` (`VERDICT:
+EXCLUSIVE, 2 samples, max 4/4 procs`). torch 2.11 + CUDA 13, one node only, so there is no
+second-node column.
+
+| GPU | shape | perm_in | a2a | perm_out | BASE | barr_in | transfer | barr_out | copy_out | OURS | vs BASE | raw | relayout% |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| B200 | wan-720p | 0.681 | 0.843 | 0.732 | **2.256** | 0.011 | 0.600 | 0.011 | 0.186 | **0.808** | **2.79×** | 0.861 | 62.6% |
+| B200 | wan-480p | 0.303 | 0.414 | 0.324 | **1.041** | 0.009 | 0.290 | 0.009 | 0.086 | **0.394** | **2.64×** | 0.429 | 60.3% |
+| B200 | h3-t2va-5s | 0.482 | 0.644 | 0.516 | **1.642** | 0.011 | 0.429 | 0.011 | 0.133 | **0.584** | **2.81×** | 0.655 | 60.8% |
+
+The ratio is HIGHER than at ws=8 (2.6-2.8x against 1.9-2.2x), and the reason is the baseline, not
+this operator. A permute costs the whole tensor whatever the group size, while the collective
+itself moves only `(ws-1)/ws` of it -- 3/4 here against 7/8 at ws=8. So the relayout the baseline
+pays and this path does not is a larger share of a smaller total. Read the `relayout%` column, not
+the multiplier, when comparing across group sizes.
+
 ## Where this stops being the right tool
 
 The barriers cost what they cost regardless of payload, so their share says at which message size
@@ -264,5 +283,5 @@ ones on the machines both saw (B200 wan-720p: v0.1 BASE 1.193 / OURS 0.554, v0.2
 
 - **End-to-end model impact.** These are microbenchmarks — warm L2, no neighbours competing for
   bandwidth. Removing the padding saves attention work and memory this cannot see.
-- **Beyond `world_size = 8`,** or across nodes.
+- **Beyond `world_size = 8`,** or across nodes. ws=4 is above; ws=2 is not measured.
 - **H100**, which was still queued when the rest was taken.
