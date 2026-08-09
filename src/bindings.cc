@@ -327,6 +327,32 @@ void all_to_all_4d_staged_out(const c10::intrusive_ptr<UlyssesGroup>&    group,
     run_staged(group, input, mode, seq_splits, head_splits, out, caller_stream_id, caller_device_index);
 }
 
+// Re-enter the DISPATCHER with the autograd keys excluded.
+//
+// Not a direct call to all_to_all_4d(): that would leave dispatch for good, and every key below
+// Autograd -- Python, and through it FakeTensorMode, and Meta -- would never be consulted, so a
+// fake tensor would reach the real kernel and die in cudaMemcpy3DAsync. Measured with a
+// TorchDispatchMode: with a direct call it sees this op's inner aten::empty and never the op.
+//
+// The guard is what stops op.call from arriving back at the Autograd kernel. GradMode being off
+// is not enough: it governs graph construction, not which kernel the dispatcher picks.
+at::Tensor dispatch_below_autograd(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                                   const at::Tensor&                          input,
+                                   int64_t                                    mode,
+                                   const std::optional<std::vector<int64_t>>& seq_splits,
+                                   const std::optional<std::vector<int64_t>>& head_splits)
+{
+    at::AutoDispatchBelowADInplaceOrView guard;
+    static auto                          op = c10::Dispatcher::singleton()
+                         .findSchemaOrThrow("fast_ulysses::all_to_all_4d", "")
+                         .typed<at::Tensor(const c10::intrusive_ptr<UlyssesGroup>&,
+                                           const at::Tensor&,
+                                           int64_t,
+                                           const std::optional<std::vector<int64_t>>&,
+                                           const std::optional<std::vector<int64_t>>&)>();
+    return op.call(group, input, mode, seq_splits, head_splits);
+}
+
 // The adjoint of the collective is the collective in the other direction.
 //
 // mode 0 is a bijection on the global element set -- rank r's (batch, s, n, k) lands at rank
@@ -360,24 +386,7 @@ public:
         ctx->saved_data["seq"]   = seq_splits.has_value() ? c10::IValue(*seq_splits) : c10::IValue();
         ctx->saved_data["head"]  = head_splits.has_value() ? c10::IValue(*head_splits) : c10::IValue();
 
-        // Back into the DISPATCHER, not a direct call to all_to_all_4d(). Calling the C++ function
-        // would leave dispatch for good, and every key below Autograd -- Python, and through it
-        // FakeTensorMode, and Meta -- would never be consulted: a fake tensor would reach the real
-        // kernel and die in cudaMemcpy3DAsync. Measured: with a direct call, a TorchDispatchMode
-        // sees this op's inner aten::empty and never the op itself.
-        //
-        // The guard excludes the autograd keys for the duration, which is what stops op.call from
-        // arriving back here. Function::apply has already turned grad mode off, but that governs
-        // graph construction, not which kernel the dispatcher picks.
-        at::AutoDispatchBelowADInplaceOrView guard;
-        static auto                          op = c10::Dispatcher::singleton()
-                             .findSchemaOrThrow("fast_ulysses::all_to_all_4d", "")
-                             .typed<at::Tensor(const c10::intrusive_ptr<UlyssesGroup>&,
-                                               const at::Tensor&,
-                                               int64_t,
-                                               const std::optional<std::vector<int64_t>>&,
-                                               const std::optional<std::vector<int64_t>>&)>();
-        return op.call(group, input, mode, seq_splits, head_splits);
+        return dispatch_below_autograd(group, input, mode, seq_splits, head_splits);
     }
 
     static torch::autograd::variable_list backward(torch::autograd::AutogradContext* ctx,
@@ -418,6 +427,13 @@ at::Tensor all_to_all_4d_autograd(const c10::intrusive_ptr<UlyssesGroup>&    gro
                                   const std::optional<std::vector<int64_t>>& seq_splits,
                                   const std::optional<std::vector<int64_t>>& head_splits)
 {
+    // The node apply() allocates is dead weight when nothing will ever use it, and this operator
+    // runs twice per attention layer per step. Measured on 4x B200: routing every call through
+    // apply() cost about 1 us of host submit time per call, which is the reason the bookkeeping is
+    // in C++ at all. The predicate is the same one apply() computes internally as `is_executable`.
+    if (!at::GradMode::is_enabled() || !input.requires_grad()) {
+        return dispatch_below_autograd(group, input, mode, seq_splits, head_splits);
+    }
     return A2AFunction::apply(group, input, mode, seq_splits, head_splits);
 }
 
