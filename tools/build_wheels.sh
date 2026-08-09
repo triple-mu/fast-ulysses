@@ -49,6 +49,9 @@ export FAST_ULYSSES_LOCAL_VERSION="${LOCAL_VERSION}"
 export FAST_ULYSSES_CUDA_ARCH="${CUDA_ARCH}"
 # One cache for the whole row: the device objects do not depend on the CPython ABI.
 export CCACHE_DIR="${CCACHE_DIR:-/io/.ccache}"
+# Counters only -- the cached objects survive. Without this the summary at the end reports the
+# lifetime of a cache restored from a previous run, which says nothing about this row.
+command -v ccache >/dev/null && ccache --zero-stats >/dev/null
 
 for PY in ${PYTHONS}; do
     PYBIN="/opt/python/${PY}-${PY}/bin"
@@ -128,6 +131,14 @@ PY
     mv "${repaired[0]}" "${OUTDIR}/"
     rm -rf "${raw_dir}" "${repaired_dir}" "${venv}"
 done
+
+# The claim in this file's header -- that ccache turns every python after the first into a link
+# step -- is worth being able to check. Each python installs its torch under a different
+# site-packages, so the -I paths differ and a miss here would be silent otherwise.
+if command -v ccache >/dev/null; then
+    echo "=== ccache, this row ==="
+    ccache -s
+fi
 
 echo "=== ${OUTDIR} ==="
 ls -1 "${OUTDIR}"

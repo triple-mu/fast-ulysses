@@ -9,6 +9,9 @@ on:
     # currently resolves, so a point release that breaks a row is found on a Monday instead of
     # halfway through a tag push.
     - cron: "23 5 * * 1"
+  # Manual. Waiting for Monday is not an option before a tag push, which is exactly when the
+  # eight rows most need to have been exercised once.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -84,9 +87,10 @@ jobs:
           cd /tmp && $PYBIN/pytest "$GITHUB_WORKSPACE/test/test_plan.py" -q
 
   matrix-smoke:
-    # Weekly only. Same rows as release.yml's wheels matrix -- keep the two lists in sync --
-    # but one python and no upload: this exercises the build-and-assert path, not the artifacts.
-    if: github.event_name == 'schedule'
+    # Weekly, or on demand. Same rows as release.yml's wheels matrix -- keep the two lists in
+    # sync -- but one python and no upload: this exercises the build-and-assert path, not the
+    # artifacts. Never on a pull request: eight builder images is ~40 minutes of runner time.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -103,7 +107,8 @@ jobs:
     steps:
       # Must be the first step: the builder images are 8-10 GB compressed and a stock runner
       # has ~14 GB free, so the pull fails with "no space left on device" without it.
-      - uses: jlumbroso/free-disk-space@main
+      # Pinned to a commit, not @main: this runs in a job that has already checked out the tree.
+      - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
 

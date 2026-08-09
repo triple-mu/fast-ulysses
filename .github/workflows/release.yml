@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
 
+# Serialise per tag, and never cancel: a retagged v0.2.0 would otherwise run two publishes at
+# once, and PyPI accepts exactly one of any version -- whichever loses the race fails at the
+# last step of a 40-minute build with nothing to show for it. v0.1.0 was retagged three times.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 # mapfile, shopt, [[ ]] and ${VAR#prefix} are bash, and a container job does not reliably
 # resolve `run` to bash. Without this the step dies on a parse error, exit 2 and no output.
 defaults:
@@ -111,11 +118,21 @@ jobs:
     steps:
       # Must be the first step: the builder images are 8-10 GB compressed and a stock runner
       # has ~14 GB free, so the pull fails with "no space left on device" without it.
-      - uses: jlumbroso/free-disk-space@main
+      # Pinned to a commit, not @main: this runs in a job that publishes release artifacts.
+      - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
 
       - uses: actions/checkout@v4
+
+      # build_wheels.sh puts CCACHE_DIR at /io/.ccache, which is this directory through the
+      # bind mount. Without this every release recompiles all eight rows from scratch; a row
+      # takes 21-37 minutes and the four pythons in it build the same .cu files.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-release-${{ matrix.tag }}-${{ github.sha }}
+          restore-keys: ccache-release-${{ matrix.tag }}-
 
       - name: Build the tagged wheels
         run: |
