@@ -62,7 +62,21 @@ is per window by construction.
 
 The epoch is on the device rather than computed on the host so that a CUDA-graph capture replays
 correctly — a host-computed epoch would bake a constant into the graph and every replay would be
-satisfied by stale state.
+satisfied by stale state. `test/distributed/cudagraph.py` holds this: over eight replays with one
+rank deliberately skewed, the epoch advances by two per replay (one per barrier) and every replay
+is bit-exact.
+
+What is capturable is narrower than that argument alone suggests, and the boundary is a property of
+the allocation rather than of the handshake:
+
+- the **sync** call, on a shape whose window **already exists**. Allocating one is
+  `empty_strided_p2p` + `rendezvous` + `zero_()`, none of which is legal inside a capture, so a
+  first call for a new shape ends the capture rather than being recorded.
+- the **async** call is out entirely: `stage()` waits on an event recorded by the previous,
+  uncaptured call, and a cross-graph event dependency invalidates the capture.
+
+Warm every shape eagerly before capturing, and pass `out=` from `empty_output()` so the graph writes
+a fixed address rather than one from its private pool.
 
 `cuStreamWriteValue64` / `cuStreamWaitValue64` would remove the kernel launches from the path and
 were tried. They measured worse under concurrent compute — overlap fell from +34% to −28% — which

@@ -102,10 +102,11 @@ public:
 
     cudaStream_t xfer_stream();
 
-    /// @brief TESTS ONLY. This rank's barrier epoch for `role`'s window, or -1 when no such window
-    /// exists yet. Synchronising, and it reads a counter the barrier kernel owns -- it is here so a
+    /// @brief TESTS ONLY. This rank's barrier epoch for the window `probe` belongs to -- itself,
+    /// when it came from make_output(), otherwise `role`'s window for its dtype. -1 when neither
+    /// exists yet. Synchronising, and it reads a counter the barrier kernel owns: it is here so a
     /// CUDA-graph replay can be shown to advance the epoch rather than announce a stale one.
-    int64_t epoch(WindowRole role, at::ScalarType dtype) const;
+    int64_t epoch(const at::Tensor& probe, WindowRole role) const;
 
     /// @brief Release the windows and the transfer stream. Buffers handed out by make_output are
     /// the caller's and are unaffected.

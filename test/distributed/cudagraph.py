@@ -93,7 +93,7 @@ def main() -> None:
 
     failed = 0
     if captured:
-        epochs = [group._handle.epoch_debug(0, x)]
+        epochs = [group._handle.epoch_debug(out, 0)]
         for i in range(REPLAYS):
             # New input every replay, so a stale window is a WRONG answer rather than the same one.
             x.normal_()
@@ -108,11 +108,11 @@ def main() -> None:
                 failed += 1
                 n = int((out != want).sum().item())
                 print(f"FAIL rank={rank} replay {i}: {n} elements differ", flush=True)
-            epochs.append(group._handle.epoch_debug(0, x))
+            epochs.append(group._handle.epoch_debug(out, 0))
 
         # The necessary check: two barriers per call, so the epoch must move by 2 every replay. A
         # constant epoch is a dead handshake even on a replay where nothing happened to tear.
-        steps = [b - a for a, b in zip(epochs, epochs[1:], strict=True)]
+        steps = [b - a for a, b in zip(epochs[:-1], epochs[1:], strict=True)]
         if any(s <= 0 for s in steps):
             failed += 1
             print(

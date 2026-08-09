@@ -341,14 +341,21 @@ void UlyssesGroup::release_staging(cudaStream_t comm) noexcept
     }
 }
 
-int64_t UlyssesGroup::epoch(WindowRole role, at::ScalarType dtype) const
+int64_t UlyssesGroup::epoch(const at::Tensor& probe, WindowRole role) const
 {
-    auto it = windows_.find(std::make_pair(static_cast<int64_t>(role), dtype));
-    if (it == windows_.end()) {
-        return -1;
+    // A buffer from empty_output() is its OWN window and lives in owned_, not in windows_ -- the
+    // zero-copy path never touches the role windows at all. Look there first, so a caller that
+    // passes the tensor it handed to `out=` gets that window's epoch rather than -1.
+    const Window* win = window_of(probe);
+    if (win == nullptr) {
+        auto it = windows_.find(std::make_pair(static_cast<int64_t>(role), probe.scalar_type()));
+        if (it == windows_.end()) {
+            return -1;
+        }
+        win = &it->second;
     }
     // The epoch sits one slot past the ws flags, which is where barrier_kernel's atomicAdd lands.
-    const auto         addr  = it->second.flag_ptrs[rank_] + static_cast<uint64_t>(world_size_) * 8;
+    const auto         addr  = win->flag_ptrs[rank_] + static_cast<uint64_t>(world_size_) * 8;
     unsigned long long value = 0;
     ULYSSES_CUDA_CHECK(cudaMemcpy(&value, reinterpret_cast<const void*>(addr), sizeof(value), cudaMemcpyDeviceToHost));
     return static_cast<int64_t>(value);

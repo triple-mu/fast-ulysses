@@ -501,8 +501,8 @@ TORCH_LIBRARY(fast_ulysses, m)
         // happened to be late comes back clean either way, and only the epoch says whether the
         // barrier was alive. Synchronising; `like` carries the dtype that keys the window.
         .def("epoch_debug",
-             [](const c10::intrusive_ptr<ulysses::UlyssesGroup>& self, int64_t role, const at::Tensor& like) {
-                 return self->epoch(static_cast<ulysses::WindowRole>(role), like.scalar_type());
+             [](const c10::intrusive_ptr<ulysses::UlyssesGroup>& self, const at::Tensor& probe, int64_t role) {
+                 return self->epoch(probe, static_cast<ulysses::WindowRole>(role));
              });
 
     // Functional: no alias, so it can carry an autograd formula and a meta kernel.
