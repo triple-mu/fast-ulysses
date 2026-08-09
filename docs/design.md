@@ -26,18 +26,22 @@ caller's stream alongside them.
 
 ## Where the memory comes from
 
-Windows are torch symmetric-memory tensors, allocated from a `MemPool` the group owns and
-registered with `symm_mem.rendezvous()`, which returns each peer's address for that allocation.
+Windows are torch symmetric-memory tensors, allocated with
+`c10d::symmetric_memory::empty_strided_p2p` and registered with `rendezvous()`, which returns each
+peer's address for that allocation. Both are `TORCH_API` and unchanged in signature from torch 2.10
+through 2.13, so all of this lives in C++ (`src/group.cc`).
 
-The pool has to be **ours** rather than torch's implicit one. `rendezvous` is collective, so every
-rank must reach it for the same allocation at the same point in its own program. A pool only this
-group allocates from is what keeps the allocation sequence identical across ranks; sharing torch's
-pool would let an unrelated allocation reorder it, and one rank would then rendezvous while another
-did not.
+Going through the allocator entry point directly, rather than through a `MemPool`, is what makes
+the ordering argument simple. `rendezvous` is collective: every rank must reach it for the same
+allocation at the same point in its own program. Nothing unrelated can be served from that entry
+point, so the sequence of allocations this group makes is the sequence every rank makes, and the
+SPMD call contract is the only thing it rests on.
 
-The consequence is that memory is no longer committed up front and no longer grows monotonically:
-dropping a window returns it to the caching allocator. A window is matched by capacity and grows if
-a later call needs more, so a call site costs one window at its high-water mark.
+Memory is not committed up front and does not grow monotonically: dropping a window returns it to
+the symmetric allocator. A window is matched by capacity and grows if a later call needs more, so a
+call site costs one window at its high-water mark. Buffers from `empty_output()` are released when
+the caller drops them -- the group holds a record of each, and prunes the records whose buffer no
+longer has another holder.
 
 Two internal windows exist per dtype, one per stream the collectives run on. A window is
 single-buffered, so two calls may share one only when the stream orders them — and the sync call

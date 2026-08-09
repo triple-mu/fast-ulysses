@@ -58,7 +58,7 @@ void issue_copy(void* dst, const void* src, const CopyOp& op, cudaStream_t strea
 // barrier kernel's release store announcing them arrives, which is undocumented, so the test for it
 // is only worth as much as its negative control. Armed, launch_a2a_ce holds the payload back and
 // skips the join onto the caller's stream, so the closing barrier publishes while the bytes are in
-// flight. See a2a_ce_fault_injection.py.
+// flight. See test/distributed/ce_ordering.py.
 void set_ce_fault(int64_t delay_us)
 {
     g_fault_delay_us = delay_us;

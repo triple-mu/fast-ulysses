@@ -54,12 +54,26 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
 {
     Call call;
     TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
+    // Per-tensor, so it stays out of the plan cache key. The windows live on one device and the
+    // barrier kernel dereferences their flag pointers; a tensor from another device would launch
+    // that kernel on the wrong one.
+    TORCH_CHECK(input.device().index() == group->device_index(),
+                "input is on cuda:",
+                input.device().index(),
+                " but this UlyssesGroup was built for cuda:",
+                group->device_index(),
+                "; one group serves exactly one device");
     call.x    = input.contiguous();
     call.plan = &group->plan(call.x.sizes(), mode, call.x.scalar_type(), seq_splits, head_splits);
 
     if (out.has_value()) {
         call.output = *out;
         TORCH_CHECK(call.output.is_cuda() && call.output.is_contiguous(), "out must be a contiguous CUDA tensor");
+        TORCH_CHECK(call.output.device().index() == group->device_index(),
+                    "out is on cuda:",
+                    call.output.device().index(),
+                    " but this UlyssesGroup was built for cuda:",
+                    group->device_index());
         TORCH_CHECK(call.output.scalar_type() == call.x.scalar_type(),
                     "out has dtype ",
                     call.output.scalar_type(),
@@ -163,6 +177,9 @@ at::Tensor all_to_all_4d(const c10::intrusive_ptr<UlyssesGroup>&    group,
                          const std::optional<std::vector<int64_t>>& head_splits,
                          const std::optional<at::Tensor>&           out)
 {
+    // Before the guard: CUDAGuard on a CPU tensor aborts inside c10 with a message that names
+    // neither this library nor the argument.
+    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
     const at::cuda::CUDAGuard guard(input.device());
     return run(group, input, mode, seq_splits, head_splits, out, kSyncWindow, at::cuda::getCurrentCUDAStream());
 }
@@ -185,9 +202,11 @@ at::Tensor all_to_all_4d_staged(const c10::intrusive_ptr<UlyssesGroup>&    group
     // allocator sees the same stream object the caller was using.
     const c10::cuda::CUDAStream caller(c10::Stream::unpack3(
         caller_stream_id, static_cast<c10::DeviceIndex>(caller_device_index), c10::DeviceType::CUDA));
-    // Stage on the caller's stream, so the caller's tensor is never retained cross-stream --
-    // record_stream would instead pin every freed input until the comm stream caught up.
-    const at::Tensor& staged = group->stage(input.contiguous(), caller, comm);
+    // Stage on the caller's stream, so the caller's tensor is never read by the comm stream --
+    // record_stream would instead pin every freed input until the comm stream caught up. The
+    // staging copy also absorbs a strided input, which is why nothing calls contiguous() here:
+    // doing so would launch that copy on the comm stream, which is exactly what this avoids.
+    const at::Tensor& staged = group->stage(input, caller, comm);
     at::Tensor        result = run(group, staged, mode, seq_splits, head_splits, out, kAsyncWindow, comm);
     group->release_staging(comm);
     return result;
@@ -216,6 +235,7 @@ std::tuple<at::Tensor, std::vector<double>> all_to_all_4d_timed(const c10::intru
                                                                 const std::optional<std::vector<int64_t>>& seq_splits,
                                                                 const std::optional<std::vector<int64_t>>& head_splits)
 {
+    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
     const at::cuda::CUDAGuard guard(input.device());
     const Call                call   = prepare(group, input, mode, seq_splits, head_splits, std::nullopt, kSyncWindow);
     const int                 rank   = static_cast<int>(group->rank());

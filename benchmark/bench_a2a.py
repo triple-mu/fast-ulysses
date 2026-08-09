@@ -104,8 +104,20 @@ def submit_us(fn, iters: int, warmup: int) -> float:
     return statistics.median(s)
 
 
+def baseline_padded(x, pg, ws, recv) -> None:
+    """usp.py mode 0: permute, flat all_to_all_single, permute. No instrumentation, so it can be
+    timed from the outside like everything else it is compared against."""
+    b, s_local, h_global, d = x.shape
+    h_local = h_global // ws
+    y = x.permute(2, 0, 1, 3).contiguous().flatten()
+    dist.all_to_all_single(recv, y, group=pg)
+    z = recv.reshape(ws, h_local, b, s_local, d)
+    z.permute(2, 0, 3, 1, 4).contiguous().reshape(b, s_local * ws, h_local, d)
+
+
 def baseline_stages(x, pg, ws, recv) -> list[float]:
-    """usp.py mode 0, split at its three stages: permute in, collective, permute out."""
+    """The same path with CUDA events between its three stages. Only run_stages uses this: its
+    read() host-syncs, which would land inside any enclosing timed region."""
     b, s_local, h_global, d = x.shape
     h_local = h_global // ws
     w = Stopwatch(4)
@@ -233,7 +245,7 @@ def run_padding(group, pg, rank, ws, args) -> None:
         xu = torch.randn((args.batch, uneven[rank], heads, d), dtype=torch.bfloat16, device=dev)
         recv = torch.empty(xp.numel(), dtype=torch.bfloat16, device=dev)
 
-        base_pad = median_ms(lambda: baseline_stages(xp, pg, ws, recv), args.iters, args.warmup)
+        base_pad = median_ms(lambda: baseline_padded(xp, pg, ws, recv), args.iters, args.warmup)
         base_unpad = median_ms(
             lambda: _baseline_unpadded(xu, pg, ws, rank, uneven), args.iters, args.warmup
         )

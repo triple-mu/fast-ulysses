@@ -51,21 +51,13 @@ A2ADims make_dims(at::IntArrayRef                            sizes,
                   const std::optional<std::vector<int64_t>>& head_splits)
 {
     TORCH_CHECK(sizes.size() == 4, "input must be 4D, got ", sizes.size(), " dims");
-    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16,
-                "dtype must be float16 or bfloat16, got ",
-                dtype);
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "dtype must be float16 or bfloat16, got ", dtype);
     const int64_t x1   = sizes[1];
     const int64_t x2   = sizes[2];
     const int64_t d    = sizes[3];
     const int64_t elem = static_cast<int64_t>(c10::elementSize(dtype));
-    TORCH_CHECK((d * elem) % 16 == 0,
-                "the head dim must be 16-byte aligned: d=",
-                d,
-                " x ",
-                elem,
-                " B is ",
-                d * elem,
-                " B");
+    TORCH_CHECK(
+        (d * elem) % 16 == 0, "the head dim must be 16-byte aligned: d=", d, " x ", elem, " B is ", d * elem, " B");
     TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 or 1, got ", mode);
 
     A2ADims dims;
@@ -184,18 +176,41 @@ const A2APlan& UlyssesGroup::plan(at::IntArrayRef                            siz
     }
     const A2ADims dims = make_dims(sizes, dtype, mode, world_size_, rank_, seq_splits, head_splits);
     return plans_
-        .emplace(std::move(key), build_plan(dims, static_cast<int>(mode), static_cast<int64_t>(c10::elementSize(dtype))))
+        .emplace(std::move(key),
+                 build_plan(dims, static_cast<int>(mode), static_cast<int64_t>(c10::elementSize(dtype))))
         .first->second;
+}
+
+void UlyssesGroup::prune_owned()
+{
+    // The caller's buffer is a view over the window's storage, so a use count of one means we are
+    // the only holder left and the allocation can go back to the symmetric allocator.
+    for (auto it = owned_.begin(); it != owned_.end();) {
+        it = (it->second.tensor.storage().use_count() == 1) ? owned_.erase(it) : std::next(it);
+    }
 }
 
 Window UlyssesGroup::allocate(int64_t numel, at::ScalarType dtype)
 {
+    // Every rank computes the same window size (it is the max over all ranks), so this throws on
+    // all of them together and cannot leave anyone waiting. A zero-sized symmetric allocation has
+    // a null data_ptr, which rendezvous refuses with a null handle.
+    TORCH_CHECK(numel > 0,
+                "this call moves no data: every rank's shard is empty. Check the shape and the "
+                "splits -- a sequence or head axis of 0 on ALL ranks has nothing to exchange");
     const at::cuda::CUDAGuard guard(device_index_);
     // empty_strided_p2p rather than a MemPool: it is the allocator entry point directly, so no
     // unrelated allocation can interleave with ours and desync the rendezvous order across ranks.
     at::Tensor t = symm::empty_strided_p2p(
         {numel}, {1}, dtype, c10::Device(c10::DeviceType::CUDA, device_index_), group_name_, std::nullopt);
     auto sym = symm::rendezvous(t, group_name_);
+    TORCH_CHECK(sym,
+                "torch symmetric memory did not establish a rendezvous for a ",
+                numel,
+                "-element window on group '",
+                group_name_,
+                "'. The allocation is not a symmetric one, or the group is not registered with "
+                "torch's symmetric-memory bootstrap.");
 
     Window win;
     win.tensor = t;
@@ -240,6 +255,7 @@ const Window& UlyssesGroup::window(WindowRole role, at::ScalarType dtype, int64_
 at::Tensor UlyssesGroup::make_output(at::IntArrayRef shape, at::ScalarType dtype, int64_t numel)
 {
     TORCH_CHECK(!destroyed_, "this UlyssesGroup has been destroyed");
+    prune_owned();  // before allocating, so a released buffer's memory can be reused right here
     Window     win = allocate(numel, dtype);
     at::Tensor out = win.tensor.narrow(0, 0, c10::multiply_integers(shape)).view(shape);
     owned_.emplace(win.tensor.data_ptr(), std::move(win));
@@ -254,13 +270,28 @@ const Window* UlyssesGroup::window_of(const at::Tensor& out) const
 
 const at::Tensor& UlyssesGroup::stage(const at::Tensor& x, c10::cuda::CUDAStream caller, cudaStream_t comm)
 {
-    auto  key = std::make_pair(x.sizes().vec(), x.scalar_type());
-    auto& s   = staging_[key];
+    auto key = std::make_pair(x.sizes().vec(), x.scalar_type());
+    // Unlike plans_, every entry here pins a full input's worth of device memory, so the bound
+    // matters more. Dropping them all costs one extra copy per live shape on the next call, and
+    // release_staging() has already been called for every entry by the time we get here.
+    if (staging_.size() >= 16 && staging_.find(key) == staging_.end()) {
+        for (auto& entry : staging_) {
+            if (entry.second.release != nullptr) {
+                ULYSSES_CUDA_CHECK(cudaEventSynchronize(entry.second.release));
+                ULYSSES_CUDA_CHECK(cudaEventDestroy(entry.second.release));
+            }
+        }
+        staging_.clear();
+        last_staged_ = nullptr;
+    }
+    auto& s = staging_[key];
     // Everything below happens on the CALLER's stream, so the caller's tensor is only ever read
     // there and the comm stream sees only the staged copy.
     const c10::cuda::CUDAStreamGuard guard(caller);
     if (!s.tensor.defined()) {
-        s.tensor = at::empty_like(x);
+        // at::empty, not empty_like: empty_like would copy a strided input's layout, and the
+        // transport reads the staged buffer as dense.
+        s.tensor = at::empty(x.sizes(), x.options());
         ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&s.release, cudaEventDisableTiming));
     }
     else {
@@ -320,8 +351,9 @@ void UlyssesGroup::destroy()
     last_staged_ = nullptr;
     plans_.clear();
     windows_.clear();
-    // owned_ is NOT cleared: those buffers were handed to the caller and may still be in use. They
-    // cost a map entry each and die with the group.
+    // Buffers the caller still holds stay alive through their own storage reference; dropping our
+    // record here only releases the ones nobody kept.
+    prune_owned();
 }
 
 }  // namespace ulysses

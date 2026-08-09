@@ -1,7 +1,7 @@
 // Exposes the pure-host plan builder to Python so test/test_plan.py can replay it over numpy
 // buffers on a machine with no GPU. a2a_plan.cc itself stays free of torch and CUDA; this file is
 // the only place the two meet. A separate TU is safe here, unlike the operator schemas in
-// bindings.cpp: this schema names no custom class, so static-initialisation order does not matter.
+// bindings.cc: this schema names no custom class, so static-initialisation order does not matter.
 #include <ATen/ATen.h>
 #include <torch/library.h>
 #include <tuple>

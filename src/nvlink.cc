@@ -7,8 +7,8 @@
 #include <cuda_runtime.h>
 #include <dlfcn.h>
 #include <mutex>
-#include <tuple>
 #include <set>
+#include <tuple>
 
 #include <fast_ulysses/common.hpp>
 #include <fast_ulysses/nvlink.hpp>
@@ -17,10 +17,15 @@ namespace ulysses {
 
 namespace {
 
-constexpr unsigned kNvmlSuccess   = 0;
-constexpr int      kMaxLinks      = 32;  // past NVML_NVLINK_MAX_LINKS (18 today); the sweep stops on error
-constexpr unsigned kRemoteGpu     = 0;   // NVML_NVLINK_DEVICE_TYPE_GPU
-constexpr unsigned kRemoteSwitch  = 2;   // NVML_NVLINK_DEVICE_TYPE_SWITCH
+constexpr unsigned kNvmlSuccess = 0;
+// A device with no NVLink at all answers NOT_SUPPORTED for link 0, and one with NVLink answers
+// INVALID_ARGUMENT past its last link. Both are the device ANSWERING -- "no more links" -- and
+// must not be confused with NVML being unusable, which is what nullopt means to the caller.
+constexpr unsigned kNvmlInvalidArgument = 2;
+constexpr unsigned kNvmlNotSupported    = 3;
+constexpr int      kMaxLinks            = 32;  // past NVML_NVLINK_MAX_LINKS (18 today); the sweep stops on error
+constexpr unsigned kRemoteGpu           = 0;   // NVML_NVLINK_DEVICE_TYPE_GPU
+constexpr unsigned kRemoteSwitch        = 2;   // NVML_NVLINK_DEVICE_TYPE_SWITCH
 
 // nvmlPciInfo_t. Only domain/bus/device are read, and only after the link's remote end has already
 // said it is a GPU; an unmatched result is reported as "cannot determine" rather than as a missing
@@ -36,12 +41,12 @@ struct NvmlPciInfo {
 };
 
 struct Nvml {
-    void* handle = nullptr;
-    unsigned (*init)()                                              = nullptr;
-    unsigned (*handle_by_pci_bus_id)(const char*, void**)           = nullptr;
-    unsigned (*nvlink_state)(void*, unsigned, unsigned*)            = nullptr;
-    unsigned (*nvlink_remote_type)(void*, unsigned, unsigned*)      = nullptr;
-    unsigned (*nvlink_remote_pci)(void*, unsigned, NvmlPciInfo*)    = nullptr;
+    void* handle                                                 = nullptr;
+    unsigned (*init)()                                           = nullptr;
+    unsigned (*handle_by_pci_bus_id)(const char*, void**)        = nullptr;
+    unsigned (*nvlink_state)(void*, unsigned, unsigned*)         = nullptr;
+    unsigned (*nvlink_remote_type)(void*, unsigned, unsigned*)   = nullptr;
+    unsigned (*nvlink_remote_pci)(void*, unsigned, NvmlPciInfo*) = nullptr;
 
     bool ok() const
     {
@@ -50,7 +55,7 @@ struct Nvml {
     }
 };
 
-template <typename Fn>
+template<typename Fn>
 void resolve(void* handle, const char* name, Fn& out)
 {
     out = reinterpret_cast<Fn>(dlsym(handle, name));
@@ -60,7 +65,7 @@ void resolve(void* handle, const char* name, Fn& out)
 // at group construction and from `doctor`.
 const Nvml& nvml()
 {
-    static Nvml    lib;
+    static Nvml           lib;
     static std::once_flag once;
     std::call_once(once, [] {
         lib.handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY | RTLD_LOCAL);
@@ -137,9 +142,14 @@ std::optional<std::map<std::pair<int64_t, int64_t>, bool>> nvlink_matrix(const s
     bool              answered = false;
     for (const auto& entry : handles) {
         for (int link = 0; link < kMaxLinks; ++link) {
-            unsigned active = 0;
-            if (lib.nvlink_state(entry.second, static_cast<unsigned>(link), &active) != kNvmlSuccess) {
-                break;  // past this device's link count
+            unsigned       active = 0;
+            const unsigned rc     = lib.nvlink_state(entry.second, static_cast<unsigned>(link), &active);
+            if (rc == kNvmlNotSupported || rc == kNvmlInvalidArgument) {
+                answered = true;  // the device has no more links, which is an answer
+                break;
+            }
+            if (rc != kNvmlSuccess) {
+                break;  // anything else means we genuinely could not ask
             }
             answered = true;
             if (active == 0) {

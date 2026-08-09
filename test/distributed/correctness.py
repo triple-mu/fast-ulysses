@@ -149,6 +149,18 @@ def main() -> None:
 
     # --- async matches sync, and takes the same arguments ----------------------------------
     check.equal("async", group.all_to_all_4d_async(x, mode=0).wait(), want)
+
+    # A NON-CONTIGUOUS async input. The staging copy has to absorb the strided read on the
+    # CALLER's stream; materialising it on the comm stream instead is a cross-stream read of a
+    # tensor nothing has ordered, and it is invisible whenever the input happens to be contiguous.
+    wide = torch.empty(B, 16, 4 * ws, 256, dtype=torch.bfloat16, device=dev)
+    strided = wide[..., :128]
+    strided.copy_(x)
+    if strided.is_contiguous():
+        raise AssertionError("the non-contiguous case built a contiguous tensor; it tests nothing")
+    check.equal(
+        "async, non-contiguous input", group.all_to_all_4d_async(strided, mode=0).wait(), want
+    )
     async_window = group.empty_output(x, mode=0)
     check.equal(
         "async out=empty_output",

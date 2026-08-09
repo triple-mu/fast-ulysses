@@ -51,8 +51,8 @@ find_package(Torch REQUIRED)
 # nothing about what libtorch_cpu exports, and the substring below is the mangled
 # c10d::register_work(const at::Tensor&, const c10::intrusive_ptr<c10d::Work>&).
 # Unquoted ${CMAKE_NM}: if it is unset, the command fails and RESULT_VARIABLE says so rather
-# than CMake erroring on an empty COMMAND. Missing it is not fatal -- csrc/work.cpp then
-# orders the result eagerly and comm.py hands back a CompletedHandle instead.
+# than CMake erroring on an empty COMMAND. Missing it is not fatal -- src/work.cc then orders
+# the result eagerly and group.py hands back a CompletedHandle instead.
 find_library(TORCH_CPU_LIBRARY torch_cpu PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH REQUIRED)
 execute_process(COMMAND ${CMAKE_NM} -D --defined-only "${TORCH_CPU_LIBRARY}"
         OUTPUT_VARIABLE TORCH_CPU_SYMBOLS RESULT_VARIABLE NM_STATUS ERROR_QUIET)

@@ -50,6 +50,12 @@ public:
         return world_size_;
     }
 
+    /// @brief The device this group's windows live on. One group serves exactly one device.
+    int64_t device_index() const
+    {
+        return device_index_;
+    }
+
     /// @brief The plan for this call, built once per distinct (shape, mode, dtype, splits).
     ///
     /// build_plan allocates several vectors, which is a few microseconds of host time on every
@@ -95,14 +101,19 @@ private:
     /// Allocate `numel` elements of symmetric memory, rendezvous, and clear the handshake region.
     Window allocate(int64_t numel, at::ScalarType dtype);
 
+    /// Drop the make_output() records whose buffer the caller has released. Without this the
+    /// group would keep every buffer it ever handed out alive, which contradicts the contract
+    /// that the caller owns them.
+    void prune_owned();
+
     std::string  group_name_;
     int          rank_, world_size_, device_index_;
-    cudaStream_t xfer_ = nullptr;
+    cudaStream_t xfer_      = nullptr;
     bool         destroyed_ = false;
 
-    std::map<PlanKey, A2APlan>                          plans_;
+    std::map<PlanKey, A2APlan>                           plans_;
     std::map<std::pair<int64_t, at::ScalarType>, Window> windows_;
-    std::map<const void*, Window>                       owned_;  // handed to callers, by address
+    std::map<const void*, Window>                        owned_;  // handed to callers, by address
 
     // (shape, dtype) -> staging buffer + the event saying the comm stream is done reading it.
     struct Staging {

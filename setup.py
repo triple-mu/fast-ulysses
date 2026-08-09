@@ -78,7 +78,7 @@ def _requires() -> list[str]:
             "so it cannot be built under pip's build isolation.\n"
             "    pip install torch                      # the version you intend to run\n"
             "    pip install fast-ulysses --no-build-isolation\n"
-            "Prebuilt wheels avoid the source build entirely: see docs/INSTALL.md."
+            "Prebuilt wheels avoid the source build entirely: see docs/install.md."
         ) from None
 
     major, minor = torch.__version__.split(".")[:2]
@@ -125,7 +125,7 @@ class CMakeBuild(build_ext):
                 f"-DCMAKE_CUDA_ARCHITECTURES={arch}",
                 f"-DFAST_ULYSSES_VERSION={_version()}",
             ]
-            # Extra -D flags for odd toolkit layouts; see docs/INSTALL.md.
+            # Extra -D flags for odd toolkit layouts; see docs/install.md.
             + shlex.split(env.get("FAST_ULYSSES_CMAKE_ARGS", "")),
             env=env,
             stdout=subprocess.PIPE,

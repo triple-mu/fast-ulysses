@@ -14,9 +14,8 @@ namespace {
     throw std::invalid_argument("fast_ulysses: " + message);
 }
 
-// A peer's entry in seq_splits/head_splits is bounded by nothing, and a product that wraps yields a
-// negative window_numel, which passes acquire's capacity check and is then carved out of the pool
-// as an enormous unsigned size.
+// A peer's entry in seq_splits/head_splits is bounded by nothing, and a product that wraps gives a
+// negative window_numel, which every downstream size check reads as "small enough".
 int64_t checked_mul(int64_t a, int64_t b, const std::string& what)
 {
     if (a != 0 && b > std::numeric_limits<int64_t>::max() / a) {

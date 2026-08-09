@@ -14,8 +14,9 @@ translation units (plus `ccache` when installed).
 
 ```
 include/fast_ulysses/   public headers, Doxygen comments
-src/                    a2a_plan.cc (pure host addressing), transfer.cu, barrier.cu, bindings.cc
-python/fast_ulysses/    group.py (windows, async path), nvlink.py, cli.py
+src/                    a2a_plan.cc (pure host addressing), transfer.cu, barrier.cu,
+                        group.cc (windows, plans, staging), nvlink.cc, bindings.cc
+python/fast_ulysses/    group.py (the API surface), cli.py, _diagnose.py
 test/                   test_plan.py (host-only); distributed/ holds the torchrun workers
 benchmark/bench_a2a.py  stages, GEMM overlap, padding cost
 tools/                  GPU-exclusivity wrapper, wheel build and gate, release preflight
@@ -63,6 +64,7 @@ torchrun --nproc_per_node=8 test/distributed/correctness.py
 | worker | what it asserts |
 |---|---|
 | `correctness` | bit-exact against `torch.distributed`: both modes, both dtypes, even and uneven shards, the three things `out=` can be, async, round trip, and 20 rounds on one window |
+| `validation` | that every documented rejection raises, with the right message, on every rank, and before the call's first handshake — including the aliasing guard |
 | `ce_ordering` | that a copy-engine payload is visible when the flag announcing it arrives — **and** that the test can still fail, by arming the fault itself on every run |
 
 `ce_ordering` is the one adversarial worker, and it is worth exactly as much as the timing it

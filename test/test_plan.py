@@ -305,14 +305,12 @@ def test_invalid_mode_rejected():
 
 
 # The entry point cross-checks only the CALLER'S OWN shard against the tensor handed in
-# (bindings.cpp make_dims_from_shape); a peer's entry in seq_splits/head_splits is bounded by
-# nothing. Before the checked arithmetic these wrapped to a negative window_numel, which then
-# passed SymmetricHeapPool::acquire's capacity check -- it compares against a positive reserve --
-# and was then carved out of the pool as an enormous unsigned request.
+# (make_dims in src/group.cc), so a peer's entry in seq_splits/head_splits is bounded by nothing
+# and can overflow the window size, which every downstream check would read as "small enough".
 #
-# NEGATIVE CONTROL: drop the checked_mul/checked_sum wrappers in a2a_plan.cc
-# (build_plan's peer_numel loop, and A2ADims::seq_total/head_total) and rebuild. Both cases then
-# return a plan with a negative window_numel instead of raising.
+# NEGATIVE CONTROL: drop the checked_mul/checked_sum wrappers in src/a2a_plan.cc (build_plan's
+# peer_numel loop, and A2ADims::seq_total/head_total) and rebuild. Both cases then return a plan
+# with a negative window_numel instead of raising.
 @pytest.mark.parametrize(
     "seq_splits, head_splits, message",
     [
