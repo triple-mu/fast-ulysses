@@ -44,7 +44,6 @@ class UlyssesAttention(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, s_local, _ = x.shape
-        ws = self.group.world_size
 
         # (b, s_local, n_global, 3 * head_dim) -- q, k, v packed into the last axis so the two
         # collectives below stay two collectives.
