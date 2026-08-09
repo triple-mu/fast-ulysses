@@ -104,13 +104,14 @@ for mode in stages zerocopy sweep link overlap padding; do
     run "${mode}" "${NPROC}"
 done
 
-# The stage table at half the world size, and at an odd one: the shape of the split changes with
-# world size, and an odd size exercises the non-power-of-two peer sweep.
+# The stage table at half the world size too: the split shape changes with the world size.
+#
+# No odd-world-size pass here. The shapes are real models' -- 40 and 56 heads -- and mode 0
+# scatters the head axis, so neither divides 3. Correctness at odd world sizes is pytest's job
+# (test_distributed.py runs every worker at 3), and a performance number on a head count invented
+# to divide 3 would not be comparable to anything else in the table.
 if ((NPROC >= 4)); then
     run stages 4
-fi
-if ((NPROC >= 3)); then
-    run stages 3
 fi
 
 echo

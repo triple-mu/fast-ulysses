@@ -166,6 +166,10 @@ def run_stages(group, pg, rank, ws, args) -> None:
 
     dev = torch.device("cuda", torch.cuda.current_device())
     for label, img, heads, d, txt in SHAPES:
+        if heads % ws:
+            if rank == 0:
+                print(f"{label:<14} skipped: {heads} heads do not divide world_size {ws}")
+            continue
         s_total = img + txt
         s_total -= s_total % ws  # the padded shard the baseline needs
         x = torch.randn((args.batch, s_total // ws, heads, d), dtype=torch.bfloat16, device=dev)
@@ -252,6 +256,10 @@ def run_padding(group, pg, rank, ws, args) -> None:
         print("-" * len(head))
 
     for label, img, heads, d, txt in SHAPES:
+        if heads % ws:
+            if rank == 0:
+                print(f"{label:<14} skipped: {heads} heads do not divide world_size {ws}")
+            continue
         s_true = img + txt
         s_pad = s_true + (-s_true % ws)
         even = [s_pad // ws] * ws
@@ -315,6 +323,10 @@ def run_zerocopy(group, pg, rank, ws, args) -> None:
         print("-" * len(head))
 
     for label, img, heads, d, txt in SHAPES:
+        if heads % ws:
+            if rank == 0:
+                print(f"{label:<14} skipped: {heads} heads do not divide world_size {ws}")
+            continue
         s_total = img + txt
         s_total -= s_total % ws
         x = torch.randn((args.batch, s_total // ws, heads, d), dtype=torch.bfloat16, device=dev)
