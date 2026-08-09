@@ -216,6 +216,39 @@ def _check_metadata(zf: zipfile.ZipFile, version: str, abi: str, cuda_major: str
     return problems
 
 
+def _check_wheel_tag(version: str, meta: dict) -> list[str]:
+    """Assertion 11 -- the local version in the filename describes the build it names.
+
+    release.yml's matrix carries `tag:` as free text, and it is the only thing a user reads when
+    picking a wheel off the release page. Every other assertion here reads METADATA, so a row
+    whose tag says torch212cu130 while its torch is 2.11 passes all of them and ships a wheel
+    whose filename lies. Parse the tag and put it back against the facts.
+    """
+    problems = []
+    _, _, local = version.partition("+")
+    tag = str(meta.get("WHEEL_TAG", ""))
+    if tag != local:
+        return [f"_build_meta WHEEL_TAG is {tag!r}, the filename's local version is {local!r}"]
+    if not tag:
+        # The PyPI set, built with LOCAL_VERSION empty. Nothing to cross-check.
+        return problems
+
+    m = re.fullmatch(r"torch(\d)(\d+)cu(\d{2})(\d+)", tag)
+    if not m:
+        return [f"WHEEL_TAG {tag!r} is not of the form torch<major><minor>cu<major><minor>"]
+    tag_torch = f"{m.group(1)}.{m.group(2)}"
+    tag_cuda = f"{m.group(3)}.{m.group(4)}"
+    if tag_torch != meta.get("TORCH_ABI"):
+        problems.append(
+            f"WHEEL_TAG {tag!r} claims torch {tag_torch}, _build_meta says {meta.get('TORCH_ABI')}"
+        )
+    if tag_cuda != str(meta.get("CUDA_VERSION")):
+        problems.append(
+            f"WHEEL_TAG {tag!r} claims CUDA {tag_cuda}, _build_meta says {meta.get('CUDA_VERSION')}"
+        )
+    return problems
+
+
 def _check_so(so: Path, cuda_major: str, arches: list[str]) -> list[str]:
     """Assertions 3-8 -- what the linker and the compiler actually produced."""
     problems = []
@@ -291,6 +324,7 @@ def check_wheel(wheel: Path, cuda_major: str | None, arches: list[str]) -> list[
                 )
         problems = _check_archive(wheel, zf, abi, platform)
         problems += _check_metadata(zf, version, abi, cuda_major, meta)
+        problems += _check_wheel_tag(version, meta)
         sos = [n for n in zf.namelist() if n.endswith(".so")]
         if not sos:
             return problems
