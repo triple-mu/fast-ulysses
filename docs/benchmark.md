@@ -1,7 +1,8 @@
 # Benchmarks
 
-Measured 2026-08-08 on a ComputeLab Slurm cluster. Four of the five GPU models are in; **H100 is
-still queued** and its rows say `pending`.
+Measured 2026-08-08 on a ComputeLab Slurm cluster, H100 on 2026-08-09. All five GPU models are in.
+Read the H100 caveat in "Machines": its two samples are the same node, so its spread is run-to-run
+variance and not the node-to-node agreement the other four report.
 
 ## Method
 
@@ -47,7 +48,7 @@ driver, torch, CUDA, `nvidia-smi topo -m`, SM clocks before and after, and the c
 | 8×B200 | NVLink | measured, two nodes agree within 7.9% |
 | 8×B300 SXM6 | NVLink | measured, two nodes agree within 2.6% |
 | 8×RTX PRO 6000 | PCIe, 2 sockets | measured, **two nodes disagree by 5×** — see "Why not PCIe" |
-| 8×H100 | NVLink | pending — queued |
+| 8×H100 | NVLink | measured, but **both samples are the same node** (`viking-dvt-151`), up to 15.0% apart |
 
 8×A100 appears in the v0.1 section and is not re-measured: this cluster has none.
 
@@ -70,7 +71,9 @@ ws=8. The last column is how far the second node's `OURS` was from the first's.
 | B300 | wan-720p | 0.344 | 0.474 | 0.366 | **1.184** | 0.017 | 0.411 | 0.021 | 0.099 | **0.548** | **2.16×** | 0.493 | 1.20× | 59.9% | 1.3% |
 | B300 | wan-480p | 0.156 | 0.227 | 0.163 | **0.546** | 0.011 | 0.199 | 0.044 | 0.048 | **0.302** | **1.81×** | 0.242 | 1.21× | 58.4% | 2.6% |
 | B300 | h3-t2va-5s | 0.245 | 0.347 | 0.261 | **0.854** | 0.013 | 0.295 | 0.015 | 0.071 | **0.395** | **2.16×** | 0.360 | 1.22× | 59.3% | 2.0% |
-| H100 | | | | | pending | | | | | | | | | | |
+| H100 | wan-720p | 0.379 | 0.837 | 0.400 | **1.616** | 0.016 | 0.715 | 0.040 | 0.201 | **0.971** | **1.66×** | 0.831 | 1.16× | 48.2% | 0.8% |
+| H100 | wan-480p | 0.171 | 0.376 | 0.178 | **0.726** | 0.014 | 0.325 | 0.023 | 0.093 | **0.454** | **1.60×** | 0.395 | 1.22× | 48.2% | 15.0% |
+| H100 | h3-t2va-5s | 0.270 | 0.595 | 0.284 | **1.148** | 0.015 | 0.511 | 0.026 | 0.140 | **0.692** | **1.66×** | 0.599 | 1.17× | 48.2% | 4.0% |
 
 Across three NVLink generations the shape is the same: **1.65–2.17× the `torch.distributed` path**,
 of which 46.9–60.0% is relayout that costs nothing here, and the transfer alone beats a bare
@@ -92,7 +95,7 @@ single-flow number.
 | H200 | 378.7 GB/s | 376.0 | 3008 GB/s | 375 GB/s | **99%** |
 | B200 | 691.7 GB/s | 689.4 | 5515 GB/s | 621 GB/s | **90%** |
 | B300 | 692.1 GB/s | 686.9 | 5495 GB/s | 620 GB/s | **90%** |
-| H100 | pending | | | | |
+| H100 | 381.4 GB/s | 377.6 | 3021 GB/s | 356 GB/s | **94%** |
 
 Per-flow bandwidth does not drop when all eight flows run at once, on any of them: the fabric is
 not the contended resource. At 90–99% of what a flat copy achieves there is essentially nothing
@@ -118,10 +121,15 @@ prints; it is not `copy_out / copying`.
 | B300 | wan-720p | 0.567 | 0.475 | 0.093 | **1.20×** | 17.6% |
 | B300 | wan-480p | 0.306 | 0.267 | 0.039 | **1.14×** | 15.6% |
 | B300 | h3-t2va-5s | 0.388 | 0.320 | 0.068 | **1.21×** | 18.2% |
-| H100 | | | | pending | | |
+| H100 | wan-720p | 0.934 | 0.733 | 0.201 | **1.27×** | 22.0% |
+| H100 | wan-480p | 0.440 | 0.344 | 0.095 | **1.28×** | 21.2% |
+| H100 | h3-t2va-5s | 0.748 | 0.606 | 0.142 | **1.23×** | 18.5% |
 
-The range is 1.14–1.21×, and the low end is B300's wan-480p, whose `copy_out` share is also the
-smallest at 15.6% — the two move together, which is the check that the saving is the copy-out.
+The range is 1.14–1.28×, the low end is B300's wan-480p whose `copy_out` share is also the smallest
+at 15.6%, and the high end is H100's wan-480p whose share is 21.2% — the two move together across
+the whole table, which is the check that what is being saved is the copy-out and nothing else.
+H100 gains the most because its copy-out is the largest share of its call: the same
+device-to-device copy against the slowest fabric here.
 
 There is a second reason to prefer it, which the times above do not show: `copy_out` is a
 same-device copy, and a same-device copy competes with compute for SMs where a peer copy does not
@@ -140,7 +148,7 @@ benchmark prints the min–max of its own eight alternating samples. Read it as 
 | H200 | 1.793 | 0.876 | 2.971 | 2.320 | **74%** | 71% |
 | B200 | 0.978 | 0.535 | 1.633 | 1.312 | **60%** | 95% |
 | B300 | 0.865 | 0.533 | 1.469 | 1.219 | **47%** | 50% |
-| H100 | | | | | pending | |
+| H100 | 1.830 | 0.925 | 3.050 | 2.451 | **65%** | 61% |
 
 H200 hides more than the Blackwell parts because there is more GEMM to hide under: its
 `a2a_alone / gemm_alone` is 0.49 against B200's 0.55 and B300's 0.62. The metric is bounded by how
@@ -164,26 +172,32 @@ token instead. The pad is at most `world_size − 1` tokens, so the ratio is the
 | B300 | wan-720p | 1.178 | 1.238 | 1.05× | 0.534 | 0.538 | **1.01×** |
 | B300 | wan-480p | 0.538 | 0.569 | 1.06× | 0.267 | 0.273 | **1.02×** |
 | B300 | h3-t2va-5s | 0.843 | 0.891 | 1.06× | 0.394 | 0.395 | **1.00×** |
-| H100 | | | pending | | | | |
+| H100 | wan-720p | 1.610 | 1.771 | 1.10× | 0.930 | 0.925 | **1.00×** |
+| H100 | wan-480p | 0.723 | 0.801 | 1.11× | 0.445 | 0.447 | **1.00×** |
+| H100 | h3-t2va-5s | 1.142 | 1.262 | 1.11× | 0.661 | 0.661 | **1.00×** |
 
 Dropping the pad is free here (1.00–1.03×, every shape on every machine) and costs the baseline
-5–7%, because it cannot stay on flat `all_to_all_single` once shards differ at all.
+5–11% — 10–11% of it on H100, where the extra all_to_all_single the uneven case forces is most
+expensive relative to the rest — because it cannot stay on flat `all_to_all_single` once shards differ at all.
 
 ## At world_size 4
 
 The tables above are ws=8 throughout. `collect.sh` also runs ws=4, which had not been published.
-One node, four of its eight B200s, certified exclusive by `tools/exclusive.sh` (`VERDICT:
-EXCLUSIVE, 2 samples, max 4/4 procs`). torch 2.11 + CUDA 13, one node only, so there is no
-second-node column.
+Four of the eight GPUs on one node, certified exclusive by `tools/exclusive.sh` in both cases.
+B200 on torch 2.11 + CUDA 13; H100 from the same sweep as its ws=8 rows. One node each, so there is
+no second-node column.
 
 | GPU | shape | perm_in | a2a | perm_out | BASE | barr_in | transfer | barr_out | copy_out | OURS | vs BASE | raw | relayout% |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | B200 | wan-720p | 0.681 | 0.843 | 0.732 | **2.256** | 0.011 | 0.600 | 0.011 | 0.186 | **0.808** | **2.79×** | 0.861 | 62.6% |
 | B200 | wan-480p | 0.303 | 0.414 | 0.324 | **1.041** | 0.009 | 0.290 | 0.009 | 0.086 | **0.394** | **2.64×** | 0.429 | 60.3% |
 | B200 | h3-t2va-5s | 0.482 | 0.644 | 0.516 | **1.642** | 0.011 | 0.429 | 0.011 | 0.133 | **0.584** | **2.81×** | 0.655 | 60.8% |
+| H100 | wan-720p | 0.747 | 1.328 | 0.793 | **2.868** | 0.012 | 1.136 | 0.009 | 0.389 | **1.545** | **1.86×** | 1.349 | 53.7% |
+| H100 | wan-480p | 0.331 | 0.642 | 0.350 | **1.323** | 0.010 | 0.510 | 0.008 | 0.172 | **0.701** | **1.89×** | 0.688 | 51.5% |
+| H100 | h3-t2va-5s | 0.529 | 1.034 | 0.560 | **2.123** | 0.013 | 0.934 | 0.010 | 0.275 | **1.233** | **1.72×** | 0.948 | 51.3% |
 
-The ratio is HIGHER than at ws=8 (2.6-2.8x against 1.9-2.2x), and the reason is the baseline, not
-this operator. A permute costs the whole tensor whatever the group size, while the collective
+B200's ratio is higher at ws=4 than at ws=8 (2.6-2.8x against 1.9-2.2x) while H100's is lower
+(1.7-1.9x against 1.6-1.7x, i.e. barely moved), and the reason is the baseline, not this operator. A permute costs the whole tensor whatever the group size, while the collective
 itself moves only `(ws-1)/ws` of it -- 3/4 here against 7/8 at ws=8. So the relayout the baseline
 pays and this path does not is a larger share of a smaller total. Read the `relayout%` column, not
 the multiplier, when comparing across group sizes.
@@ -196,20 +210,43 @@ somewhere — read it as a floor, not as something to optimise away. µs, ws=8, 
 
 | GPU | s_local | MB/rank | barr_in | transfer | barr_out | copy_out | total | barriers | GB/s crossed |
 |---|---|---|---|---|---|---|---|---|---|
+| H100 | 16 | 0.5 | 9.3 | 29.8 | 14.4 | 5.1 | 58.6 | **40.4%** | 14.4 |
+| H100 | 64 | 2.0 | 9.4 | 30.2 | 15.2 | 5.9 | 60.6 | **40.5%** | 57.0 |
+| H100 | 256 | 7.9 | 10.6 | 49.7 | 18.3 | 8.5 | 87.1 | **33.1%** | 138.4 |
+| H100 | 1024 | 31.5 | 9.5 | 112.3 | 34.2 | 23.2 | 179.3 | **24.4%** | 245.1 |
+| H100 | 4096 | 125.8 | 9.0 | 338.2 | 54.8 | 89.4 | 491.5 | **13.0%** | 325.5 |
+| H100 | 9478 | 291.2 | 8.9 | 697.6 | 47.9 | 200.6 | 954.9 | **5.9%** | 365.2 |
+| H100 | 16384 | 503.3 | 9.7 | 1172.6 | 56.5 | 336.6 | 1575.4 | **4.2%** | 375.6 |
+| H200 | 16 | 0.5 | 28.3 | 29.9 | 13.0 | 4.8 | 76.1 | **54.4%** | 14.4 |
+| H200 | 64 | 2.0 | 10.2 | 36.7 | 14.9 | 5.6 | 67.5 | **37.2%** | 46.8 |
+| H200 | 256 | 7.9 | 8.2 | 48.9 | 12.8 | 7.9 | 77.9 | **27.0%** | 140.6 |
+| H200 | 1024 | 31.5 | 10.8 | 106.3 | 24.4 | 18.4 | 159.9 | **22.0%** | 259.0 |
+| H200 | 4096 | 125.8 | 9.6 | 314.0 | 20.0 | 63.8 | 407.3 | **7.3%** | 350.7 |
+| H200 | 9478 | 291.2 | 13.3 | 689.2 | 31.7 | 142.9 | 877.2 | **5.1%** | 369.7 |
+| H200 | 16384 | 503.3 | 11.4 | 1154.7 | 19.2 | 240.1 | 1425.4 | **2.1%** | 381.4 |
 | B200 | 16 | 0.5 | 12.2 | 35.1 | 17.0 | 6.1 | 70.4 | **41.5%** | 12.3 |
+| B200 | 64 | 2.0 | 31.7 | 39.1 | 11.1 | 6.1 | 88.0 | **48.7%** | 44.0 |
 | B200 | 256 | 7.9 | 32.3 | 52.1 | 11.1 | 8.2 | 103.6 | **41.9%** | 132.2 |
 | B200 | 1024 | 31.5 | 31.5 | 89.0 | 20.4 | 12.3 | 153.1 | **33.9%** | 309.3 |
 | B200 | 4096 | 125.8 | 27.6 | 205.0 | 25.6 | 47.1 | 305.2 | **17.4%** | 537.2 |
 | B200 | 9478 | 291.2 | 33.5 | 408.4 | 13.2 | 99.3 | 554.4 | **8.4%** | 623.8 |
 | B200 | 16384 | 503.3 | 31.7 | 653.5 | 21.3 | 161.8 | 868.3 | **6.1%** | 673.9 |
-| H200 | 16 | 0.5 | 28.3 | 29.9 | 13.0 | 4.8 | 76.1 | **54.4%** | 14.4 |
-| H200 | 9478 | 291.2 | 13.3 | 689.2 | 31.7 | 142.9 | 877.2 | **5.1%** | 369.7 |
 | B300 | 16 | 0.5 | 12.4 | 41.2 | 11.1 | 7.2 | 71.9 | **32.6%** | 10.4 |
+| B300 | 64 | 2.0 | 11.2 | 41.4 | 12.9 | 7.2 | 72.6 | **33.1%** | 41.6 |
+| B300 | 256 | 7.9 | 11.6 | 43.1 | 15.1 | 7.1 | 77.0 | **34.7%** | 159.6 |
+| B300 | 1024 | 31.5 | 11.3 | 80.0 | 11.2 | 13.3 | 115.8 | **19.4%** | 344.1 |
+| B300 | 4096 | 125.8 | 11.2 | 192.9 | 35.3 | 46.0 | 285.4 | **16.3%** | 570.9 |
 | B300 | 9478 | 291.2 | 11.2 | 403.3 | 27.4 | 99.3 | 541.2 | **7.1%** | 631.8 |
+| B300 | 16384 | 503.3 | 11.5 | 643.5 | 43.7 | 162.7 | 861.2 | **6.4%** | 684.4 |
+
+Every size on every machine, because the ranges below are only checkable against the whole grid --
+earlier revisions published a subset and quoted the full one, so three of the endpoints could not be
+found in the table above them.
 
 The share depends on the machine as much as on the size, so read the column, not a rule of thumb.
-At half a megabyte per rank the handshakes are 33–54% of the call; at 31.5 MB they are 19–34%; at
-the wan-720p working point (291 MB) they are 5.1–8.4%, and at 503 MB, 2.1–6.4%. B200 carries the
+At half a megabyte per rank the handshakes are 33–54% of the call; at 31.5 MB they are 19–34%
+(B300's 19.4% to B200's 33.9%); at the wan-720p working point (291 MB) they are 5.1–8.4%, and at
+503 MB, 2.1–6.4% (H200's 2.1% to B300's 6.4%). B200 carries the
 highest share throughout because its `barr_in` sits around 30 µs against 11–13 µs on the other two
 — that is arrival skew on that pair of nodes, not a property of the part.
 
@@ -284,4 +321,6 @@ ones on the machines both saw (B200 wan-720p: v0.1 BASE 1.193 / OURS 0.554, v0.2
 - **End-to-end model impact.** These are microbenchmarks — warm L2, no neighbours competing for
   bandwidth. Removing the padding saves attention work and memory this cannot see.
 - **Beyond `world_size = 8`,** or across nodes. ws=4 is above; ws=2 is not measured.
-- **H100**, which was still queued when the rest was taken.
+- **A second H100 NODE.** H100 was measured after the rest, and both of its samples came from
+  `viking-dvt-151`. Its 15.0% spread on wan-480p is therefore run-to-run, and says nothing about
+  how two H100 nodes would agree.
