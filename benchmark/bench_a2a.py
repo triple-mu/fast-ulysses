@@ -438,13 +438,19 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=25)
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument(
+        "--allow-non-nvlink",
+        action="store_true",
+        help="measure a group the constructor would refuse. Only for establishing what the "
+        "PCIe / cross-socket case actually costs -- see docs/design.md, 'Why NVLink only'",
+    )
     args = parser.parse_args()
 
     dist.init_process_group("nccl")
     rank, ws = dist.get_rank(), dist.get_world_size()
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", rank)))
     pg = dist.group.WORLD
-    group = UlyssesGroup(process_group=pg)
+    group = UlyssesGroup(process_group=pg, require_nvlink=not args.allow_non_nvlink)
 
     {
         "stages": run_stages,

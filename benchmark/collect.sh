@@ -16,6 +16,9 @@
 #   OUTDIR      where the log lands. Default ./benchmark-results
 #   ITERS       passed through to bench_a2a.py. Default 25
 #   SKIP_TESTS  1 to skip the correctness gate. Do not use for a published number.
+#   ALLOW_NON_NVLINK
+#               1 to measure a machine the constructor refuses (PCIe / cross-socket). The
+#               refusal is itself a result, so this is never the default.
 set -uo pipefail
 
 LABEL="${1:?usage: $0 <label> [gpu-list]}"
@@ -68,6 +71,13 @@ echo "--- fast-ulysses doctor ---"
 fast-ulysses doctor 2>&1 || true
 echo
 
+NVLINK_FLAG=""
+if [[ "${ALLOW_NON_NVLINK:-0}" == "1" ]]; then
+    NVLINK_FLAG="--allow-non-nvlink"
+    echo "NOTE: measuring a group the constructor refuses. The refusal is the headline result for"
+    echo "      this machine; these numbers say what it costs to ignore it."
+fi
+
 FAILED=()
 
 run() {  # run <mode> <nproc>
@@ -78,7 +88,7 @@ run() {  # run <mode> <nproc>
     echo "================================================================================"
     "${REPO}/tools/exclusive.sh" "${GPUS}" -- \
         torchrun --nproc_per_node="${nproc}" "${REPO}/benchmark/bench_a2a.py" \
-        --mode "${mode}" --iters "${ITERS}" 2>&1 |
+        --mode "${mode}" --iters "${ITERS}" ${NVLINK_FLAG} 2>&1 |
         grep -vE '^\[rank[1-9]|Setting OMP_NUM_THREADS|^\*\*\*\*|torch/distributed/run.py'
     # pipefail makes this the status of the run itself, not of grep. A mode that died is easy to
     # miss in a log this long, so collect the names and say so at the end.
