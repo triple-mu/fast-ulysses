@@ -67,12 +67,11 @@ registered fake class. `empty_output()` refuses to be traced at all, with a mess
   the caller's own buffer, so still no lifetime rules; it is simply overwritten by the next call
   that uses it, like any output buffer.
 
-**`out` costs the gradient, and does not say so.** It reaches a mutating op that carries no
-autograd formula, so the result is the buffer itself: `grad_fn` is `None` and `requires_grad` is
-`False` even when `x` requires grad. Unlike the async form this cannot raise — the value returned
-is a tensor the caller already owns, and nothing distinguishes "no gradient wanted" from "gradient
-dropped". In a training step everything upstream of the call then gets no gradient and nothing
-fails. Use `out=` in inference and in no-grad regions; use the plain call inside a graph.
+**`out` is not differentiable, and raises rather than dropping the gradient.** It reaches a
+mutating op with no autograd formula, so the result is the buffer itself — `grad_fn` is `None`.
+Returning that quietly would be indistinguishable from a caller who wanted no gradient, so a
+grad-requiring input under grad mode raises instead. Use `out=` in inference or under
+`torch.no_grad()`, where it is accepted; use the plain call inside a training graph.
 
 **`seq_splits[p]` / `head_splits[p]`** are rank p's sequence and head shard. Pass **both or
 neither**, identical on every rank, matching the shape handed in. Neither means even shards, and

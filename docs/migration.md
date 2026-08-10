@@ -163,8 +163,9 @@ torchrun --nproc_per_node=8 examples/dit_attention.py
 ```
 
 Two exceptions. `all_to_all_4d_async` is not differentiable and raises on a grad-requiring input
-rather than dropping the gradient silently. `out=` is not differentiable either and cannot raise —
-the value handed back is the caller's own buffer, detached — so keep it out of the training graph.
+rather than dropping the gradient silently. `out=` is not differentiable either and raises for the
+same reason: the value handed back is the caller's own buffer. Both are accepted under
+`torch.no_grad()`; keep them out of the training graph.
 
 ## Uneven shards, which is the reason to move
 

@@ -309,8 +309,14 @@ const at::Tensor& UlyssesGroup::stage(const at::Tensor& x, c10::cuda::CUDAStream
         //
         // at::empty, not empty_like: empty_like would copy a strided input's layout, and the
         // transport reads the staged buffer as dense.
-        at::Tensor  staged  = at::empty(x.sizes(), x.options());
-        cudaEvent_t release = nullptr;
+        //
+        // InferenceMode(false) around it: this buffer outlives the call that created it, and one
+        // allocated under inference mode is an inference tensor for good -- every later copy_ into
+        // it from outside inference mode raises, so a single call made there would retire that
+        // (shape, dtype) permanently.
+        const c10::InferenceMode no_inference(false);
+        at::Tensor               staged  = at::empty(x.sizes(), x.options());
+        cudaEvent_t              release = nullptr;
         ULYSSES_CUDA_CHECK(cudaEventCreateWithFlags(&release, cudaEventDisableTiming));
         s.tensor  = std::move(staged);
         s.release = release;

@@ -14,6 +14,7 @@ import os
 from itertools import accumulate
 
 import torch
+import torch.autograd.forward_ad as fwd_ad
 import torch.distributed as dist
 from torch._subclasses.fake_tensor import FakeTensorMode
 
@@ -257,6 +258,65 @@ def main() -> None:
 
     # `out=` on a grad-requiring input is REFUSED, not silently detached; validation.py owns that
     # rejection, since this file only ever passes arguments the operator accepts.
+
+    # --- forward-mode AD -----------------------------------------------------------------------
+    # torch::autograd::Function has no C++ jvp hook, so the Autograd kernel carries the tangent by
+    # hand. Without that it is dropped silently: the dual comes back with no tangent and nothing
+    # raises. The jvp of a permutation is the permutation, so the tangent goes through the same
+    # collective -- which means a dual input issues TWO, and every rank must agree on carrying one.
+    with fwd_ad.dual_level():
+        tangent = torch.randn_like(x)
+        primal, jvp = fwd_ad.unpack_dual(group.all_to_all_4d(fwd_ad.make_dual(x, tangent), mode=0))
+    if jvp is None:
+        check.failed += 1
+        print(f"FAIL rank={rank} forward-mode AD: the tangent was dropped", flush=True)
+        dist.barrier()
+    else:
+        check.equal(
+            "forward-mode AD carries the tangent", jvp, group.all_to_all_4d(tangent, mode=0)
+        )
+    check.equal("forward-mode AD leaves the primal alone", primal, want)
+
+    # --- double backward -----------------------------------------------------------------------
+    # backward() routes through apply() rather than the plain call so the graph continues. A plain
+    # call there loses grad_fn on the first-order gradient and the second raises.
+    xd = torch.randn(B, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev, requires_grad=True)
+    (first,) = torch.autograd.grad(
+        (group.all_to_all_4d(xd, mode=0) ** 2).sum(), xd, create_graph=True
+    )
+    (second,) = torch.autograd.grad(first.sum(), xd)
+    check.equal(
+        "double backward of sum(y**2) is 2", second.float(), torch.full_like(second.float(), 2.0)
+    )
+
+    # --- async off the default stream -----------------------------------------------------------
+    # The staging copy runs on the CALLER's stream, which the op is told about explicitly. Reading
+    # the default stream instead is invisible whenever the caller is already on it -- which every
+    # other async check here is. The ballast is what makes the input's producer late enough that an
+    # unordered staging read sees the wrong bytes.
+    side = torch.cuda.Stream(device=dev)
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        ballast = torch.randn(2048, 2048, dtype=torch.bfloat16, device=dev)
+        for _ in range(24):
+            ballast = ballast @ ballast.T * 0.001
+        produced = torch.empty_like(x).copy_(x)
+        off_stream = group.all_to_all_4d_async(produced, mode=0).wait()
+    torch.cuda.current_stream().wait_stream(side)
+    check.equal("async issued off the default stream", off_stream, want)
+
+    # --- empty_output hands back a plain tensor -------------------------------------------------
+    # It inherits the Autograd key from the alias registration unless a fallthrough says otherwise,
+    # and would then return a non-leaf that cannot even be detached in place -- which then fails as
+    # `out=`. docs/api.md promises an ordinary tensor.
+    grad_in = x.clone().requires_grad_(True)
+    plain_buf = group.empty_output(grad_in, mode=0)
+    if plain_buf.requires_grad or plain_buf.grad_fn is not None or not plain_buf.is_leaf:
+        check.failed += 1
+        print(f"FAIL rank={rank} empty_output claims a gradient it has no formula for", flush=True)
+    elif rank == 0:
+        print(f"OK ws={ws} empty_output hands back a plain tensor", flush=True)
+    dist.barrier()
 
     # --- meta: shape propagation without touching the device ---------------------------------
     with FakeTensorMode() as fake:

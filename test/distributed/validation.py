@@ -226,6 +226,35 @@ def main() -> None:
             "the same shape after a wrong-device call",
             lambda: group.all_to_all_4d_async(good).wait(),
         )
+        check.raises(
+            "out on another device",
+            "out is on cuda:",
+            lambda: group.all_to_all_4d(
+                good, out=torch.empty(*want_shape, dtype=torch.bfloat16, device=other)
+            ),
+        )
+
+    # --- inference mode -------------------------------------------------------------------------
+    # The staging buffer outlives the call that allocates it, and one allocated under inference mode
+    # stays an inference tensor: every later copy_ into it from outside raises, retiring that
+    # (shape, dtype) for the group's lifetime. Both calls have to be accepted, and the SECOND is the
+    # check -- the first only sets the trap.
+    with torch.inference_mode():
+        check.accepts(
+            "an async call inside inference_mode", lambda: group.all_to_all_4d_async(good).wait()
+        )
+    check.accepts(
+        "the same shape after an inference_mode call",
+        lambda: group.all_to_all_4d_async(good).wait(),
+    )
+    check.accepts(
+        "out= inside no_grad on a grad-requiring input",
+        lambda: torch.no_grad()(
+            lambda: group.all_to_all_4d(
+                good.detach().requires_grad_(True), out=group.empty_output(good)
+            )
+        )(),
+    )
 
     # --- a destroyed group --------------------------------------------------------------------
     # `out` from empty_output() takes the zero-copy path, which reaches neither window() nor

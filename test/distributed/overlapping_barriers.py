@@ -195,7 +195,7 @@ def main() -> None:
     # machine to transfer in microseconds the staging copy is most of the span, most sampled rounds
     # fall in the second half, and the worker reports BLIND. Raising the payload is the fix;
     # lowering the 2.0 bar below would only make it stop noticing that it had been serialized.
-    shape = (1, 1024, 4 * ws, 128)
+    shape = (1, 2048, 4 * ws, 128)
     q = torch.empty(shape, dtype=torch.bfloat16, device=dev)
     k1 = torch.empty_like(q)
     k2 = torch.empty_like(q)

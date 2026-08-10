@@ -118,7 +118,10 @@ import torch.distributed as dist
 from fast_ulysses import UlyssesGroup
 
 ITERS = 64  # <= 128, so every fill value in a phase is distinct and exact in bfloat16
-BALLAST = 32  # dependent GEMMs between the call and the read; the knob the whole worker rests on
+# Dependent GEMMs between the call and the read: the knob the whole worker rests on. It has to
+# outlast a peer's NEXT call, which is a property of the machine -- on a fast enough link 32 left
+# the armed control never overtaken, i.e. BLIND. Raise it if that returns; never lower the bound.
+BALLAST = 96
 S_LOCAL, HEADS, D = 2048, 8, 128
 
 
