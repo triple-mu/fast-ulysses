@@ -110,7 +110,10 @@ def make_inputs(b, d, seq_splits, head_splits, mode, dtype=np.float32):
         else:
             shape = (b, seq_total, int(head_splits[r]), d)
         n = int(np.prod(shape))
-        inputs.append((base + np.arange(n, dtype=dtype)).reshape(shape))
+        # Counted in int64 and cast down, so a one-byte element wraps instead of raising. Values
+        # then repeat every 256, which still catches any misplacement that is not an exact multiple
+        # of 256 elements -- the most a one-byte type can offer.
+        inputs.append((base + np.arange(n, dtype=np.int64)).astype(dtype).reshape(shape))
         base += n
     return inputs
 
@@ -178,9 +181,16 @@ def test_empty_shard(mode):
     check(1, 2, [3, 0, 5, 4], [2, 2, 2, 2], mode)
 
 
-@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.int8, np.uint8])
 def test_dtypes(dtype):
+    """Every element size the op accepts, against the absolute layout reference.
+
+    The plan is byte arithmetic parametrised by elem_size, so 1 byte is the case where an
+    off-by-one-element and an off-by-one-byte term coincide. The GPU workers cover the one-byte
+    dtypes with a mode-0/mode-1 round trip, which cancels any error the two modes share.
+    """
     check(2, 4, [3, 5], [2, 4], SCATTER_HEAD, dtype)
+    check(2, 4, [3, 5], [2, 4], GATHER_HEAD, dtype)
 
 
 def test_batch_fusion_rule():

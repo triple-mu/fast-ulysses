@@ -38,6 +38,15 @@ What makes the loop able to observe a tear:
   * A distinct value per iteration, cycling in 1..128 rather than counting up: bfloat16 has 8
     significant bits, so above 256 adjacent iterations collide on one value and a stale byte
     becomes indistinguishable from a fresh one.
+
+THE CONTROL IS SUMMED OVER THE RANKS, which window_race.py names as a blindness mode and refuses
+-- there it reduces the number of ranks whose control stayed silent, so no rank's tear can vouch
+for another rank's clean phase. The deviation here is forced by the skew: rank 0 is deliberately
+the slow WRITER, so its own window is filled by the fast ranks and its reads are the least likely
+to tear even with the fault armed. A per-rank requirement would report BLIND on the rank the skew
+is built around, on a run that is working. The cost is real and stated rather than hidden: a fault
+that reached only some ranks still prints PASS for all of them, so `armed` is evidence that the
+fault reaches the path under test, not that it reaches it everywhere.
 """
 
 from __future__ import annotations
@@ -53,7 +62,7 @@ ITERS = 120
 FAULT_US = 2000
 
 
-def run(group, x, out, kw, rank: int) -> tuple[int, int]:
+def run(group, x, out, kw) -> tuple[int, int]:
     """(iterations that read a stale value, total stale elements)."""
     torn = stale = 0
     for i in range(1, ITERS + 1):
@@ -100,12 +109,12 @@ def main() -> None:
     dist.barrier()
 
     _C._set_ce_fault(FAULT_US)
-    armed_torn, _ = run(group, x, out, kw, rank)
+    armed_torn, _ = run(group, x, out, kw)
     _C._set_ce_fault(0)
     torch.cuda.synchronize()
     dist.barrier()
 
-    clean_torn, clean_stale = run(group, x, out, kw, rank)
+    clean_torn, clean_stale = run(group, x, out, kw)
 
     counts = torch.tensor([armed_torn, clean_torn, clean_stale], device=dev)
     dist.all_reduce(counts)

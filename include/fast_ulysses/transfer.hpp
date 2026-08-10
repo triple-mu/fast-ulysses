@@ -16,10 +16,9 @@ namespace ulysses {
 /// separate streams would only make them contend; this rank's own share crosses no link and runs
 /// on `stream` alongside them. The transfer is joined back onto `stream` before returning.
 ///
-/// The zero-SM property is a property of the REMOTE copies. Measured on H200 against a concurrent
-/// GEMM chain of equal duration, a peer copy overlaps it completely and a same-device copy runs at
-/// 1.79x the longer of the two. This rank's own share is a same-device copy, and so is the
-/// copy-out on the copying path.
+/// The zero-SM property is a property of the REMOTE copies: a peer copy overlaps concurrent compute,
+/// while a same-device copy competes with it for the same memory system. This rank's own share is a
+/// same-device copy, and so is the copy-out on the copying path.
 ///
 /// @param src        base of this rank's input tensor
 /// @param peer_ptrs  peer p's window base, as addressed from this rank; `plan.ops` offsets are

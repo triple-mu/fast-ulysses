@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # One machine's full measurement, with the environment it ran in recorded next to the numbers.
 #
-# A benchmark is only worth as much as its attribution: v0.1 had to withdraw a published row after
-# a second node of the same GPU model disagreed with the first by 5x, and the only reason that was
-# catchable is that the runs said which node they came from. So this writes a fingerprint header
-# before any number, and every measurement goes through tools/exclusive.sh -- which refuses to
-# start on a busy GPU, samples throughout, and reports the lowest SM clock it saw.
+# A benchmark is only worth as much as its attribution: two nodes of the same GPU model can
+# disagree by more than anything being measured, and that is only catchable if every number says
+# which machine, build and commit it came from. So this writes a fingerprint header before any
+# number, and every measurement goes through tools/exclusive.sh -- which refuses to start on a
+# busy GPU, samples throughout, and reports the lowest SM clock it saw.
 #
 # Usage:
 #   benchmark/collect.sh <label> [gpu-list]
@@ -90,9 +90,11 @@ run() {  # run <mode> <nproc>
         torchrun --nproc_per_node="${nproc}" "${REPO}/benchmark/bench_a2a.py" \
         --mode "${mode}" --iters "${ITERS}" ${NVLINK_FLAG} 2>&1 |
         grep -vE '^\[rank[1-9]|Setting OMP_NUM_THREADS|^\*\*\*\*|torch/distributed/run.py'
-    # pipefail makes this the status of the run itself, not of grep. A mode that died is easy to
-    # miss in a log this long, so collect the names and say so at the end.
-    if (($? != 0)); then
+    # The run's own status, not the pipeline's: under pipefail a grep that selects no line exits 1
+    # and would mark a mode that succeeded as failed. A mode that died is easy to miss in a log
+    # this long, so collect the names and say so at the end.
+    local status="${PIPESTATUS[0]}"
+    if ((status != 0)); then
         FAILED+=("${mode}/nproc=${nproc}")
     fi
 }

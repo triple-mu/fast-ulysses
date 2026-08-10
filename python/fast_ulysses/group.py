@@ -55,6 +55,10 @@ class UlyssesGroup:
             require_nvlink: refuse a group whose GPUs are not all NVLink-joined. ``False`` is for
                 measuring that case, not for running in it.
         """
+        # Before anything that can throw: a refused construction -- a non-NVLink group, a device
+        # that is not CUDA -- still leaves an object for __del__ to run on, with nothing to
+        # release.
+        self._destroyed = True
         pg = process_group if process_group is not None else dist.group.WORLD
         self.pg = pg
         self.rank = dist.get_rank(pg)
@@ -83,13 +87,13 @@ class UlyssesGroup:
         self._handle = torch.classes.fast_ulysses.UlyssesGroup(
             pg.group_name, int(self.rank), int(self.world_size), int(device.index)
         )
-        self._destroyed = False
 
         # High-priority stream for the async call only; the sync call stays on the caller's stream,
         # since routing it through here costs two event hops. The two streams are NOT ordered
         # against each other, which is why the C++ side gives them separate windows.
         _, greatest = torch.cuda.Stream.priority_range()
         self._comm_stream = torch.cuda.Stream(device=device, priority=greatest)
+        self._destroyed = False
 
     def _require_nvlink(self) -> None:
         """Every rank checks the same set of devices, so the answer is identical on all of them and
@@ -125,6 +129,17 @@ class UlyssesGroup:
         if out is None:
             return torch.ops.fast_ulysses.all_to_all_4d(
                 self._handle, x, mode, seq_splits, head_splits
+            )
+        # Refused rather than silently wrong, for the same reason the async call refuses: the
+        # out-variant mutates a buffer the caller already owns, so it carries no autograd formula
+        # and what comes back is that buffer -- backward() would run to completion and leave
+        # x.grad as None. The returned value cannot signal it either, since nothing distinguishes
+        # a caller who wanted no gradient from one whose gradient was dropped.
+        if torch.is_grad_enabled() and x.requires_grad:
+            raise RuntimeError(
+                "all_to_all_4d(out=...) does not support autograd: the out-variant is a mutating "
+                "op with no backward, so the gradient would be dropped without an error. Drop "
+                "out=, or run under torch.no_grad()."
             )
         # Two ops, one method: the out-variant declares the alias it really has, which is what
         # keeps the functional one differentiable. See the note in src/bindings.cc.
@@ -164,7 +179,11 @@ class UlyssesGroup:
                 "AsyncCollectiveTensor, which is a leaf, so the gradient would be dropped without "
                 "an error. Use all_to_all_4d()."
             )
-        caller = torch.cuda.current_stream()
+        # This group's device, not the current one: an aten op on `x` runs on the current stream
+        # of x's device whatever device is current, and that stream is what the transfer has to be
+        # ordered against. With another device current, the no-argument form names a stream on it,
+        # which orders nothing here and cannot take record_stream() for this tensor.
+        caller = torch.cuda.current_stream(self.device)
         with torch.cuda.stream(self._comm_stream):
             if out is None:
                 y = torch.ops.fast_ulysses.all_to_all_4d_staged(
@@ -239,3 +258,12 @@ class UlyssesGroup:
         dist.barrier(group=self.pg)
         self._handle.destroy()
         self._destroyed = True
+
+    def __del__(self) -> None:
+        # A group that is dropped rather than destroyed still has to outlive its own transfers.
+        # The handle's C++ destructor waits on the internal transfer stream but knows nothing of
+        # this one, so an unwaited async call could still be writing a window as it is freed.
+        # There is no barrier here on purpose: a finalizer is no place for a collective, which is
+        # why destroy() and not this is the supported path.
+        if not self._destroyed:
+            self._comm_stream.synchronize()

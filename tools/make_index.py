@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """Emit the static PEP 503 index the release wheels are meant to be installed through.
 
-Why an index exists at all. Every tagged wheel carries a PEP 440 local version --
-``0.2.0+torch211cu130`` -- and local versions are ordered, so ``0.2.0+torch213cu130`` is the
-newest ``0.2.0`` that exists. Pointing pip at a flat list of all 36 wheels therefore resolves to
-the torch 2.13 build on every machine, silently, whatever torch is installed. Two things together
-make the resolution correct instead:
-
-* **One sub-index per CUDA major.** Nothing in a wheel's metadata records which CUDA it was built
-  against, so it cannot be resolved -- it can only be chosen, and the only place a user can
-  express the choice is the index URL. This is why download.pytorch.org is laid out as
-  ``/whl/cu128/``, ``/whl/cu130/`` rather than one index with everything in it.
-* **The torch pin already in each wheel** (``Requires-Dist: torch==2.11.*``). A sub-index carries
-  fast-ulysses and nothing else, so pip cannot install a torch to satisfy its first choice: it
-  backtracks through the candidates and stops at the one whose pin matches the torch that is
-  already installed. That is what makes ``pip install fast-ulysses --index-url <sub-index>``
-  land on the right wheel without the user writing the local version out by hand.
-
-The per-row indexes below take that second axis out of the resolver too, for a user who knows
-their torch minor and would rather have both choices recorded in the URL.
+Why an index exists at all: local versions are ordered, so a flat list of every tagged wheel
+resolves to the newest torch on every machine whatever torch is installed. Two things make the
+resolution correct instead -- one sub-index per CUDA major, which is the axis no wheel's metadata
+records and only the URL can express, and the torch pin inside each wheel, which pip has to
+backtrack to satisfy because a sub-index carries no torch of its own. docs/install.md, "From the
+index", is that argument in the form a user needs it.
 
 Layout, given ``--out site``::
 

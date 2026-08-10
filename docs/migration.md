@@ -151,10 +151,8 @@ DeepSpeed's `_SeqAllToAll` and yunchang's `SeqAllToAll4D` are `torch.autograd.Fu
 differentiable in C++, so the wrapper is deleted, not translated: the backward is the other `mode`.
 
 The convention differs where it matters. Those libraries express the backward as *swap the two
-indices*; here it is *the other mode with the **same** splits*. Identical while shards are even.
-Not identical once they are not: `seq_splits` / `head_splits` describe the group's geometry, which
-holds whichever way the data moves, unlike `all_to_all_single`'s split sizes, which are one call's
-send and receive counts and do swap. See [api.md](api.md).
+indices*; here it is *the other mode with the **same** splits*. Identical while shards are even,
+not once they are not — why, in [api.md](api.md).
 
 `examples/dit_attention.py` is the worked case — one DiT attention block, sequence-parallel, an
 ordinary `nn.Module`, checked for both output and input gradient against the same block with no
@@ -164,8 +162,9 @@ sequence parallelism, then run through five optimiser steps:
 torchrun --nproc_per_node=8 examples/dit_attention.py
 ```
 
-The **async** form is the exception: `all_to_all_4d_async` is not differentiable and raises on a
-grad-requiring input rather than dropping the gradient silently.
+Two exceptions. `all_to_all_4d_async` is not differentiable and raises on a grad-requiring input
+rather than dropping the gradient silently. `out=` is not differentiable either and cannot raise —
+the value handed back is the caller's own buffer, detached — so keep it out of the training graph.
 
 ## Uneven shards, which is the reason to move
 
@@ -207,10 +206,9 @@ Two qualifications, so the number is read for what it is:
   with `x.permute(2, 1, 0, 3, 4).contiguous()` as its own fallback. Its cost was not measured here,
   so against *current* sglang the saving on the mode-1 half is smaller than the table implies, by an
   unknown amount. Mode 0's two permutes are real on both.
-- The multiplier moves with world size, for the baseline's reason rather than this operator's: a
-  permute costs the whole tensor at any group size while the collective moves `(ws-1)/ws` of it, so
-  at ws=4 the same relayout is a larger share of a smaller total (2.6–2.8× on B200, 1.7–1.9× on
-  H100). Compare `relayout%` across group sizes, not the multiplier.
+- The multiplier moves with world size, for the baseline's reason rather than this operator's — at
+  ws=4 it is 2.6–2.8× on B200 and 1.7–1.9× on H100. Compare `relayout%` across group sizes, not
+  the multiplier; the table and the reason are in [benchmark.md](benchmark.md).
 
 ## What this does not have
 
@@ -227,7 +225,7 @@ Check this list before you start, not after.
 - **`torch.compile` tracing.** A meta kernel propagates shapes under `FakeTensor` and AOTAutograd,
   but a module holding an `UlyssesGroup` graph-breaks: the group is a torchbind object with no
   registered fake class.
-- **Autograd on the async form**, and **3D or 5D entry points**.
+- **Autograd on the async form or with `out=`**, and **3D or 5D entry points**.
 - **dtypes** beyond `float16` / `bfloat16` / `float32` / `float8_e4m3fn` / `float8_e5m2` / `int8` /
   `uint8`, with `d * elem_size` 16-byte aligned.
 
@@ -239,4 +237,6 @@ Check this list before you start, not after.
   leaving already require, applied to allocation as well as to the call.
 - Build the group **once** and keep it. It holds the windows, the plan cache and the comm stream.
 - Pass `out=` from `empty_output()` to remove the copy-out, worth a further 1.14–1.28×. Allocate the
-  buffer outside the loop; it is collective. See [quickstart.md](quickstart.md).
+  buffer outside the loop; it is collective. **Not in a training graph**: `out=` reaches a mutating
+  op with no autograd formula, so the result comes back detached and nothing raises. See
+  [quickstart.md](quickstart.md).

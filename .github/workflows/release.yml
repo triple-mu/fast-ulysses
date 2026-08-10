@@ -7,9 +7,9 @@ on:
 permissions:
   contents: read
 
-# Serialise per tag, and never cancel: a retagged v0.2.0 would otherwise run two publishes at
-# once, and PyPI accepts exactly one of any version -- whichever loses the race fails at the
-# last step of a 40-minute build with nothing to show for it. v0.1.0 was retagged three times.
+# Serialise per tag, and never cancel: retagging is how a release is fixed, and two runs of the
+# same tag at once would both publish. PyPI accepts exactly one of any version, so whichever
+# loses the race fails at the last step of a long build with nothing to show for it.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -116,8 +116,8 @@ jobs:
           - {torch: "2.13.0", index: "https://download.pytorch.org/whl/cu129", image: "cuda12.8", cuda_major: "12", tag: "torch213cu129"}
           - {torch: "2.13.0", index: "pypi", image: "cuda13.0", cuda_major: "13", tag: "torch213cu130", pypi_set: true}
     steps:
-      # Must be the first step: the builder images are 8-10 GB compressed and a stock runner
-      # has ~14 GB free, so the pull fails with "no space left on device" without it.
+      # Must be the first step: a builder image does not fit in what a stock runner has free, so
+      # without it the pull ends in "no space left on device".
       # Pinned to a commit, not @main: this runs in a job that publishes release artifacts.
       - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -125,9 +125,10 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      # build_wheels.sh puts CCACHE_DIR at /io/.ccache, which is this directory through the
-      # bind mount. Without this every release recompiles all eight rows from scratch; a row
-      # takes 21-37 minutes and the four pythons in it build the same .cu files.
+      # build_wheels.sh puts CCACHE_DIR at /io/.ccache, which is this directory through the bind
+      # mount. The four pythons of a row already share it within one run; this carries it across
+      # runs of the SAME tag -- a re-run of a row, or a retag -- which is the only sharing there
+      # is, because a cache saved under refs/tags/vX is not restorable from any other tag.
       - uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
@@ -192,8 +193,10 @@ jobs:
           /opt/python/cp312-cp312/bin/python tools/check_wheel.py collected/**/*.whl
 
       - name: Assert the expected artifact count
-        # A row that fails does not fail this workflow (fail-fast is off), so without a count
-        # a release can go out silently missing a whole matrix row.
+        # A row that fails stops the release by itself, since `wheels` then fails and this job
+        # needs it. What no other step sees is a row that succeeded and uploaded less than it
+        # built -- a path glob matching fewer files than the loop produced is green everywhere
+        # else and reaches the release page short. Count what actually arrived.
         run: |
           shopt -s globstar nullglob
           wheels=(collected/**/*.whl)
@@ -235,10 +238,10 @@ jobs:
     # it: every anchor points at a release asset, and an index published before the release
     # exists answers 404 for as long as that job takes.
     #
-    # Not a substitute for PyPI. PyPI carries the one wheel with no local version; this carries
-    # the 32 that have one, which PyPI rejects and which cannot be resolved from a flat list --
-    # 0.2.0+torch213cu130 is the highest 0.2.0 that exists, so a merged list hands it to
-    # everyone. tools/make_index.py's header has the whole argument.
+    # Not a substitute for PyPI. PyPI carries the four wheels with no local version, one per
+    # CPython; this carries the 32 that have one, which PyPI rejects and which cannot be resolved
+    # from a flat list -- 0.2.0+torch213cu130 is the highest 0.2.0 that exists, so a merged list
+    # hands it to everyone. tools/make_index.py's header has the whole argument.
     #
     # Pushing gh-pages does not publish it: Pages has to be pointed at the branch once per
     # repository, and until it is, the branch exists, this job is green, and every --index-url

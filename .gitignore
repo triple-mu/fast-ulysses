@@ -21,3 +21,7 @@ __pycache__/
 python/fast_ulysses/_build_meta.py
 benchmark-results/
 COMMIT
+
+# Measurement logs and working notes: kept locally, never committed. Source comments state the
+# problem; the numbers behind a decision live here.
+notes/

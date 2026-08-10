@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 One torch custom op — the Ulysses 4D all-to-all — where the transfer is pitched
 `cudaMemcpy2D/3DAsync` straight into peers' torch symmetric-memory addresses. It uses **zero SMs**
 (copy engines only) and folds the sequence/head relayout into copy strides instead of two permute
-kernels. NVLink, one node, `world_size ∈ [1, 8]`, `float16`/`bfloat16`.
+kernels. NVLink, one node, `world_size ∈ [1, 8]`, `float16` / `bfloat16` / `float32` /
+`float8_e4m3fn` / `float8_e5m2` / `int8` / `uint8`.
 
 ## Commands
 
@@ -23,11 +24,9 @@ pytest -m "not multigpu"          # host-only, no GPU needed (test_plan.py)
 pytest -m multigpu                # the torchrun-wrapped workers
 FAST_ULYSSES_TEST_NPROC=3 pytest -m multigpu     # force an odd world size
 
-# Workers run directly — this is the debugging path:
+# Workers run directly — this is the debugging path. Seven of them:
+#   correctness, validation, ce_ordering, cudagraph, window_race, overlapping_barriers, subgroup
 torchrun --nproc_per_node=8 test/distributed/correctness.py
-torchrun --nproc_per_node=8 test/distributed/validation.py
-torchrun --nproc_per_node=8 test/distributed/ce_ordering.py
-torchrun --nproc_per_node=8 test/distributed/cudagraph.py
 
 fast-ulysses doctor               # build facts, devices, NVLink matrix
 
@@ -46,10 +45,10 @@ has moved.
 | addressing | `include/fast_ulysses/a2a_plan.hpp`, `src/a2a_plan.cc` | **Pure host arithmetic. No CUDA, no torch, no communication library.** Dims → a list of `CopyOp` (pitched copies, byte offsets). `src/plan_bindings.cc` exposes it as `torch.ops.fast_ulysses.a2a_plan_debug` so `test/test_plan.py` can replay it over numpy with no GPU. |
 | transport | `src/transfer.cu` | Issues `plan.ops`. Remote peers serialised on ONE stream, this rank's own share on the caller's stream, joined with fresh per-call events. XOR-shift peer order. |
 | sync | `src/barrier.cu` | One-block spin kernel over `uint64 flags[ws]` + `uint64 epoch`, all inside the allocation's signal pad. |
-| op surface | `src/bindings.cc` | Validation, aliasing guard, barrier→transfer→barrier→(copy-out). The group object is **one CUDA stream** plus rank/world_size. |
+| op surface | `src/bindings.cc` | Validation, aliasing guard, barrier→transfer→barrier→(copy-out). Also the op table: a functional op carrying the autograd formula and the meta kernel, and a mutating `_out` variant that is **not** differentiable. |
 | memory | `src/group.cc` | Everything that survives a call: the symmetric windows and their handshake state, the plan cache, the staging buffers. |
 | topology | `src/nvlink.cc` | NVML link-type probing, through `dlopen`. |
-| API | `python/fast_ulysses/group.py` | What has no C++ equivalent: the process group's name, the comm stream, `AsyncCollectiveTensor`. 205 lines. |
+| API | `python/fast_ulysses/group.py` | What has no C++ equivalent: the process group's name, the comm stream, `AsyncCollectiveTensor`. |
 
 **No communication library appears in C++ at all.** Windows are torch symmetric-memory tensors
 (`c10d::symmetric_memory`), and the only thing Python hands down is the process group's name.
@@ -76,18 +75,24 @@ has moved.
 
 ### Tests
 
-Four workers. `correctness.py` is bit-exact-or-fail on every path including the backward;
+Seven workers. `correctness.py` is bit-exact-or-fail on every path including the backward;
 `validation.py` covers the rejection paths and that they happen before the first handshake;
-`cudagraph.py` checks a captured replay and reports an uncaptured run as having checked NOTHING.
-`ce_ordering.py` is the adversarial one and is worth exactly as much as the timing it builds — its predecessor went blind for several commits when an
-opening barrier was added. Re-read its docstring after any barrier or ordering change; a run whose
-armed control tears nothing is a **blind** run, not a passing one.
+`cudagraph.py` checks a captured replay and reports an uncaptured run as having checked NOTHING;
+`subgroup.py` runs two groups that partition the job at once.
+
+`ce_ordering.py`, `window_race.py` and `overlapping_barriers.py` are the adversarial ones, and each
+is worth exactly as much as the skew or overlap it builds — a predecessor went blind for several
+commits when an opening barrier was added. Re-read their docstrings after any barrier or ordering
+change: a run whose armed control tears nothing, or whose liveness check shows no overlap, is a
+**blind** run, not a passing one.
 
 ### Documentation
 
 `docs/*.md` are English only, lowercase filenames. Style: state the function, the number and the
-limit. No rhetorical build-ups, no personification. `docs/benchmark.md` carries the v0.2 measurements; only the
-H100 row is still `pending`.
+limit. No rhetorical build-ups, no personification. Comments and docs state the problem, not the
+experiment: no machine names, no benchmark numbers, no dated observations. `docs/benchmark.md`
+carries the v0.2 measurements and is where a load-bearing number belongs; per-run logs and control
+tallies go to `notes/`, which is gitignored.
 
 ## Known limits
 
@@ -97,6 +102,9 @@ H100 row is still `pending`.
 - No `torch.compile` tracing: the group is a torchbind object with no registered fake class, so
   Dynamo graph-breaks on it. Backward and `FakeTensor` shape propagation DO work.
 - The async form is not differentiable, by construction — see `docs/api.md`.
+- `out=` is not differentiable either: the mutating op carries no autograd formula, so the result
+  comes back detached. Unlike the async form it does not raise — the forward is simply not part of
+  any graph. Say so wherever `out=` is recommended.
 
 ## Test machines
 

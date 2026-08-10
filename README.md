@@ -90,7 +90,7 @@ wrapper, no manual backward.
 | `UlyssesGroup(process_group=None, device=None, *, require_nvlink=True)` | Collective. Refuses a group whose GPUs are not NVLink-joined. |
 | `group.all_to_all_4d(x, *, mode=0, out=None, seq_splits=None, head_splits=None)` | The collective. Returns a tensor the caller owns. |
 | `group.all_to_all_4d_async(x, *, ...)` | The same, on a comm stream, returning an `AsyncCollectiveTensor`. |
-| `group.empty_output(x, *, mode=0, ...)` | A symmetric buffer to pass as `out=`, which removes the copy-out. |
+| `group.empty_output(x, *, mode=0, ...)` | A symmetric buffer to pass as `out=`, which removes the copy-out. `out=` gives up the gradient. |
 | `group.destroy()` | Release the windows. Collective. |
 | `fast-ulysses doctor` | Build, devices, NVLink matrix. |
 
@@ -102,14 +102,17 @@ have: [docs/migration.md](docs/migration.md).
 ## Limits
 
 - **NVLink, one node, `world_size` in [1, 8]**, including odd sizes. Over PCIe — especially across
-  a CPU socket — `torch.distributed` is faster, because it routes around the link and this
-  transport always writes peer memory directly. The constructor refuses such a group.
+  a CPU socket — `torch.distributed` is faster, because the pitched copies this transport is built
+  on degrade badly there. The constructor refuses such a group.
 - `float16` / `bfloat16` / `float32` / `float8_e4m3fn` / `float8_e5m2` / `int8` / `uint8`, and
   `d * elem_size` must be 16-byte aligned — so `d % 8` at bfloat16, `d % 16` at float8.
 - Differentiable, and it propagates shapes under `FakeTensor`. Not traceable by `torch.compile`:
   the group is a torchbind object with no registered fake class, so Dynamo graph-breaks on it.
 - The **async** form is not differentiable and says so: its `AsyncCollectiveTensor` is a leaf, so a
   gradient would be dropped silently. Use `all_to_all_4d` when you need one.
+- **`out=` is not differentiable either**, and cannot say so: it reaches a mutating op with no
+  autograd formula, so the result is the caller's buffer, detached. It is a speed knob for
+  inference and no-grad regions, not for a training graph.
 - CUDA-graph capture covers the sync call on an already-warmed shape; see
   [docs/design.md](docs/design.md).
 

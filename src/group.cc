@@ -305,7 +305,7 @@ const at::Tensor& UlyssesGroup::stage(const at::Tensor& x, c10::cuda::CUDAStream
     if (!s.tensor.defined()) {
         // Both built into locals and committed together, so a throw from either leaves the entry
         // untouched and the next call retries it. A half-built entry -- tensor defined, release
-        // still null -- would take the else branch below forever and wait on a null event.
+        // still null -- would take the else branch below and throw on the null event, for good.
         //
         // at::empty, not empty_like: empty_like would copy a strided input's layout, and the
         // transport reads the staged buffer as dense.

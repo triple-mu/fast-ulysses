@@ -5,7 +5,8 @@ Each worker is standalone and can be run directly, which is the debugging path:
 
 Needs >= 2 GPUs; skipped otherwise. Each worker runs at min(ngpu, 8) processes and, when >= 3 GPUs
 are present, also at 3 -- an odd world size exercises the non-power-of-two peer sweep in
-launch_a2a_ce. FAST_ULYSSES_TEST_NPROC overrides the list with a single value.
+launch_a2a_ce. FAST_ULYSSES_TEST_NPROC overrides the list with a single value; at 1 the workers
+that need a peer are skipped rather than run.
 """
 
 from __future__ import annotations
@@ -25,6 +26,14 @@ pytest.importorskip("fast_ulysses", reason="fast_ulysses._C extension not built"
 _DISTRIBUTED = Path(__file__).parent / "distributed"
 
 pytestmark = pytest.mark.multigpu
+
+# These refuse to run at world_size 1 and exit non-zero rather than pass blindly: fast_barrier
+# launches nothing there (src/barrier.cu), so there is no handshake to observe and no peer to race.
+# FAST_ULYSSES_TEST_NPROC=1 is a legitimate thing to ask for; failing the suite for it is not.
+# (subgroup.py handles its own case -- it prints SKIP and exits 0.)
+_NEEDS_PEERS = frozenset(
+    {"ce_ordering.py", "cudagraph.py", "window_race.py", "overlapping_barriers.py"}
+)
 
 
 def _nprocs() -> list[int]:
@@ -55,6 +64,8 @@ def test_worker(worker: str, nproc: int) -> None:
     ngpu = torch.cuda.device_count()
     if ngpu < max(nproc, 2):
         pytest.skip(f"needs >={max(nproc, 2)} GPUs, found {ngpu}")
+    if nproc < 2 and worker in _NEEDS_PEERS:
+        pytest.skip(f"{worker} needs >= 2 ranks, asked for {nproc}")
     _run(worker, nproc)
 
 

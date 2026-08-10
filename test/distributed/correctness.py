@@ -3,8 +3,9 @@
     torchrun --nproc_per_node=8 test/distributed/correctness.py
 
 Pure data movement, so "close enough" is not a passing result anywhere in this file. Covers both
-modes, both dtypes, even and uneven shards, the three things ``out=`` can be, the async form, and
-window reuse across repeated calls.
+modes, every supported dtype, even and uneven shards, the three things ``out=`` can be, the async
+form including a non-contiguous input, window reuse across repeated calls, the autograd backward,
+and the meta kernel's shape propagation.
 """
 
 from __future__ import annotations
@@ -126,18 +127,27 @@ def main() -> None:
     want = reference_even(x, 0, ws, pg)
 
     plain = torch.empty_like(want)
-    got = group.all_to_all_4d(x, mode=0, out=plain)
-    check.equal("out=plain tensor", got, want)
-    if got.data_ptr() != plain.data_ptr():
-        check.failed += 1
-        print(f"FAIL rank={rank} out=plain tensor: the result is not the tensor handed in")
+    check.equal("out=plain tensor", group.all_to_all_4d(x, mode=0, out=plain), want)
 
     window = group.empty_output(x, mode=0)
-    got = group.all_to_all_4d(x, mode=0, out=window)
-    check.equal("out=empty_output (zero copy)", got, want)
-    if got.data_ptr() != window.data_ptr():
-        check.failed += 1
-        print(f"FAIL rank={rank} out=empty_output: the result is not the buffer handed in")
+    check.equal("out=empty_output (zero copy)", group.all_to_all_4d(x, mode=0, out=window), want)
+    # The method returns the very object handed in, so a pointer comparison here would be true by
+    # construction. What can silently differ is the PATH: a buffer not recognised as a window falls
+    # back to an internal window plus a copy-out (src/bindings.cc), with the right answer and no
+    # error. The buffer's own epoch is the detector -- allocation zeroes its signal pad, and only a
+    # barrier over that buffer advances it, twice for the one call above.
+    if ws > 1:
+        e = group._handle.epoch_debug(window, 0)
+        if e != 2:
+            check.failed += 1
+            print(
+                f"FAIL rank={rank} out=empty_output: the buffer's epoch is {e}, expected 2 -- the "
+                "zero-copy path was not the one taken",
+                flush=True,
+            )
+        elif rank == 0:
+            print(f"OK ws={ws} out=empty_output took the zero-copy path", flush=True)
+        dist.barrier()
 
     # A copied result must survive the next call; the zero-copy one is overwritten by design, so
     # only the copying form can be checked for it.
@@ -170,19 +180,43 @@ def main() -> None:
     )
 
     # --- steady state: the window is allocated once and reused ------------------------------
-    # Every round after the first must hit the cache. A round that missed would call rendezvous,
-    # which is collective -- if the ranks ever disagreed about when that happens, this hangs.
-    for _ in range(20):
+    # Correct results do not show this: a window reallocated every round would produce them too.
+    # The epoch does, because allocating a window zeroes its signal pad. Two barriers per call, so
+    # ROUNDS calls on ONE window move it by exactly 2 * ROUNDS, and any reallocation partway
+    # through leaves it short. The probe is a plain tensor, so it resolves to the internal sync
+    # window rather than to an empty_output() buffer, and that window is already at its high-water
+    # mark here -- the uneven shapes above are larger than this one, so it cannot grow either.
+    rounds = 20
+    probe = torch.empty(1, dtype=torch.bfloat16, device=dev)
+    e_before = group._handle.epoch_debug(probe, 0)
+    for _ in range(rounds):
         check_out = group.all_to_all_4d(x, mode=0)
-    check.equal("20 rounds on one window", check_out, want)
+    check.equal(f"{rounds} rounds on one window", check_out, want)
+    e_after = group._handle.epoch_debug(probe, 0)
+    if ws > 1 and e_after - e_before != 2 * rounds:
+        check.failed += 1
+        print(
+            f"FAIL rank={rank} {rounds} rounds on one window: the sync window's epoch moved "
+            f"{e_after - e_before}, expected {2 * rounds} -- the window was reallocated mid-loop",
+            flush=True,
+        )
+    dist.barrier()
 
     # --- the dtypes that are not float16/bfloat16 -------------------------------------------
     # The transport is byte-oriented all the way down, so these differ from the sweep above only
     # in element size. Compared as bytes: all_to_all_single carries no float8, and the reference
-    # for a permutation does not need to know what the bytes mean.
-    for dtype in (torch.float32, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8):
+    # for a permutation does not need to know what the bytes mean. A round trip cannot see an
+    # addressing error that is symmetric between the two modes, so the absolute reference for the
+    # one-byte element sizes is test_plan.py's replay, which is parametrised over them.
+    for dtype in (
+        torch.float32,
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        torch.int8,
+        torch.uint8,
+    ):
         seed = torch.randn(B, 16, 4 * ws, 128, dtype=torch.float32, device=dev)
-        xd = seed.to(dtype) if dtype != torch.int8 else (seed * 50).to(torch.int8)
+        xd = seed.to(dtype) if dtype.is_floating_point else (seed.abs() * 50).to(dtype)
         back = group.all_to_all_4d(group.all_to_all_4d(xd, mode=0), mode=1)
         check.equal(
             f"round trip {str(dtype).split('.')[-1]}",
@@ -221,16 +255,8 @@ def main() -> None:
         group.all_to_all_4d(up, mode=1, **kw),
     )
 
-    # `out=` must not silently detach: the out-variant is not differentiable, so a grad-requiring
-    # input has to come back with grad_fn absent rather than with a gradient that goes nowhere.
-    xo = torch.randn(B, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev, requires_grad=True)
-    res = group.all_to_all_4d(xo, mode=0, out=torch.empty_like(want))
-    if res.grad_fn is not None or res.requires_grad:
-        check.failed += 1
-        print(f"FAIL rank={rank} out= claims to be differentiable but the op is not")
-    elif rank == 0:
-        print(f"OK ws={ws} out= does not claim a gradient it cannot deliver", flush=True)
-    dist.barrier()
+    # `out=` on a grad-requiring input is REFUSED, not silently detached; validation.py owns that
+    # rejection, since this file only ever passes arguments the operator accepts.
 
     # --- meta: shape propagation without touching the device ---------------------------------
     with FakeTensorMode() as fake:

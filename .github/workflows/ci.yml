@@ -76,9 +76,10 @@ jobs:
         run: $PYBIN/python tools/check_wheel.py --cuda-major 13 --arch 90,100 dist/*.whl
 
       - name: Install the wheel and run the CPU suite
-        # From /tmp, not the workspace: ${{ github.workspace }}/fast_ulysses is an importable
-        # package directory without a built _C, and test_plan.py skips itself on a failed
-        # import -- so from the workspace this would pass by skipping everything.
+        # From /tmp, with absolute test paths: what has to be exercised is the wheel installed
+        # above, and the checkout carries the same package under python/ -- with no built _C in
+        # it, and test_plan.py skips itself on a failed import, so importing that one instead
+        # would pass by skipping everything.
         #
         # test/test_distributed.py is not runnable on any GitHub-hosted runner (no GPU). It is
         # gated manually by tools/preflight_gpu.sh before a tag is pushed.
@@ -94,7 +95,8 @@ jobs:
   matrix-smoke:
     # Weekly, or on demand. Same rows as release.yml's wheels matrix -- keep the two lists in
     # sync -- but one python and no upload: this exercises the build-and-assert path, not the
-    # artifacts. Never on a pull request: eight builder images is ~40 minutes of runner time.
+    # artifacts. Never on a pull request: it pulls and builds in eight builder images, which is
+    # more runner time than a review turnaround can absorb.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
@@ -110,8 +112,8 @@ jobs:
           - {torch: "2.13.0", index: "https://download.pytorch.org/whl/cu129", image: "cuda12.8", cuda_major: "12"}
           - {torch: "2.13.0", index: "pypi", image: "cuda13.0", cuda_major: "13"}
     steps:
-      # Must be the first step: the builder images are 8-10 GB compressed and a stock runner
-      # has ~14 GB free, so the pull fails with "no space left on device" without it.
+      # Must be the first step: a builder image does not fit in what a stock runner has free, so
+      # without it the pull ends in "no space left on device".
       # Pinned to a commit, not @main: this runs in a job that has already checked out the tree.
       - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -122,8 +124,8 @@ jobs:
       - name: Build and check the row
         # No LOCAL_VERSION. check_wheel.py's assertion 11 parses the local version in the
         # filename as torch<major><minor>cu<major><minor> and cross-checks it against the
-        # build's own facts, so any other label -- "weekly" was one -- fails every row here
-        # while saying nothing about the row. An empty one is the PyPI set's shape, which that
+        # build's own facts, so any label that is not a matrix tag fails every row here while
+        # saying nothing about the row. An empty one is the PyPI set's shape, which that
         # assertion skips, and nothing is uploaded from this job anyway.
         run: |
           docker run --rm -v "$PWD:/io" -w /io \

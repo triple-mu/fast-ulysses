@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build every CPython wheel for ONE (torch, CUDA) row, inside a manylinux builder container.
 #
-# One invocation per row rather than per (row, python) because the builder image is 8-10 GB
-# compressed and pulling it dominates the job, while the CPython versions all compile the same
-# .cu translation units -- ccache turns every python after the first into a link step. Splitting
-# the matrix finer would pay the pull three more times to save nothing.
+# One invocation per row rather than per (row, python) because pulling the builder image
+# dominates the job, while the CPython versions all compile the same .cu translation units --
+# ccache turns every python after the first into a link step. Splitting the matrix finer would
+# pay the pull three more times to save nothing.
 #
 # The container's CUDA major must match the row's torch CUDA major. Build a cu13 torch in a
 # CUDA 12 image and the extension links libcudart.so.12 against a CUDA 13 runtime:

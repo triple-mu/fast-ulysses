@@ -36,6 +36,19 @@ int64_t checked_sum(const std::vector<int64_t>& values, const std::string& what)
     return total;
 }
 
+// checked_mul above covers window_numel, which is in ELEMENTS and bounds none of the BYTE
+// quantities build_plan emits. Each of those -- offsets, pitches, widths, batch strides -- is a
+// product of some of these five factors, so one bound covers them all, and signed overflow is UB
+// rather than a negative that a later check might catch. An empty axis counts as 1: it stops a copy
+// being emitted, it does not make the other factors smaller.
+void check_byte_products(const A2ADims& dims, int64_t seq_total, int64_t head_total, int64_t elem_size)
+{
+    int64_t bound = 1;
+    for (int64_t factor : {dims.b, seq_total, head_total, dims.d, elem_size}) {
+        bound = checked_mul(bound, std::max<int64_t>(factor, 1), "the exchange in bytes");
+    }
+}
+
 std::vector<int64_t> exclusive_prefix_sum(const std::vector<int64_t>& values)
 {
     std::vector<int64_t> offsets(values.size(), 0);
@@ -143,7 +156,8 @@ A2APlan build_plan(const A2ADims& dims, int mode, int64_t elem_size)
     const std::vector<int64_t> head_offset = dims.head_offsets();
     const int64_t              s_me        = dims.seq_splits[dims.rank];
     const int64_t              n_me        = dims.head_splits[dims.rank];
-    const int64_t              d_bytes     = dims.d * elem_size;
+    check_byte_products(dims, seq_total, head_total, elem_size);
+    const int64_t d_bytes = dims.d * elem_size;
 
     A2APlan plan;
     plan.output_shape = (mode == kScatterHead) ? std::vector<int64_t>{dims.b, seq_total, n_me, dims.d} :

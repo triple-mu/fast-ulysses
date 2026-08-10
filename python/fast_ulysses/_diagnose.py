@@ -1,4 +1,4 @@
-"""Name the cause of a failed ``_C`` load.
+"""Name the cause of a failed import -- torch, or the ``_C`` that links against it.
 
 ``ld.so`` reports a mangled symbol or a missing soname, neither of which says WHICH of the two
 things this extension is pinned to -- the torch minor and the CUDA major -- is not what it was
@@ -11,11 +11,18 @@ import sys
 
 
 def build_meta() -> dict[str, object]:
-    """The facts setup.py baked in, or {} when this tree was never built."""
+    """The facts setup.py baked in, or {} when this tree was never built.
+
+    Relative first, then the flat name: cli.py run as a file has no package to be relative to, and
+    that is the invocation that survives a torch which will not import.
+    """
     try:
         from . import _build_meta
     except ImportError:
-        return {}
+        try:
+            import _build_meta
+        except ImportError:
+            return {}
     return {k: v for k, v in vars(_build_meta).items() if k.isupper()}
 
 
@@ -35,6 +42,11 @@ def _live() -> dict[str, str]:
 
 
 def _verdict(text: str, built: dict[str, object], live: dict[str, str]) -> str:
+    if live["torch"] == "unimportable":
+        return (
+            "torch itself does not import here, so nothing linked against it can. The loader "
+            "error below is torch's own; install or repair torch first."
+        )
     if not built:
         return "unknown build: _build_meta.py is missing, so there is nothing to compare against."
     if "undefined symbol" in text:
@@ -62,8 +74,11 @@ def explain(exc: BaseException) -> str:
     """A message that leads with the cause and ends with the loader's own words."""
     built, live = build_meta(), _live()
     baked = ", ".join(f"{k.lower()}={v}" for k, v in built.items()) or "unknown build"
+    # Naming what actually failed: `import torch` runs first, and blaming _C for its failure would
+    # send the reader after the extension rather than after torch.
+    what = "torch" if live["torch"] == "unimportable" else "fast_ulysses._C"
     return (
-        f"fast_ulysses._C failed to load: {_verdict(str(exc), built, live)}\n"
+        f"{what} failed to load: {_verdict(str(exc), built, live)}\n"
         f"  built against: {baked}\n"
         f"  installed now: torch={live['torch']}, cuda={live['cuda']}, python={live['python']}\n"
         f"  loader error: {exc}"

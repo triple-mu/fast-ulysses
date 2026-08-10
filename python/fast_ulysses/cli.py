@@ -7,9 +7,9 @@ a green matrix is a necessary condition, not a substitute for the check UlyssesG
 makes over the actual group.
 
 ``wheel-url`` answers which published wheel matches the torch, CUDA, python and architecture
-running right now, and prints the version written out in full. That is not a convenience: PEP 440
-orders local versions, and 0.2.0+torch213cu130 is above every other tag of the same release, so
-both `pip install fast-ulysses` and `==0.2.0` resolve to that one whatever torch is installed.
+running right now, and prints the version written out in full, because PEP 440 orders local
+versions and a bare requirement therefore resolves to the highest tag rather than to this torch.
+docs/install.md has that argument in full.
 """
 
 from __future__ import annotations
@@ -17,15 +17,16 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import sys
 from pathlib import Path
 
 
 def _load():
-    """(module, error). NOT the path a broken ``_C`` takes: importing ``fast_ulysses.cli``
-    imports the package first, so the console script raises ``_diagnose.explain``'s report
-    before ``main`` runs -- docs/install.md says so under "When the import fails". What is left
-    for this to catch is cli.py run as a file, from a tree where nothing is installed."""
+    """(module, error). NOT the path a failed import takes when this runs as the console script:
+    that imports the package first, so ``_diagnose.explain``'s report is raised before ``main``
+    runs -- docs/install.md says so under "When the import fails". What is left for this to catch
+    is cli.py run as a file, from a tree where nothing is installed."""
     try:
         import fast_ulysses
 
@@ -54,7 +55,13 @@ def _doctor() -> int:
         return 1
 
     n = torch.cuda.device_count()
-    built = {a.strip() for a in pkg._C.build_info()["cuda_arch_list"].split(",") if a.strip()}
+    # Leading digits only: the arch list carries whatever was asked for, and 90a and 120-real name
+    # the same GPUs as 90 and 120. CMakeLists normalises with the same match.
+    built = {
+        m.group()
+        for a in pkg._C.build_info()["cuda_arch_list"].split(",")
+        if (m := re.match(r"[0-9]+", a.strip()))
+    }
     print(f"devices: {n}")
     for i in range(n):
         p = torch.cuda.get_device_properties(i)
@@ -87,6 +94,11 @@ def _doctor() -> int:
             "there: it routes around the link, and this transport does not."
         )
         return 1
+    if n < 2:
+        # The pair loop above is empty here, and "all 1 devices are joined" is the one sentence a
+        # reader takes away from the subcommand.
+        print("\none visible device: no pair to check, and nothing above world_size 1 to run")
+        return 0
     print(f"\nall {n} devices are mutually NVLink-joined")
     return 0
 
@@ -173,7 +185,14 @@ def _match(matrix: dict, live: dict[str, str], machine: str) -> dict | str:
 
 
 def _wheel_url() -> int:
-    from fast_ulysses._diagnose import _live, build_meta
+    # Relative, with the flat name as the fallback: `import fast_ulysses` imports torch, and this
+    # subcommand has to answer for a torch that is not installed or will not import. Running
+    # cli.py as a file is the only way to reach here in that state, and there is no package to be
+    # relative to then.
+    try:
+        from ._diagnose import _live, build_meta
+    except ImportError:
+        from _diagnose import _live, build_meta
 
     matrix, live, machine = json.loads(_MATRIX.read_text()), _live(), platform.machine()
     print(f"running: torch {live['torch']}, cuda {live['cuda']}, {live['python']}, {machine}")
@@ -203,10 +222,9 @@ def _wheel_url() -> int:
         return 0
 
     # --find-links, not a constructed asset URL: the filename carries whatever compressed platform
-    # tag auditwheel emitted (v0.1.0 shipped manylinux_2_24_x86_64.manylinux_2_28_x86_64), so
-    # naming the file here would be a guess. The release PAGE is useless to pip -- its assets are
-    # lazy-loaded and its HTML holds no .whl link -- and expanded_assets is the fragment it loads
-    # them from, which lists all of them.
+    # tag auditwheel emitted, which nothing here can predict, so naming the file would be a guess.
+    # The release PAGE is useless to pip -- its assets are lazy-loaded and its HTML holds no .whl
+    # link -- and expanded_assets is the fragment it loads them from, which lists all of them.
     print(
         f'\n  pip install "fast-ulysses=={version}+{_tag(row)}" \\\n'
         f"    --find-links {matrix['find_links'].format(version=version)}\n"

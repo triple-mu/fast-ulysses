@@ -123,7 +123,8 @@ def main() -> None:
         loss = F.mse_loss(block(x_local), target)
         loss.backward()
         opt.step()
-        # Every rank sees the same loss only if the collectives are wired right.
+        # One rank's loss, over its own shard of the sequence. The ranks do not agree on it and are
+        # not meant to: what this shows is that the block trains at all.
         if rank == 0:
             print(f"  step {step} loss {loss.item():.5f}")
 

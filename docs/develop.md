@@ -18,7 +18,7 @@ src/                    a2a_plan.cc (pure host addressing), transfer.cu, barrier
                         group.cc (windows, plans, staging), nvlink.cc, bindings.cc
 python/fast_ulysses/    group.py (the API surface), cli.py, _diagnose.py
 test/                   test_plan.py (host-only); distributed/ holds the torchrun workers
-benchmark/              bench_a2a.py --mode {stages,zerocopy,sweep,link,overlap,padding};
+benchmark/              bench_a2a.py --mode {stages,zerocopy,sweep,link,overlap,padding,zerosm};
                         collect.sh runs all of them with the environment recorded next to them
 tools/                  GPU-exclusivity wrapper, wheel build and gate, release preflight
 docs/
@@ -64,15 +64,17 @@ torchrun --nproc_per_node=8 test/distributed/correctness.py
 
 | worker | what it asserts |
 |---|---|
-| `correctness` | bit-exact against `torch.distributed`: both modes, both dtypes, even and uneven shards, the three things `out=` can be, async, round trip, and 20 rounds on one window |
+| `correctness` | bit-exact against `torch.distributed`: both modes, even and uneven shards, the three things `out=` can be, async, round trip, 20 rounds on one window, fp16 and bf16 in full plus a round trip in float32, both float8s and int8; the backward in both modes with the splits passed through **unswapped**; that `out=` comes back without a `grad_fn`; and shape propagation under `FakeTensor` |
 | `validation` | that every documented rejection raises, with the right message, on every rank, and before the call's first handshake — including the aliasing guard |
 | `ce_ordering` | that a copy-engine payload is visible when the flag announcing it arrives — **and** that the test can still fail, by arming the fault itself on every run |
+| `cudagraph` | that a captured steady-state call replays bit-exact, with the device epoch advancing two per replay; an uncaptured run reports having checked NOTHING |
+| `window_race` | that a peer's next call cannot overwrite a window this rank is still reading, against an armed control that must tear on every rank |
+| `overlapping_barriers` | that a sync and an async call co-resident on unordered streams stay on separate windows — payloads, epoch deltas, and a liveness check that they really overlapped |
+| `subgroup` | that two groups partitioning the job transfer concurrently without reaching into each other's windows |
 
-`ce_ordering` is the one adversarial worker, and it is worth exactly as much as the timing it
-builds. Its predecessor went blind for several commits when an opening barrier was added and the
-worker still skewed arrival instead of the transfer, so re-read its docstring after any change to
-the barrier or the ordering. It reports both phases: a run where the armed control tears nothing is
-a blind run, not a passing one.
+`ce_ordering`, `window_race` and `overlapping_barriers` are adversarial, and each is worth exactly
+as much as the skew or overlap it builds. What makes each one blind is in its docstring; read that
+before changing a barrier or the ordering.
 
 ## Releasing
 

@@ -93,7 +93,7 @@ def main() -> None:
         "but the splits imply",
         lambda: group.all_to_all_4d(good, seq_splits=[99] * ws, head_splits=[4] * ws),
     )
-    if (4 * ws) % ws == 0 and ws > 1:
+    if ws > 1:  # at ws == 1 every head count divides, so there is nothing to reject
         odd = torch.randn(2, 16, 4 * ws + 1, 128, **kw16)
         check.raises(
             "a head axis that does not divide",
@@ -152,6 +152,16 @@ def main() -> None:
         "an async call on an input that requires grad",
         "does not support autograd",
         lambda: group.all_to_all_4d_async(good.detach().requires_grad_(True)),
+    )
+    # The out-variant mutates a buffer the caller already owns, so it carries no backward and the
+    # value it returns is that buffer. Detaching silently would leave x.grad as None with nothing
+    # to read it from, and the returned tensor cannot signal the difference either.
+    check.raises(
+        "an out= call on an input that requires grad",
+        "does not support autograd",
+        lambda: group.all_to_all_4d(
+            good.detach().requires_grad_(True), out=torch.empty(*want_shape, **kw16)
+        ),
     )
 
     # --- the plan cache must not answer for a call it never saw ------------------------------

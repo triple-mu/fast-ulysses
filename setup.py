@@ -32,12 +32,10 @@ def _build_jobs(arch: str) -> int:
     """How many translation units to compile at once, bounded by MEMORY, not just cores.
 
     Each job forks one nvcc, and -t0 makes that nvcc run one device pass per architecture at the
-    same time, so peak concurrency is jobs * len(arch) and peak memory scales with it. A CI runner
-    with 4 cores and 16 GB is killed by the OOM reaper partway through a four-architecture build if
-    -j follows the core count alone. Measured on exactly that shape: eight concurrent passes (-j2,
-    four architectures) dies, four (-j1) does not, so a pass costs between 2 and 4 GiB. Budget 3.
-    Falls back to the core count where MemAvailable is not readable; CMAKE_BUILD_PARALLEL_LEVEL
-    overrides either way.
+    same time, so peak concurrency is jobs * len(arch) and peak memory scales with it. A small CI
+    runner is killed by the OOM reaper partway through a four-architecture build if -j follows the
+    core count alone. Budget 3 GiB per concurrent pass. Falls back to the core count where
+    MemAvailable is not readable; CMAKE_BUILD_PARALLEL_LEVEL overrides either way.
     """
     cpus = os.cpu_count() or 1
     n_arch = max(1, len([a for a in arch.split(";") if a]))

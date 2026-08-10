@@ -8,10 +8,10 @@ The hazard is the barrier epoch. A HOST-computed epoch would be a constant baked
 capture: every replay announces the same E, the peer flags still hold E from the previous replay,
 the ``while (v < epoch)`` spin in barrier_kernel is satisfied by stale state, and the handshake
 silently becomes a no-op -- peers are then free to overwrite our window while we are reading it.
-The reference implementation this replaced shipped that version, and its first replay came back
-with 260k corrupted elements. ``barrier_kernel`` advances the epoch ON THE DEVICE (src/barrier.cu:
-``atomicAdd`` on the slot past the ws flags) precisely so a replay gets a fresh one, and
-docs/design.md rests a claim on that. This worker is what keeps the claim honest.
+That is not a hypothetical: it is the version this replaced, and its replays came back corrupt.
+``barrier_kernel`` advances the epoch ON THE DEVICE (src/barrier.cu: ``atomicAdd`` on the slot past
+the ws flags) precisely so a replay gets a fresh one, and docs/design.md rests a claim on that.
+This worker is what keeps the claim honest.
 
 SCOPE, and it is narrow. Only the SYNC call, and only on a shape that has ALREADY been warmed:
 
@@ -26,8 +26,9 @@ TWO CHECKS PER REPLAY, and they are not redundant:
 
   - Torn data is a SUFFICIENT signal that the handshake died, not a necessary one: it needs a peer
     to actually be late. A replay where the skew happens not to bite comes back clean.
-  - The epoch is the NECESSARY one. If it does not advance, the handshake is dead whether or not
-    anything tore this time.
+  - The epoch is the NECESSARY one, and it is an EQUALITY. Two barriers run per call, so a replay
+    moves it by exactly 2; a deleted opening barrier moves it by 1, which passes any "advanced at
+    all" form while the window is unguarded for the whole of every call.
 
 THE SKEW IS WHAT MAKES THE DATA CHECK MEAN ANYTHING. Replays that all arrive together re-align, and
 a dead barrier then passes -- exactly the blindness a tight benchmark loop produces. So rank 0 runs
@@ -37,8 +38,9 @@ a GEMM chain before each replay while the others race ahead. The reference all-t
 Delete the ``if rank == 0`` ballast and this worker passes with the barrier removed: that is the
 negative control, and it is why the ballast is not an optimisation to be tidied away.
 
-CAPTURE FAILING IS REPORTED, NOT FAILED. Graph capture is a boundary this library states rather
-than a feature it sells. A green run whose last line says captured=False checked NOTHING.
+CAPTURE FAILING IS A FAILURE. Graph capture is a boundary this library states rather than a
+feature it sells, but a run that could not capture checked NOTHING, so it exits 1 with the reason
+on its last line rather than passing quietly.
 """
 
 from __future__ import annotations
@@ -110,13 +112,19 @@ def main() -> None:
                 print(f"FAIL rank={rank} replay {i}: {n} elements differ", flush=True)
             epochs.append(group._handle.epoch_debug(out, 0))
 
-        # The necessary check: two barriers per call, so the epoch must move by 2 every replay. A
-        # constant epoch is a dead handshake even on a replay where nothing happened to tear.
+        # The necessary check, and it is an EQUALITY: two barriers per call, so the epoch moves by
+        # exactly 2 every replay, and nothing else touches this buffer's window between two samples
+        # (the reference is a NCCL collective, the ballast is GEMMs). A constant epoch is a dead
+        # handshake even on a replay where nothing happened to tear, and a delta of 1 is one dead
+        # barrier -- which "> 0" would accept. Update the constant if the number of barriers per
+        # call ever changes; do not loosen the form.
         steps = [b - a for a, b in zip(epochs[:-1], epochs[1:], strict=True)]
-        if any(s <= 0 for s in steps):
+        if any(s != 2 for s in steps):
             failed += 1
             print(
-                f"FAIL rank={rank}: the epoch did not advance on every replay: {epochs}", flush=True
+                f"FAIL rank={rank}: the epoch moved {steps} over {REPLAYS} replays, expected 2 per "
+                f"replay: {epochs}",
+                flush=True,
             )
         elif rank == 0:
             print(f"OK ws={ws} epoch advanced {steps} over {REPLAYS} replays", flush=True)

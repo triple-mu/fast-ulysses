@@ -32,6 +32,19 @@ void require_cuda(const at::Tensor& input)
     TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor, got one on ", input.device());
 }
 
+// The windows live on one device and the barrier kernel dereferences their flag pointers, so a
+// tensor from another device would launch that kernel on the wrong one. Per-tensor, so it stays out
+// of the plan cache key.
+void require_group_device(const UlyssesGroup& group, const at::Tensor& input)
+{
+    TORCH_CHECK(input.device().index() == group.device_index(),
+                "input is on cuda:",
+                input.device().index(),
+                " but this UlyssesGroup was built for cuda:",
+                group.device_index(),
+                "; one group serves exactly one device");
+}
+
 // Byte intervals [a, a+a_bytes) and [b, b+b_bytes) intersect.
 bool intervals_overlap(const void* a, int64_t a_bytes, const void* b, int64_t b_bytes)
 {
@@ -70,15 +83,7 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
     // buffer from empty_output() and drops it would otherwise pin it until destroy().
     group->prune_owned();
     require_cuda(input);
-    // Per-tensor, so it stays out of the plan cache key. The windows live on one device and the
-    // barrier kernel dereferences their flag pointers; a tensor from another device would launch
-    // that kernel on the wrong one.
-    TORCH_CHECK(input.device().index() == group->device_index(),
-                "input is on cuda:",
-                input.device().index(),
-                " but this UlyssesGroup was built for cuda:",
-                group->device_index(),
-                "; one group serves exactly one device");
+    require_group_device(*group, input);
     call.x    = input.contiguous();
     call.plan = &group->plan(call.x.sizes(), mode, call.x.scalar_type(), seq_splits, head_splits);
 
@@ -100,9 +105,12 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
                     call.output.sizes(),
                     ", expected ",
                     at::IntArrayRef(call.plan->output_shape));
-        // A buffer from empty_output() IS a window, and the peers write it directly.
+        // A buffer from empty_output() IS a window, and the peers write it directly. Compared in
+        // BYTES: a window is found by address, so the dtype it was allocated for need not be this
+        // call's, and comparing the two element counts would admit a buffer too small to hold what
+        // the peers are about to write into it.
         const Window* owned = group->window_of(call.output);
-        if (owned != nullptr && owned->numel >= call.plan->window_numel) {
+        if (owned != nullptr && owned->tensor.nbytes() >= call.plan->window_numel * call.x.element_size()) {
             call.win           = owned;
             call.out_is_window = true;
         }
@@ -118,9 +126,9 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
     // Refuse a call whose input, or whose `out`, shares bytes with the window it is about to fill
     // -- it would be read while every peer writes it. `out` BEING the window is the zero-copy path
     // and the one legitimate case. Intervals, not a pointer comparison, because an overlap can
-    // start past the window's base.
+    // start past the window's base. The window's OWN byte size, for the reason above.
     const void*   base  = reinterpret_cast<const void*>(call.win->peer_ptrs[group->rank()]);
-    const int64_t bytes = call.win->numel * call.x.element_size();
+    const int64_t bytes = call.win->tensor.nbytes();
     TORCH_CHECK(!intervals_overlap(call.x.data_ptr(), call.x.nbytes(), base, bytes),
                 "input overlaps the window this call fills: it would be read while every peer "
                 "writes it. Pass a separate output buffer, or let the call allocate one.");
@@ -270,6 +278,31 @@ void all_to_all_4d_out(const c10::intrusive_ptr<UlyssesGroup>&    group,
     run(group, input, mode, seq_splits, head_splits, out, kSyncWindow, at::cuda::getCurrentCUDAStream());
 }
 
+// The out-variant's share of the shape rule. Without it a fake tensor reaches the real kernel and
+// dies on require_cuda -- the misleading message all_to_all_4d_meta exists to prevent -- on the very
+// variant the schema split was made for, since `-> ()` is the only shape can_auto_functionalize
+// accepts. Nothing to return: the caller's buffer is the result and its shape is checked, not
+// derived.
+void all_to_all_4d_out_meta(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                            const at::Tensor&                          input,
+                            int64_t                                    mode,
+                            const std::optional<std::vector<int64_t>>& seq_splits,
+                            const std::optional<std::vector<int64_t>>& head_splits,
+                            const at::Tensor&                          out)
+{
+    const A2APlan& plan = group->plan(input.sizes(), mode, input.scalar_type(), seq_splits, head_splits);
+    TORCH_CHECK(out.scalar_type() == input.scalar_type(),
+                "out has dtype ",
+                out.scalar_type(),
+                ", expected ",
+                input.scalar_type());
+    TORCH_CHECK(out.sizes() == at::IntArrayRef(plan.output_shape),
+                "out has shape ",
+                out.sizes(),
+                ", expected ",
+                at::IntArrayRef(plan.output_shape));
+}
+
 // The async form's device-side half. Python has already made the comm stream current; `caller` is
 // the stream the user was on, which is where the input is staged.
 //
@@ -286,7 +319,15 @@ at::Tensor run_staged(const c10::intrusive_ptr<UlyssesGroup>&    group,
                       int64_t                                    caller_stream_id,
                       int64_t                                    caller_device_index)
 {
+    // Both before stage(), unlike every other check, which prepare() runs. destroy() returns early
+    // the second time, so a staging entry created after it is never freed and its event leaks with
+    // the group. And the staging buffer takes the INPUT's device while being cached by shape and
+    // dtype alone, so one wrong-device call would leave a buffer on that device behind and every
+    // later call for that shape would copy across devices before failing this same check. The comm
+    // stream below is read through the current device too, which a guard on the wrong one moves.
+    group->check_alive();
     require_cuda(input);
+    require_group_device(*group, input);
     const at::cuda::CUDAGuard guard(input.device());
     cudaStream_t              comm = at::cuda::getCurrentCUDAStream();
     // Rebuilt from torch's own identifiers rather than wrapped from a raw handle, so the caching
@@ -331,8 +372,7 @@ void all_to_all_4d_staged_out(const c10::intrusive_ptr<UlyssesGroup>&    group,
 //
 // Not a direct call to all_to_all_4d(): that would leave dispatch for good, and every key below
 // Autograd -- Python, and through it FakeTensorMode, and Meta -- would never be consulted, so a
-// fake tensor would reach the real kernel and die in cudaMemcpy3DAsync. Measured with a
-// TorchDispatchMode: with a direct call it sees this op's inner aten::empty and never the op.
+// fake tensor would reach the real kernel and die in cudaMemcpy3DAsync.
 //
 // The guard is what stops op.call from arriving back at the Autograd kernel. GradMode being off
 // is not enough: it governs graph construction, not which kernel the dispatcher picks.
@@ -421,20 +461,48 @@ public:
     }
 };
 
+namespace {
+
+// The node apply() allocates is dead weight when nothing will use it, and this operator runs twice
+// per attention layer per step.
+at::Tensor with_reverse_ad(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                           const at::Tensor&                          input,
+                           int64_t                                    mode,
+                           const std::optional<std::vector<int64_t>>& seq_splits,
+                           const std::optional<std::vector<int64_t>>& head_splits)
+{
+    if (!at::GradMode::is_enabled() || !input.requires_grad()) {
+        return dispatch_below_autograd(group, input, mode, seq_splits, head_splits);
+    }
+    return A2AFunction::apply(group, input, mode, seq_splits, head_splits);
+}
+
+// The only forward-AD level torch has.
+constexpr uint64_t kFwLevel = 0;
+
+}  // namespace
+
 at::Tensor all_to_all_4d_autograd(const c10::intrusive_ptr<UlyssesGroup>&    group,
                                   const at::Tensor&                          input,
                                   int64_t                                    mode,
                                   const std::optional<std::vector<int64_t>>& seq_splits,
                                   const std::optional<std::vector<int64_t>>& head_splits)
 {
-    // The node apply() allocates is dead weight when nothing will ever use it, and this operator
-    // runs twice per attention layer per step. Measured on 4x B200: routing every call through
-    // apply() cost about 1 us of host submit time per call, which is the reason the bookkeeping is
-    // in C++ at all. The predicate is the same one apply() computes internally as `is_executable`.
-    if (!at::GradMode::is_enabled() || !input.requires_grad()) {
-        return dispatch_below_autograd(group, input, mode, seq_splits, head_splits);
+    // Forward mode is handled HERE, not in A2AFunction: torch::autograd::Function has no jvp hook
+    // in C++, so a dual input reaching apply() raises, and one taking with_reverse_ad's fast path
+    // would have its tangent dropped without a word. The jvp of a permutation is the permutation, so
+    // the tangent goes through the same call -- one more collective, which every rank issues,
+    // because every rank runs this graph.
+    const at::Tensor tangent = input._fw_grad(kFwLevel);
+    if (!tangent.defined()) {
+        return with_reverse_ad(group, input, mode, seq_splits, head_splits);
     }
-    return A2AFunction::apply(group, input, mode, seq_splits, head_splits);
+    // The primal keeps the reverse-mode history and carries no tangent, so apply() may see it.
+    at::Tensor result = with_reverse_ad(group, input._fw_primal(kFwLevel), mode, seq_splits, head_splits);
+    result._set_fw_grad(with_reverse_ad(group, tangent, mode, seq_splits, head_splits),
+                        kFwLevel,
+                        /*is_inplace_op=*/false);
+    return result;
 }
 
 // A buffer shaped like this call's output, in symmetric memory, for the caller to pass back as
@@ -520,6 +588,7 @@ TORCH_LIBRARY(fast_ulysses, m)
     m.def("all_to_all_4d_out(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
           "int mode, int[]? seq_splits, int[]? head_splits, Tensor(a!) out) -> ()");
     m.impl("all_to_all_4d_out", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_out);
+    m.impl("all_to_all_4d_out", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_out_meta);
 
     m.def("all_to_all_4d_staged(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[]? seq_splits, int[]? head_splits, "
@@ -535,11 +604,18 @@ TORCH_LIBRARY(fast_ulysses, m)
           "int mode, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
     m.impl("empty_output", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::empty_output);
     m.impl("empty_output", c10::DispatchKey::Meta, &ulysses::empty_output_meta);
+    // A fresh buffer has no data dependence on the tensor whose shape it was taken from, so it must
+    // not inherit that tensor's requires_grad. Without this the Autograd key falls back to
+    // autogradNotImplementedFallback, which builds a node over the buffer and hands back a non-leaf
+    // the caller cannot even detach in place.
+    m.impl("empty_output", c10::DispatchKey::Autograd, torch::CppFunction::makeFallthrough());
 
     m.def("all_to_all_4d_timed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[]? seq_splits=None, int[]? head_splits=None) "
           "-> (Tensor, float[])");
     m.impl("all_to_all_4d_timed", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_timed);
+    // Same as empty_output: it measures, it does not differentiate.
+    m.impl("all_to_all_4d_timed", c10::DispatchKey::Autograd, torch::CppFunction::makeFallthrough());
 }
 
 // Python `import _C` needs PyInit__C; TORCH_LIBRARY already registered at dlopen time.

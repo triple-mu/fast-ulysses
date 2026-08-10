@@ -2,12 +2,12 @@
 
     torchrun --nproc_per_node=8 test/distributed/overlapping_barriers.py
 
-docs/api.md:108 says "the sync and async calls do not share a window, so mixing them is safe". This
+docs/api.md says "the sync and async calls do not share a window, so mixing them is safe". This
 worker is the evidence for that sentence, under the one condition that could make it false: an
 async call still in flight on the group's high-priority comm stream while sync calls are issued on
-the caller's stream, with NOTHING ordering the two streams. python/fast_ulysses/group.py:88-92
-states that non-ordering and names it as the reason the C++ side splits ``kSyncWindow`` from
-``kAsyncWindow``; windows are keyed ``(role, dtype)`` (src/group.cc:255). In that shape two
+the caller's stream, with NOTHING ordering the two streams. python/fast_ulysses/group.py states
+that non-ordering, where it builds the comm stream, and names it as the reason the C++ side splits
+``kSyncWindow`` from ``kAsyncWindow``; windows are keyed ``(role, dtype)``. In that shape two
 one-block ``barrier_kernel``s (src/barrier.cu) are resident at the same time, each spinning on its
 own ``flags[ws]`` + ``epoch`` region inside its own allocation's signal pad.
 
@@ -15,17 +15,17 @@ It is not obvious, because the reference implementation reproduced two distinct 
 this shape:
 
   * ONE epoch counter for the group with a plain read-modify-write: both kernels can claim the same
-    epoch and one handshake becomes a no-op. 4 ranks x 2000 iterations HUNG -- a rank that collides
-    falls permanently one epoch behind, and the first peer to reach a barrier it can no longer
-    satisfy spins forever.
+    epoch and one handshake becomes a no-op. That HANGS -- a rank that collides falls permanently
+    one epoch behind, and the first peer to reach a barrier it can no longer satisfy spins forever.
   * making the counter atomic fixed the hang and not the race. Epochs were then unique but not
     consistently ORDERED across the two collectives: rank X gave its async barrier epoch 3 and its
     sync barrier 4 while rank Y did the reverse, so X waited on a flag Y had published for the
-    other call. Results tore at iteration 126.
+    other call, and the results tore.
 
-That history is why the handshake state is per window by construction (docs/design.md:77) and why
-v0.2 gives the two roles separate windows. master's worker ran two ``tag``s; ``tag`` is gone
-(docs/design.md:183) and the axis it left behind is sync-vs-async.
+That history is why the handshake state is per window by construction (docs/design.md, "a window
+is single-buffered") and why v0.2 gives the two roles separate windows. master's worker ran two
+``tag``s; ``tag`` is gone (docs/design.md, "Removed, and why") and the axis it left behind is
+sync-vs-async.
 
 THE ASYNC CALL IS ISSUED FIRST, and swapping the two lines makes this file vacuous. ``stage()``
 copies the input on the CALLER's stream and makes the comm stream wait on that copy
@@ -94,15 +94,14 @@ WHAT MAKES THIS RUN BLIND, in the order a future maintainer is likely to reach f
      dtype is still one allocation. The shapes are equal for the cheaper reasons -- one plan, one
      staging buffer, and no window reallocation mid-loop.)
   9. ``v = float(i)`` instead of the 1..128 cycle. bfloat16 has 8 significant bits, so above 256
-     adjacent rounds collide on one value and a tear becomes indistinguishable from a clean read.
-     master's own worker was blind for the last 87% of its run for this reason, and its bugs
-     reproduced at iteration 126.
+     adjacent rounds collide on one value and a tear becomes indistinguishable from a clean read --
+     which silently disables the data check for most of a loop this long.
  10. Dropping the ``CompletedHandle`` guard. On a libtorch without ``c10d::register_work``,
      ``register_stream_completion`` makes the caller's stream wait on the comm event AT CALL TIME
      (src/work.cc:73-79) and returns false; the async call is then not async at all. Every check
      passes with zero overlap, and the only visible difference is the returned type.
  11. Running at world_size 1. ``fast_barrier`` returns before launching anything
-     (src/barrier.cu:55), so there is no barrier, no epoch advance, and a vacuous pass. Refused.
+     (src/barrier.cu:56), so there is no barrier, no epoch advance, and a vacuous pass. Refused.
  12. Deleting the watchdog "because pytest already has a 600 s timeout". It does -- but the
      documented debugging path is this file under torchrun, which would then hang forever with spin
      kernels pinned on eight GPUs.
@@ -147,10 +146,12 @@ from fast_ulysses import CompletedHandle, UlyssesGroup
 ITERS = 2000
 # Prime, and larger than any legal world size, so the sampled rounds cycle through every rank's
 # turn to be the late one. A stride of 100 divides evenly into ws 2 and 4 and hits only ranks 0
-# and 4 at ws 8, which measured the overlap on one rank's rounds and called it the whole loop.
+# and 4 at ws 8: one fixed phase of the rotation, reported as if it were the whole loop.
 SAMPLE_EVERY = 97
-SAMPLES = -(-ITERS // SAMPLE_EVERY)  # ceil: round 1940 samples too, and marks must have that slot
-SKEW_CYCLES = 200_000  # ~130 us at ~1.5 GHz; the host gap between two calls is ~10 us
+SAMPLES = -(-ITERS // SAMPLE_EVERY)  # ceil: the last partial block samples too, and needs a slot
+# The late rank has to be late by more than the host takes to submit the next call, or the skew is
+# absorbed before it reaches the device and no peer ever waits in two spin kernels at once.
+SKEW_CYCLES = 200_000
 TIMEOUT_S = 120  # a healthy run is a few seconds -- this is a deadlock bound, not a perf assertion
 
 
@@ -178,7 +179,7 @@ def main() -> None:
     dev = torch.device("cuda", torch.cuda.current_device())
     threading.Thread(target=watchdog, args=(rank,), daemon=True).start()
     if ws < 2:
-        # fast_barrier returns before launching anything at ws == 1 (src/barrier.cu:55): no
+        # fast_barrier returns before launching anything at ws == 1 (src/barrier.cu:56): no
         # barrier, no epoch, nothing to overlap.
         raise SystemExit(f"needs >= 2 ranks, got {ws}")
 
@@ -190,10 +191,10 @@ def main() -> None:
     # The size is set by the LIVENESS check, not by the data check. `stage()` copies the input on
     # the caller's stream before any async device work, so that copy sits inside `issued` in every
     # round; the async call's device life has to be long enough that a sync call issued right after
-    # it still lands in the first half. At (1, 64, ...) -- 0.26 MB at ws=4 -- a B200 finishes the
-    # transfer in microseconds and the staging copy is most of the span: measured 5 of 21 sampled
-    # rounds live, i.e. BLIND. Raising the payload is the fix; lowering the 2.0 bar below would
-    # only make the worker stop noticing that it had been serialized.
+    # it still lands in the first half. Sized for that: at a payload small enough for a fast
+    # machine to transfer in microseconds the staging copy is most of the span, most sampled rounds
+    # fall in the second half, and the worker reports BLIND. Raising the payload is the fix;
+    # lowering the 2.0 bar below would only make it stop noticing that it had been serialized.
     shape = (1, 1024, 4 * ws, 128)
     q = torch.empty(shape, dtype=torch.bfloat16, device=dev)
     k1 = torch.empty_like(q)
@@ -321,8 +322,8 @@ def main() -> None:
     # The bar is the MIDPOINT, not `span > issued`. The async call cannot begin before the staging
     # copy that sample[2] follows by microseconds, so `span > issued` holds in every run that ever
     # completes -- including one where a wait was inserted and `issued` sits at the async call's
-    # very end. Half the span is a bar only a genuinely co-resident pair clears: with one rank
-    # skewed by ~130 us the span is tens to hundreds of us and `issued` is one 0.5 MB staging copy.
+    # very end. Half the span is a bar only a genuinely co-resident pair clears: the skewed rank
+    # stretches the span far past the one staging copy that `issued` contains.
     spans = [(b.elapsed_time(a1), b.elapsed_time(s0)) for b, a1, s0 in marks]
     live = [span - issued for span, issued in spans if span > 2.0 * issued]
     if not blind_reason and early_wait:

@@ -56,9 +56,9 @@ fi
 "${VENV}/bin/pip" install "${WHEEL}"
 "${VENV}/bin/pip" install pytest numpy
 
-# Every python below runs from outside the repo. ${REPO}/fast_ulysses is an importable package
-# directory holding a developer build, and it wins over site-packages for anything whose cwd
-# is the repo root -- which would quietly test the working tree instead of the wheel.
+# Every python below runs from a scratch dir, whatever the caller's cwd was. ${REPO}/python holds
+# this same package with a developer build in it, and a cwd anywhere inside it would be imported
+# in place of the wheel under test.
 meta="$(cd "${WORK}" && "${VENV}/bin/python" -c '
 from fast_ulysses import _build_meta as m
 print(f"version={m.VERSION} torch={m.TORCH_VERSION} cuda={m.CUDA_VERSION} "
@@ -89,7 +89,11 @@ gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)"
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
 # || true on every grep: pipefail is on, and a run that died early has none of these lines --
 # which is exactly when the block below is worth printing.
-p2p="$(grep -E "P2P-mappable" "${doctor_log}" | tail -1 || true)"
+# The verdicts `fast-ulysses doctor` can reach about the link topology. The release notes have to
+# record which one this machine gave: the transport writes peer memory directly, so a run from a
+# box that is not fully NVLink-joined says nothing about the wheel.
+nvlink="$(grep -E "NVLink-joined|no pair to check|could not report the link topology" \
+    "${doctor_log}" | tail -1 || true)"
 # Lowercase on purpose: pytest's per-test lines say SKIPPED, only its final tally is lowercase.
 suite_summary="$(grep -E "passed|failed|error|skipped|no tests ran" "${suite_log}" | tail -1 || true)"
 verdict="$(grep -E "^# VERDICT" "${suite_log}" | tail -1 || true)"
@@ -114,7 +118,7 @@ Preflight (manual; the multi-GPU suite has no CI runner)
   torch       : ${torch_version}
   build meta  : ${meta}
   doctor      : ${doctor_line}
-  p2p         : ${p2p:-unreported}
+  nvlink      : ${nvlink:-unreported}
   multigpu    : ${suite_line}
   exclusivity : ${verdict:-unreported}
 ------------------------------------

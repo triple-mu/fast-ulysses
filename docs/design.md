@@ -9,14 +9,13 @@ Peer windows are written with plain `cudaMemcpy2D/3DAsync` into addresses obtain
 symmetric memory. That uses the copy engines and **no SMs**, which is the point: an SM-resident
 collective cannot get a block slot while GEMMs hold every SM, and this one does not need one.
 
-Measured on H200, against a concurrent 8192³ fp16 GEMM chain of the same duration: a **peer**
-copy overlaps it completely (67.9 ms alone, 67.9 ms concurrent). A **same-device** copy does not
-— it runs at 1.79× the longer of the two, where full competition would be 1.99×. So the zero-SM
-property is a property of the *remote* copies. Two same-device copies remain: this rank's own
-share of the transfer, and the copy-out on the copying path. That is the strongest argument for
-`out=` from `empty_output()`, which removes the second one.
+Under a concurrent GEMM chain of the same duration, a **peer** copy overlaps it completely while a
+**same-device** copy runs at close to full competition with it. So the zero-SM property is a
+property of the *remote* copies. Two same-device copies remain: this rank's own share of the
+transfer, and the copy-out on the copying path. That is the strongest argument for `out=` from
+`empty_output()`, which removes the second one.
 
-`benchmark/bench_a2a.py --mode zerosm` is that A/B, and is how to check it on a machine here:
+`benchmark/bench_a2a.py --mode zerosm` is that A/B on a machine here:
 
 ```bash
 ./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 \
@@ -24,19 +23,12 @@ share of the transfer, and the copy-out on the copying path. That is the stronge
 ```
 
 The same bytes and the same `dst.copy_(src)`, once into a peer's window and once into this rank's
-own memory, each under its own GEMM chain matched to that copy's length — the same bytes take
-several times longer to reach a peer than to reach local memory (H200 wan-720p in
-[benchmark.md](benchmark.md): 255 MB crossing a link in 689 µs of `transfer`, against 291 MB copied
-locally in 143 µs of `copy_out`), so one chain cannot be the same duration as both. It goes through
-torch symmetric memory rather than through the operator, whose path also contains two barrier
-kernels and a copy-out and so cannot attribute anything to the transfer. Besides the pair ratio and
-the full-competition reference above, it reports the GEMM chain's **own** slowdown with the copy
-underneath it: 1.00× is "that copy cost the chain nothing".
-That column is not sufficient on its own — a copy the chain starved never ran under it and reads
-1.00× too, at a pair ratio equal to full competition — so the two are read together, and the run
-says so in its header. Two GPUs are the minimum: at `world_size = 1` there is no peer arm and the
-run says that too. The numbers in the paragraph above predate the mode and were not produced by it;
-no table in [benchmark.md](benchmark.md) carries them yet.
+own memory. Each arm gets its own GEMM chain matched to that copy's length, because the same bytes
+take several times longer to reach a peer than to reach local memory, so one chain cannot match
+both. It goes through torch symmetric memory rather than through the operator, whose path also
+contains two barrier kernels and a copy-out and so cannot attribute anything to the transfer. The
+chain's own slowdown and the pair's wall clock are read together — a copy the chain starved reads
+1.00× on the first column too — and the run's header says so. Two GPUs are the minimum.
 
 The sequence/head relayout is expressed as source and destination strides on those copies, so it
 costs nothing beyond the transfer that had to happen anyway. That is why the baseline's two permute
@@ -114,6 +106,19 @@ attribute is therefore not by itself a reason the waiting form cannot be used ov
 
 The spin kernel's inline PTX needs only `sm_70`.
 
+## Tracing
+
+The group is a torchbind object and no fake class is registered for it, so Dynamo cannot represent
+it in a graph and breaks on the call. Registering one would mean giving the group a meaningful
+fake — the windows, their peer addresses and the rendezvous behind them — which is state a trace
+cannot stand in for.
+
+What does work is shape propagation: the functional op has an explicit Meta kernel, so `FakeTensor`
+and AOTAutograd see the output shape without touching a device, and the backward traces like any
+other op. `empty_output()` refuses to be traced at all rather than being recorded: it is a
+collective allocation, and replaying a trace would put the rendezvous where the graph places it
+rather than where every rank's own program reaches it. Call it eagerly and pass the buffer in.
+
 ## What this rests on that is not documented
 
 **A completed copy-engine write is visible at the destination by the time a later kernel's release
@@ -146,15 +151,16 @@ test cannot silently stop testing.
 
 ## Why NVLink only
 
-Over PCIe the operator is correct and, within one CPU socket, as fast relative to the baseline as
-it is on NVLink. Across a socket boundary it is about 0.62× of `torch.distributed` — not because
-the transfer is slow, but because `all_to_all_single` does not use direct GPU P2P there. It routes
-around the boundary through the InfiniBand NICs or through host shared memory; this transport always
-writes peer memory directly. Deny NCCL that bypass and we are 3.8–4.9× faster on the same path.
+Over PCIe the operator is correct and slower than `torch.distributed`, by an amount that is not
+stable: across a socket boundary it ran at 0.62× the baseline on one PCIe node and 0.14× on
+another. Nothing is averaged, because the two nodes disagree by 5×. Numbers in
+[benchmark.md](benchmark.md), "Why not PCIe".
 
-Measured on two 8-GPU PCIe machines, 4/4 across NUMA nodes, both CPU vendors. Cross-socket P2P on
-the Intel machine did not scale with concurrency at all: four concurrent pairs moved no more than
-one. Pitched copies and additional streams were both tested and refuted as explanations.
+The fabric is not what differs: flat peer copies reach the same bandwidth on both nodes. What
+differs is what the pitched (strided) copy pattern extracts from it, which degrades over PCIe by an
+amount that depends on the switch layout below the socket. So there the transfer stage itself is
+the slow part — the opposite of the NVLink case, and the reason the relayout-in-strides trade stops
+paying.
 
 Matching NCCL there means a shared-host-memory transport with a second handshake — a new transport,
 not a scheduling change, worth nothing on NVLink. Not built, so the constructor refuses the

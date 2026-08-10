@@ -13,7 +13,8 @@ are free, samples throughout, and prints `EXCLUSIVE` or `CONTENDED`. Every run b
 - **Whole node, 8 GPUs**, allocated exclusively through Slurm with a GPU health gate.
 - **One binary.** A single wheel built for `80;90;100;120` was installed on every machine
   (`sha256 5e4e3747…`), so nothing was recompiled between generations.
-- **One image**, `nvcr.io/nvidia/pytorch:26.07-py3` — torch `2.13.0a0+9186a08b2c.nv26.07`, CUDA 13.3.
+- **One image**, `nvcr.io/nvidia/pytorch:26.07-py3` — torch `2.13.0a0+9186a08b2c.nv26.07`,
+  CUDA 13.3. The one exception is B200's ws=4 rows, noted at "At world_size 4".
 - **Correctness first.** `pytest test/` passed on each machine before any measurement; a number
   from a build that fails its own tests only looks like data.
 - **Two nodes per model.** v0.1 had to withdraw a published row when a second node of the same
@@ -60,7 +61,7 @@ transport floor rather than an alternative. `a2a` against `transfer` is the like
 
 ws=8. The last column is how far the second node's `OURS` was from the first's.
 
-| GPU | shape | perm_in | a2a | perm_out | BASE | barr_in | transfer | barr_out | copy_out | OURS | vs BASE | raw | CE/raw | relayout% | node 2 |
+| GPU | shape | perm_in | a2a | perm_out | BASE | barr_in | transfer | barr_out | copy_out | OURS | vs BASE | raw | raw/CE | relayout% | node 2 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | H200 | wan-720p | 0.358 | 0.826 | 0.385 | **1.569** | 0.011 | 0.680 | 0.025 | 0.143 | **0.860** | **1.82×** | 0.859 | 1.26× | 47.3% | 0.8% |
 | H200 | wan-480p | 0.162 | 0.378 | 0.171 | **0.711** | 0.010 | 0.319 | 0.035 | 0.068 | **0.431** | **1.65×** | 0.391 | 1.23× | 46.9% | 3.9% |
@@ -95,7 +96,7 @@ single-flow number.
 | H200 | 378.7 GB/s | 376.0 | 3008 GB/s | 375 GB/s | **99%** |
 | B200 | 691.7 GB/s | 689.4 | 5515 GB/s | 621 GB/s | **90%** |
 | B300 | 692.1 GB/s | 686.9 | 5495 GB/s | 620 GB/s | **90%** |
-| H100 | 381.4 GB/s | 377.6 | 3021 GB/s | 356 GB/s | **94%** |
+| H100 | 381.4 GB/s | 377.6 | 3021 GB/s | 356 GB/s | **93%** |
 
 Per-flow bandwidth does not drop when all eight flows run at once, on any of them: the fabric is
 not the contended resource. At 90–99% of what a flat copy achieves there is essentially nothing
@@ -103,9 +104,9 @@ left to schedule, which is the useful way to read the `transfer` column above.
 
 ## The zero-copy path
 
-`out=` from `empty_output()` removes the `copy_out` stage. The saving is close to that stage but
-consistently a little under it (0.09–0.12 ms saved against a 0.10–0.14 ms `copy_out`), which is
-what you would expect: the two are separate measurements of the whole call, not a subtraction.
+`out=` from `empty_output()` removes the `copy_out` stage, and the saving is the size of that
+stage: 0.039–0.201 ms saved against a 0.048–0.201 ms `copy_out`. Row by row it lands a little
+either side, because the two are separate measurements of the whole call, not a subtraction.
 
 The last column is `copy_out` as a share of the four timed stages, which is what the benchmark
 prints; it is not `copy_out / copying`.
@@ -125,9 +126,10 @@ prints; it is not `copy_out / copying`.
 | H100 | wan-480p | 0.440 | 0.344 | 0.095 | **1.28×** | 21.2% |
 | H100 | h3-t2va-5s | 0.748 | 0.606 | 0.142 | **1.23×** | 18.5% |
 
-The range is 1.14–1.28×, the low end is B300's wan-480p whose `copy_out` share is also the smallest
-at 15.6%, and the high end is H100's wan-480p whose share is 21.2% — the two move together across
-the whole table, which is the check that what is being saved is the copy-out and nothing else.
+The range is 1.14–1.28× and it tracks the `copy_out` share: the smallest share (B300's wan-480p,
+15.6%) gives the smallest speedup, and the two largest (H100's wan-480p and wan-720p, 21.2% and
+22.0%) give the two largest, 1.28× and 1.27×. That is the check that what is being saved is the
+copy-out and nothing else.
 H100 gains the most because its copy-out is the largest share of its call: the same
 device-to-device copy against the slowest fabric here.
 
@@ -178,8 +180,9 @@ token instead. The pad is at most `world_size − 1` tokens, so the ratio is the
 | H100 | h3-t2va-5s | 1.142 | 1.262 | 1.11× | 0.661 | 0.661 | **1.00×** |
 
 Dropping the pad is free here (1.00–1.03×, every shape on every machine) and costs the baseline
-5–11% — 10–11% of it on H100, where the extra all_to_all_single the uneven case forces is most
-expensive relative to the rest — because it cannot stay on flat `all_to_all_single` once shards differ at all.
+5–11%, because it cannot stay on flat `all_to_all_single` once shards differ at all: the same one
+call, but with split sizes, a per-peer reshape and a `cat` after it. That extra relayout is 10–11%
+on H100, where it is the most expensive relative to the rest.
 
 ## At world_size 4
 
@@ -199,10 +202,10 @@ no second-node column.
 
 Both ratios are higher at ws=4 than at ws=8 -- B200's by a lot (2.6-2.8x against 1.9-2.2x), H100's
 barely (1.7-1.9x against 1.6-1.7x) -- and the reason is the baseline, not this operator. A permute
-costs the whole tensor whatever the group size, while the collective
-itself moves only `(ws-1)/ws` of it -- 3/4 here against 7/8 at ws=8. So the relayout the baseline
-pays and this path does not is a larger share of a smaller total. Read the `relayout%` column, not
-the multiplier, when comparing across group sizes.
+costs the whole tensor whatever the group size, while the collective itself moves only `(ws-1)/ws`
+of it -- 3/4 here against 7/8 at ws=8. So the relayout the baseline pays and this path does not is
+a larger share of a smaller total. Read the `relayout%` column, not the multiplier, when comparing
+across group sizes.
 
 ## Where this stops being the right tool
 
@@ -241,16 +244,13 @@ somewhere — read it as a floor, not as something to optimise away. µs, ws=8, 
 | B300 | 9478 | 291.2 | 11.2 | 403.3 | 27.4 | 99.3 | 541.2 | **7.1%** | 631.8 |
 | B300 | 16384 | 503.3 | 11.5 | 643.5 | 43.7 | 162.7 | 861.2 | **6.4%** | 684.4 |
 
-Every size on every machine, because the ranges below are only checkable against the whole grid --
-earlier revisions published a subset and quoted the full one, so three of the endpoints could not be
-found in the table above them.
-
 The share depends on the machine as much as on the size, so read the column, not a rule of thumb.
 At half a megabyte per rank the handshakes are 33–54% of the call; at 31.5 MB they are 19–34%
 (B300's 19.4% to B200's 33.9%); at the wan-720p working point (291 MB) they are 5.1–8.4%, and at
-503 MB, 2.1–6.4% (H200's 2.1% to B300's 6.4%). B200 carries the
-highest share throughout because its `barr_in` sits around 30 µs against 11–13 µs on the other two
-— that is arrival skew on that pair of nodes, not a property of the part.
+503 MB, 2.1–6.4% (H200's 2.1% to B300's 6.4%). B200 carries the highest share at every size but
+the two ends: its `barr_in` sits near 30 µs from `s_local` 64 up, against about 10 µs elsewhere.
+That is arrival skew on those nodes and not a property of the part — H200's single 28.3 µs at
+`s_local` 16, which is what takes the top share there, is the same thing on another machine.
 
 This operator is built for the long-sequence video DiT case, hundreds of MB per rank, which is the
 end of that range where the handshakes stop mattering.
@@ -263,9 +263,7 @@ is the topology the constructor refuses. Three things came out of it.
 **The refusal works.** With the default `require_nvlink=True`, `UlyssesGroup()` raised
 `cuda:0 and cuda:1 are not joined by NVLink`, and `doctor` printed an all-`N` matrix — while
 `pytest test/` passed 51/51 on the same machine, since the tests construct their groups with the
-check off. This is the first confirmation on real hardware that the NVML fix holds: before it,
-"this GPU has no NVLink" was read as "NVML cannot say", and the guard stayed inert on exactly the
-topology it exists for.
+check off. This is the first machine with no NVLink at all that the guard has been run on.
 
 That evidence is in `pro6000-refusal-smc521ge-0080.log`, the run that was *stopped* by the
 refusal. The two tables below come from separate runs with `--allow-non-nvlink`, whose logs
@@ -300,7 +298,7 @@ Measured on the NVSHMEM backend, kept as context. A same-machine A/B on 2×H200 
 stage within 0.8% across the backend swap, and the v0.2 numbers above land within 1% of the v0.1
 ones on the machines both saw (B200 wan-720p: v0.1 BASE 1.193 / OURS 0.554, v0.2 1.194 / 0.550).
 
-- 8×A100-SXM4-80GB: 1.72–1.87× the `torch.distributed` path, CE/raw 1.12–1.37×.
+- 8×A100-SXM4-80GB: 1.72–1.87× the `torch.distributed` path, raw/CE 1.12–1.37×.
 - The collective hid ~105% under a concurrent GEMM chain on A100 (read >100% as fully hidden: the
   serial arrangement pays a launch cost the concurrent one avoids).
 
@@ -323,8 +321,7 @@ ones on the machines both saw (B200 wan-720p: v0.1 BASE 1.193 / OURS 0.554, v0.2
 - **The zero-SM A/B on these machines.** `--mode zerosm` — a peer copy and a same-device copy of
   the same bytes, each under a GEMM chain matched to its own length, reporting that chain's own
   slowdown next to the pair's wall clock — was written after this measurement pass, so no table
-  here carries it. The H200 numbers quoted in [design.md](design.md) predate the mode and were not
-  produced by it. `collect.sh` runs it, so the next pass will have them.
+  here carries it. `collect.sh` runs it, so the next pass will have them.
 - **End-to-end model impact.** These are microbenchmarks — warm L2, no neighbours competing for
   bandwidth. Removing the padding saves attention work and memory this cannot see.
 - **Beyond `world_size = 8`,** or across nodes. ws=4 is above; ws=2 is not measured.

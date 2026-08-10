@@ -39,11 +39,11 @@ from pathlib import Path
 EXPECTED_RUNPATH = "$ORIGIN/../torch/lib"
 
 # Every one of these must be present, and anything outside REQUIRED | OPTIONAL fails, so a NEW
-# external dependency is as loud as a missing one. libcudart.so.<major> and libnvrtc.so.<major>
-# are added from --cuda-major; both arrive through TORCH_LIBRARIES and both resolve at runtime
-# out of the nvidia wheels torch depends on. libcuda.so.1 is deliberately absent: the extension
-# reaches the driver only through cudart, and if that ever changes the wheel stops being
-# installable on a driverless machine, which we want to hear about from the release job.
+# external dependency is as loud as a missing one. libcudart.so.<major> is added from
+# --cuda-major: it is what the extension calls, and it resolves at runtime out of the nvidia
+# wheels torch depends on. libcuda.so.1 is deliberately absent: the extension reaches the driver
+# only through cudart, and if that ever changes the wheel stops being installable on a driverless
+# machine, which we want to hear about from the release job.
 REQUIRED_NEEDED = {
     "libtorch.so",
     "libc10.so",
@@ -59,6 +59,9 @@ REQUIRED_NEEDED = {
 # Allowed but not required, because whether they appear is a property of the toolchain rather
 # than of this code: glibc split libpthread/libdl out below 2.34 and folded them back into libc
 # at 2.34, and the loader is named explicitly only by some linker configurations.
+# libnvrtc.so.<major> is added from --cuda-major and belongs to the same class: it is on the link
+# line through TORCH_LIBRARIES, but nothing here calls an nvrtc symbol, so whether it becomes a
+# DT_NEEDED is decided by the builder's --as-needed default and not by this code.
 OPTIONAL_NEEDED = {
     "libpthread.so.0",
     "libdl.so.2",
@@ -275,10 +278,11 @@ def _check_so(so: Path, cuda_major: str, arches: list[str]) -> list[str]:
             problems.append(f"RUNPATH is\n  {runpath[0]}\nexpected\n  {EXPECTED_RUNPATH}")
 
     # 6. every required entry present, and nothing beyond required | optional
-    required = REQUIRED_NEEDED | {f"libcudart.so.{cuda_major}", f"libnvrtc.so.{cuda_major}"}
+    required = REQUIRED_NEEDED | {f"libcudart.so.{cuda_major}"}
+    optional = OPTIONAL_NEEDED | {f"libnvrtc.so.{cuda_major}"}
     got = set(needed)
     missing = sorted(required - got)
-    extra = sorted(got - required - OPTIONAL_NEEDED)
+    extra = sorted(got - required - optional)
     if missing or extra:
         problems.append(f"DT_NEEDED mismatch: missing {missing}, unexpected {extra}")
 

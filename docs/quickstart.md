@@ -41,16 +41,23 @@ for step in range(steps):
 `buf` is an ordinary tensor you own. It is overwritten by the next call that uses it, so use one
 buffer per concurrent call.
 
+`out=` gives up the gradient: the result comes back with no `grad_fn` and no `requires_grad`, and
+nothing raises. Use it in inference and under `torch.no_grad()`; inside a training graph, call
+without `out=`.
+
 ## Overlapping with compute
 
 The transfer uses no SMs, so it can run underneath compute. Submit it, do the compute, then use the
 result — the first aten op on it inserts the wait GPU-side.
 
 ```python
-y = group.all_to_all_4d_async(qkv, mode=0)
-h = some_gemm_chain(other_input)     # runs while the copy engines move qkv
-y = y.wait()                         # or just use y; the first op waits by itself
+y = group.all_to_all_4d_async(qkv, mode=0)   # inference only: raises if qkv requires grad
+h = some_gemm_chain(other_input)             # runs while the copy engines move qkv
+y = y.wait()                                 # or just use y; the first op waits by itself
 ```
+
+The async form is not differentiable and refuses a grad-requiring input rather than dropping the
+gradient, so in a training step this is the sync call's job.
 
 Wait on, or use, every async result. A dropped one leaves an entry in torch's work registry.
 

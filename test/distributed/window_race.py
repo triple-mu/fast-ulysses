@@ -9,8 +9,9 @@ is the first ``fast_barrier`` in ``transfer_on_stream`` (src/bindings.cc:155-160
 READERS"), and it only delivers anything because a peer's copy engines are chained behind that
 peer's OWN opening barrier: the ``ready`` event is recorded on the caller's stream after the
 barrier kernel (src/transfer.cu:87) and the transfer stream waits on it (:97). Neither of those had
-to be true. docs/api.md:66-68 sells the result ("it is simply overwritten by the next call that
-uses it, like any output buffer") and docs/design.md:53-55 states the model.
+to be true. docs/api.md sells the result ("it is simply overwritten by the next call that uses it,
+like any output buffer") and docs/design.md states the model ("a window is single-buffered, so two
+calls may share one only when the stream orders them").
 
 Only ``out=`` from ``empty_output()`` can observe this. That buffer IS a window and the peers write
 it directly (src/bindings.cc:103-108); the copying form hands back a private tensor the peers

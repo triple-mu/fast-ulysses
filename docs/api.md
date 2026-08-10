@@ -48,11 +48,11 @@ prints it as a matrix.
 Note the alignment rule tightens as the element shrinks: `d % 8` at float16, `d % 4` at float32,
 `d % 16` at float8 and int8. Nothing below the check is dtype-specific — the transport moves bytes.
 
-**Differentiable.** The vjp of a permutation is the inverse permutation, so the backward is the
-other `mode` with the **same** splits. That last part is worth reading twice: `all_to_all_single`'s
-backward swaps its split sizes, because those describe one call's send and receive counts;
-`seq_splits` / `head_splits` describe the group's geometry, which holds whichever way the data
-moves. Backward always takes the copying path, never `out=`.
+**Differentiable, except with `out=`.** The vjp of a permutation is the inverse permutation, so the
+backward is the other `mode` with the **same** splits. `all_to_all_single`'s backward swaps its
+split sizes, because those describe one call's send and receive counts; `seq_splits` /
+`head_splits` describe the group's geometry, which holds whichever way the data moves. Backward
+always takes the copying path, never `out=`.
 
 A **meta** kernel propagates shapes under `FakeTensor` and AOTAutograd. `torch.compile` over a
 module that holds an `UlyssesGroup` still graph-breaks: the group is a torchbind object with no
@@ -67,6 +67,13 @@ registered fake class. `empty_output()` refuses to be traced at all, with a mess
   the caller's own buffer, so still no lifetime rules; it is simply overwritten by the next call
   that uses it, like any output buffer.
 
+**`out` costs the gradient, and does not say so.** It reaches a mutating op that carries no
+autograd formula, so the result is the buffer itself: `grad_fn` is `None` and `requires_grad` is
+`False` even when `x` requires grad. Unlike the async form this cannot raise — the value returned
+is a tensor the caller already owns, and nothing distinguishes "no gradient wanted" from "gradient
+dropped". In a training step everything upstream of the call then gets no gradient and nothing
+fails. Use `out=` in inference and in no-grad regions; use the plain call inside a graph.
+
 **`seq_splits[p]` / `head_splits[p]`** are rank p's sequence and head shard. Pass **both or
 neither**, identical on every rank, matching the shape handed in. Neither means even shards, and
 the scattered axis must then divide (`n_global % ws` for mode 0, `s_global % ws` for mode 1). Both
@@ -75,11 +82,14 @@ lets shards differ arbitrarily, which is what lets a caller drop sequence paddin
 ### Raises
 
 `RuntimeError`, from validation that runs **before the call's first barrier**, so a rejected
-argument leaves no rank waiting on peers that did not reject it: `x` not 4D or not CUDA; dtype not
-not in the dtype list above; `d * elem_size` not 16 B-aligned; `mode` not 0 or 1; `world_size` outside
-`[1, 8]`; one of the splits without the other, or splits contradicting `x`'s shape; no splits and
-the scattered axis does not divide; `out` not contiguous CUDA, or its dtype or shape not the
-output's; `x` overlapping the window, or `out` partially overlapping it.
+argument leaves no rank waiting on peers that did not reject it: the group already `destroy()`ed;
+`x` not 4D or not CUDA, or on a device other than the group's; dtype not in the dtype list above;
+`d * elem_size` not 16 B-aligned; `mode` not 0 or 1; one of the splits without the other, or splits
+contradicting `x`'s shape; no splits and the scattered axis does not divide; every rank's shard
+empty, so the call moves no data; `out` not contiguous CUDA, on another device, or its dtype or
+shape not the output's; `x` overlapping the window, or `out` partially overlapping it.
+
+`world_size` outside `[1, 8]` is refused by the constructor, so no call reaches it.
 
 ## `all_to_all_4d_async(x, *, mode=0, out=None, seq_splits=None, head_splits=None)`
 
