@@ -47,6 +47,25 @@ void require_group_device(const UlyssesGroup& group, const at::Tensor& input)
                 "; one group serves exactly one device");
 }
 
+// vmap has no batching rule for these ops, so it falls back to a for-loop and turns one call into
+// one per batch element -- silently. For a collective that is the failure this library documents
+// most loudly: ranks whose batch sizes differ then issue different NUMBERS of collectives and
+// hang, with nothing raised and nothing timed out. The loop is also wrong for the ops that
+// allocate, since each iteration would rendezvous.
+//
+// One boxed kernel serves every op in the table; it only ever throws. Boxed because
+// torch::CppFunction has no makeError().
+void refuse_vmap(const c10::OperatorHandle& op, c10::Stack*)
+{
+    TORCH_CHECK(false,
+                op.schema().operator_name().name,
+                " does not support torch.vmap: it is a collective, and vmap would run it once "
+                "per batch element -- ranks that disagree on the batch size would then hang. "
+                "Call it once, outside vmap, on the full tensor. Reached from "
+                "torch.autograd.grad(is_grads_batched=True) too, which batches the backward "
+                "through the same for-loop.");
+}
+
 // Byte intervals [a, a+a_bytes) and [b, b+b_bytes) intersect.
 bool intervals_overlap(const void* a, int64_t a_bytes, const void* b, int64_t b_bytes)
 {
@@ -370,6 +389,50 @@ void all_to_all_4d_staged_out(const c10::intrusive_ptr<UlyssesGroup>&    group,
     run_staged(group, input, mode, seq_splits, head_splits, out, caller_stream_id, caller_device_index);
 }
 
+// The staged pair REFUSES to be traced, the way empty_output does, rather than propagating a
+// shape it could perfectly well compute.
+//
+// Returning a shape here is not half an answer, it is a wrong one, because this op is only ever
+// reached through all_to_all_4d_async and the Python around it is eager-only. Let the op return
+// and that wrapper goes on to record a completion event on the comm stream and hand it to torch's
+// work registry, then call record_stream on the result: a traced call therefore leaves a real
+// Work in a process-global registry that nothing will ever wait on, and returns an
+// AsyncCollectiveTensor whose wait() claims a transfer that was never issued. The arguments say
+// the same thing -- caller_stream_id and caller_device_index name a live CUDA stream, and a graph
+// that has one baked into it is wrong everywhere it is replayed.
+//
+// The shape half is available from all_to_all_4d, which moves exactly the same bytes.
+at::Tensor all_to_all_4d_staged_meta(const c10::intrusive_ptr<UlyssesGroup>&,
+                                     const at::Tensor&,
+                                     int64_t,
+                                     const std::optional<std::vector<int64_t>>&,
+                                     const std::optional<std::vector<int64_t>>&,
+                                     int64_t,
+                                     int64_t)
+{
+    TORCH_CHECK(false,
+                "all_to_all_4d_async cannot be traced: it completes through a CUDA event bound to "
+                "torch's work registry and takes the caller's stream as an argument, neither of "
+                "which a traced call has. Trace all_to_all_4d instead, which moves the same bytes.");
+}
+
+// Same refusal, same reason: the out-variant's completion is registered against `out`.
+void all_to_all_4d_staged_out_meta(const c10::intrusive_ptr<UlyssesGroup>&,
+                                   const at::Tensor&,
+                                   int64_t,
+                                   const std::optional<std::vector<int64_t>>&,
+                                   const std::optional<std::vector<int64_t>>&,
+                                   const at::Tensor&,
+                                   int64_t,
+                                   int64_t)
+{
+    TORCH_CHECK(false,
+                "all_to_all_4d_async cannot be traced: it completes through a CUDA event bound to "
+                "torch's work registry and takes the caller's stream as an argument, neither of "
+                "which a traced call has. Trace all_to_all_4d(out=...) instead, which moves the "
+                "same bytes.");
+}
+
 // Re-enter the DISPATCHER with the autograd keys excluded.
 //
 // Not a direct call to all_to_all_4d(): that would leave dispatch for good, and every key below
@@ -558,6 +621,24 @@ std::tuple<at::Tensor, std::vector<double>> all_to_all_4d_timed(const c10::intru
     return {call.output, stages};
 }
 
+// Refuses, like empty_output's, rather than returning the shape with four zeros.
+//
+// Half of what this op returns is a measurement, and a traced call performs nothing to measure. A
+// zeroed vector is not a missing answer, it is a wrong one: whoever reads it gets four durations
+// with the units and the shape of real ones, and a benchmark that averages them reports a call
+// that took no time. The shape half is available from all_to_all_4d, which is the same collective;
+// this op exists only to time it, and timing wants the eager call.
+std::tuple<at::Tensor, std::vector<double>> all_to_all_4d_timed_meta(const c10::intrusive_ptr<UlyssesGroup>&,
+                                                                     const at::Tensor&,
+                                                                     int64_t,
+                                                                     const std::optional<std::vector<int64_t>>&,
+                                                                     const std::optional<std::vector<int64_t>>&)
+{
+    TORCH_CHECK(false,
+                "all_to_all_4d_timed cannot be traced: it returns CUDA event timings, and a traced "
+                "call runs nothing to time. Call it eagerly, or trace all_to_all_4d instead.");
+}
+
 }  // namespace ulysses
 
 TORCH_LIBRARY(fast_ulysses, m)
@@ -575,6 +656,23 @@ TORCH_LIBRARY(fast_ulysses, m)
                  return self->epoch(probe, static_cast<ulysses::WindowRole>(role));
              });
 
+    // BOTH batching keys, for every op below.
+    //
+    // FuncTorchBatched is the one torch.vmap uses, and it wins over an op's Autograd kernel, so it
+    // also covers a vmap over a grad-requiring input and a nested vmap. Batched is the LEGACY
+    // vmap's key, and it is still reachable from a supported public API: torch.autograd.grad(...,
+    // is_grads_batched=True) -- and torch.autograd.functional.* with vectorize=True through it --
+    // goes through torch._vmap_internals, not functorch. Registering only the first leaves that
+    // path looping one collective per row of the batch, which is the failure being refused.
+    //
+    // Neither fires when the tensor handed to the collective is a closed-over constant, which is a
+    // genuinely-once call inside somebody else's vmap and stays legal.
+    auto refuse_batching = [&m](const char* name) {
+        for (const c10::DispatchKey key : {c10::DispatchKey::FuncTorchBatched, c10::DispatchKey::Batched}) {
+            m.impl(name, key, torch::CppFunction::makeFromBoxedFunction<&ulysses::refuse_vmap>());
+        }
+    };
+
     // Functional: no alias, so it can carry an autograd formula and a meta kernel.
     m.def("all_to_all_4d(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
           "int mode, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
@@ -584,6 +682,7 @@ TORCH_LIBRARY(fast_ulysses, m)
     // on 2.13 that silently replaces an existing Meta kernel, leaving two shape rules and no error
     // saying which one ran.
     m.impl("all_to_all_4d", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_meta);
+    refuse_batching("all_to_all_4d");
 
     // Mutating, and says so. Not differentiable: the gradient would have to flow back out of a
     // buffer the caller owns and may already have overwritten.
@@ -591,16 +690,24 @@ TORCH_LIBRARY(fast_ulysses, m)
           "int mode, int[]? seq_splits, int[]? head_splits, Tensor(a!) out) -> ()");
     m.impl("all_to_all_4d_out", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_out);
     m.impl("all_to_all_4d_out", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_out_meta);
+    // Registered although torch's for-loop fallback already refuses out-variants: that refusal is
+    // torch's own, for its own reasons, and a torch that grew an out= batching fallback would make
+    // this op start looping silently. One line makes it a property of this library instead.
+    refuse_batching("all_to_all_4d_out");
 
     m.def("all_to_all_4d_staged(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[]? seq_splits, int[]? head_splits, "
           "int caller_stream_id, int caller_device_index) -> Tensor");
     m.impl("all_to_all_4d_staged", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_staged);
+    m.impl("all_to_all_4d_staged", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_staged_meta);
+    refuse_batching("all_to_all_4d_staged");
 
     m.def("all_to_all_4d_staged_out(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[]? seq_splits, int[]? head_splits, Tensor(a!) out, "
           "int caller_stream_id, int caller_device_index) -> ()");
     m.impl("all_to_all_4d_staged_out", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_staged_out);
+    m.impl("all_to_all_4d_staged_out", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_staged_out_meta);
+    refuse_batching("all_to_all_4d_staged_out");
 
     m.def("empty_output(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
           "int mode, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
@@ -611,13 +718,17 @@ TORCH_LIBRARY(fast_ulysses, m)
     // autogradNotImplementedFallback, which builds a node over the buffer and hands back a non-leaf
     // the caller cannot even detach in place.
     m.impl("empty_output", c10::DispatchKey::Autograd, torch::CppFunction::makeFallthrough());
+    // The loop would rendezvous once per batch element, which is the same hang with an extra way in.
+    refuse_batching("empty_output");
 
     m.def("all_to_all_4d_timed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[]? seq_splits=None, int[]? head_splits=None) "
           "-> (Tensor, float[])");
     m.impl("all_to_all_4d_timed", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_timed);
+    m.impl("all_to_all_4d_timed", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_timed_meta);
     // Same as empty_output: it measures, it does not differentiate.
     m.impl("all_to_all_4d_timed", c10::DispatchKey::Autograd, torch::CppFunction::makeFallthrough());
+    refuse_batching("all_to_all_4d_timed");
 }
 
 // Python `import _C` needs PyInit__C; TORCH_LIBRARY already registered at dlopen time.

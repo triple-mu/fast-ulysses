@@ -5,11 +5,12 @@
 Pure data movement, so "close enough" is not a passing result anywhere in this file. Covers both
 modes, every supported dtype, even and uneven shards, the three things ``out=`` can be, the async
 form including a non-contiguous input, window reuse across repeated calls, the autograd backward,
-and the meta kernel's shape propagation.
+the meta kernel's shape propagation, and the benchmark-only timed variant.
 """
 
 from __future__ import annotations
 
+import math
 import os
 from itertools import accumulate
 
@@ -327,6 +328,51 @@ def main() -> None:
     elif rank == 0:
         print(f"OK ws={ws} meta propagates {tuple(shaped.shape)}", flush=True)
     dist.barrier()
+
+    # --- the timed variant, which is a SECOND copy of the call ---------------------------------
+    # all_to_all_4d_timed re-issues barrier -> transfer -> barrier -> copy_out inline instead of
+    # calling transfer_on_stream() and copy_out(), so the real path can change under it. THAT
+    # duplication is what is checked here, not the timings: every number in docs/benchmark.md is
+    # read off this op, and a benchmark that measures a different collective from the one shipped
+    # measures nothing. The result is compared bit-exact; the durations only have to be finite,
+    # non-negative and bounded by the call that produced them.
+    #
+    # The limit: this sees a stage that moves the wrong bytes, not one that drops an ordering the
+    # bytes here never depend on. Dropping the OPENING barrier is invisible -- it guards the
+    # previous call's readers against this call's writes, and nothing below reads a window twice.
+    for mode in (0, 1):
+        shape = (B, 16, 4 * ws, 128) if mode == 0 else (B, 16 * ws, 4, 128)
+        xt = torch.randn(shape, dtype=torch.bfloat16, device=dev)
+        start, stop = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        start.record()
+        timed_out, stages = group._timed(xt, mode=mode)
+        stop.record()
+        torch.cuda.synchronize()
+        whole = start.elapsed_time(stop)
+        check.equal(
+            f"timed mode={mode} moves the same bytes", timed_out, group.all_to_all_4d(xt, mode=mode)
+        )
+        # The four marks are recorded on one stream, between two events this loop brackets it with,
+        # so their sum cannot exceed the whole call; 0.01 ms covers the event clock's resolution.
+        # Nothing here requires a stage to be POSITIVE: at ws == 1 fast_barrier launches nothing
+        # (src/barrier.cu), so both barrier stages are legitimately zero.
+        problems = []
+        if list(stages) != ["barrier_in", "transfer", "barrier_out", "copy_out"]:
+            problems.append(f"stages are {list(stages)}")
+        problems += [f"{k}={v}" for k, v in stages.items() if not math.isfinite(v) or v < 0.0]
+        # `transfer` has to be POSITIVE wherever there is a transfer. Without this the whole stage
+        # half passes on an implementation that reports four zeros, which is what a timed op that
+        # stopped issuing anything would look like.
+        if stages["transfer"] <= 0.0:
+            problems.append(f"transfer is {stages['transfer']}, but this call moves bytes")
+        if sum(stages.values()) > whole + 0.01:
+            problems.append(f"stages sum to {sum(stages.values()):.3f} ms of a {whole:.3f} ms call")
+        if problems:
+            check.failed += 1
+            print(f"FAIL rank={rank} timed mode={mode}: {', '.join(problems)}", flush=True)
+        elif rank == 0:
+            print(f"OK ws={ws} timed mode={mode} reports four stages inside the call", flush=True)
+        dist.barrier()
 
     verdict = torch.tensor([check.failed], device=dev)
     dist.all_reduce(verdict)

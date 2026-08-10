@@ -92,9 +92,9 @@ property is gone. Only the clean phase sees that, so this check must not be prom
 and neither may be deleted as redundant with the other.
 
 NEGATIVE CONTROL, out of process: delete the FIRST of the two ``fast_barrier(stream,
-call.win->flag_ptrs, rank)`` calls in ``transfer_on_stream`` -- the one at src/bindings.cc:160,
-before ``launch_a2a_ce`` -- and rebuild. The clean phase must then report torn elements AND the
-epoch delta must halve. ``all_to_all_4d_timed`` at :472-476 carries the same pair, so a build being
+call.win->flag_ptrs, rank)`` calls in ``transfer_on_stream`` -- the first one,
+before ``launch_a2a_ce`` (src/bindings.cc) -- and rebuild. The clean phase must then report torn elements AND the
+epoch delta must halve. ``all_to_all_4d_timed`` carries the same pair inline, so a build being
 bisected must not have only one of them patched. If that build still passes, the timing here has
 stopped being adversarial on this machine and the worker is worthless as written: fix the worker
 before trusting a pass.

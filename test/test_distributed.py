@@ -58,6 +58,7 @@ def _nprocs() -> list[int]:
         "window_race.py",
         "overlapping_barriers.py",
         "subgroup.py",
+        "nvlink.py",
     ],
 )
 def test_worker(worker: str, nproc: int) -> None:
@@ -66,10 +67,16 @@ def test_worker(worker: str, nproc: int) -> None:
         pytest.skip(f"needs >={max(nproc, 2)} GPUs, found {ngpu}")
     if nproc < 2 and worker in _NEEDS_PEERS:
         pytest.skip(f"{worker} needs >= 2 ranks, asked for {nproc}")
-    _run(worker, nproc)
+    out = _run(worker, nproc)
+    # nvlink.py is the one worker whose blindness is a property of the MACHINE -- no pynvml, no
+    # usable NVML, one visible GPU -- rather than a defect of the test, so it exits 0 and says so.
+    # Turned into a visible skip here, since a blind run is not a pass. Keyed on the exact string:
+    # ce_ordering.py's and window_race.py's BLIND are fixable and must keep failing the suite.
+    if "NVLINK BLIND" in out:
+        pytest.skip(next(line for line in out.splitlines() if "NVLINK BLIND" in line))
 
 
-def _run(worker: str, nproc: int) -> None:
+def _run(worker: str, nproc: int) -> str:
     # Timeout teardown: a plain subprocess.run timeout SIGKILLs only the torchrun launcher and
     # orphans the rank workers (they live in their own sessions) -- a hung barrier spin kernel then
     # keeps them pinned on the GPUs indefinitely, and inherited stdout pipes would block the reader
@@ -107,3 +114,4 @@ def _run(worker: str, nproc: int) -> None:
     if timed_out:
         pytest.fail(f"{worker} timed out (nproc={nproc}){report}")
     assert proc.returncode == 0, f"{worker} failed (nproc={nproc}){report}"
+    return stdout

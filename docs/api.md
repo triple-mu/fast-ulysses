@@ -27,8 +27,10 @@ Violating these hangs the group. Nothing raises and nothing times out.
 | `require_nvlink` | Refuse a group whose GPUs are not all NVLink-joined. `False` is for measuring that case, not for running in it. |
 
 The NVLink check reads the link type from NVML. Both a direct GPU-to-GPU link and two GPUs on one
-NVSwitch fabric count. When NVML cannot answer, the group is built and nothing is claimed. It is
-also skipped when two ranks share a GPU, which is not a topology it can say anything about.
+NVSwitch fabric count. The check **fails open**: when NVML cannot answer — it is missing, or one
+device cannot be probed — the group is built with no refusal and no warning, so a PCIe group on
+such a machine runs, slowly, instead of being caught here. It is also skipped when two ranks share
+a GPU, which is not a topology it can say anything about.
 
 ## `fast_ulysses.nvlink_matrix(devices) -> dict[(int, int), bool] | None`
 
@@ -57,6 +59,15 @@ always takes the copying path, never `out=`.
 A **meta** kernel propagates shapes under `FakeTensor` and AOTAutograd. `torch.compile` over a
 module that holds an `UlyssesGroup` still graph-breaks: the group is a torchbind object with no
 registered fake class. `empty_output()` refuses to be traced at all, with a message saying why.
+
+**Forward-mode AD works; reverse-mode `torch.func` does not.** A dual input carries its tangent
+through a second collective, so `torch.autograd.forward_ad`, `torch.func.jvp` and
+`torch.func.linearize` all run, at twice the traffic. `grad` / `vjp` / `jacrev` raise on their own:
+the backward is a C++ `torch::autograd::Function`, which functorch cannot lift. `vmap` raises by an
+explicit check on a batched input — it would run the collective once per batch element, so ranks
+that disagree on the batch size would issue different numbers of collectives and hang. `jacfwd`
+raises through that same check, being `vmap` over `jvp`. Map over the batch axis by reshaping it
+into `b`, which the collective already carries.
 
 **`out`** decides the speed:
 

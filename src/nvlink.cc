@@ -97,6 +97,10 @@ bool device_bdf(int64_t index, Bdf& out)
 {
     cudaDeviceProp prop{};
     if (cudaGetDeviceProperties(&prop, static_cast<int>(index)) != cudaSuccess) {
+        // Consume it. This whole file answers "can these devices talk", and a device it cannot ask
+        // about is an answer, not a failure -- but the error stays pending otherwise and surfaces
+        // from whatever the CALLER does next, which is nowhere near here.
+        cudaGetLastError();
         return false;
     }
     out = {static_cast<unsigned>(prop.pciDomainID),

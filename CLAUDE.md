@@ -24,8 +24,9 @@ pytest -m "not multigpu"          # host-only, no GPU needed (test_plan.py)
 pytest -m multigpu                # the torchrun-wrapped workers
 FAST_ULYSSES_TEST_NPROC=3 pytest -m multigpu     # force an odd world size
 
-# Workers run directly — this is the debugging path. Seven of them:
-#   correctness, validation, ce_ordering, cudagraph, window_race, overlapping_barriers, subgroup
+# Workers run directly — this is the debugging path. Eight of them:
+#   correctness, validation, ce_ordering, cudagraph, window_race, overlapping_barriers,
+#   subgroup, nvlink
 torchrun --nproc_per_node=8 test/distributed/correctness.py
 
 fast-ulysses doctor               # build facts, devices, NVLink matrix
@@ -75,7 +76,7 @@ has moved.
 
 ### Tests
 
-Seven workers. `correctness.py` is bit-exact-or-fail on every path including the backward;
+Eight workers. `correctness.py` is bit-exact-or-fail on every path including the backward;
 `validation.py` covers the rejection paths and that they happen before the first handshake;
 `cudagraph.py` checks a captured replay and reports an uncaptured run as having checked NOTHING;
 `subgroup.py` runs two groups that partition the job at once.
@@ -101,6 +102,11 @@ tallies go to `notes/`, which is gitignored.
   `torch.distributed` is genuinely faster and the reason is in `docs/design.md`.
 - No `torch.compile` tracing: the group is a torchbind object with no registered fake class, so
   Dynamo graph-breaks on it. Backward and `FakeTensor` shape propagation DO work.
+- `torch.func`: forward mode only. `jvp` and `linearize` work, through the op's own forward-AD
+  path, at one extra collective for the tangent. `grad`/`vjp`/`jacrev` raise on their own — the
+  backward is a C++ `torch::autograd::Function`. `vmap` raises by an explicit check, because it
+  would otherwise run one collective per batch element and ranks disagreeing on the batch size
+  hang, silently; `jacfwd` raises through that check, being `vmap` over `jvp`.
 - The async form is not differentiable, by construction — see `docs/api.md`.
 - `out=` is not differentiable either: the mutating op carries no autograd formula, so the result
   comes back detached. Unlike the async form it does not raise — the forward is simply not part of

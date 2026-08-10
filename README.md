@@ -108,6 +108,10 @@ have: [docs/migration.md](docs/migration.md).
   `d * elem_size` must be 16-byte aligned — so `d % 8` at bfloat16, `d % 16` at float8.
 - Differentiable, and it propagates shapes under `FakeTensor`. Not traceable by `torch.compile`:
   the group is a torchbind object with no registered fake class, so Dynamo graph-breaks on it.
+- Forward-mode AD works — `torch.autograd.forward_ad`, `torch.func.jvp`, `torch.func.linearize` —
+  at one extra collective for the tangent. Reverse-mode `torch.func` does not: `grad` / `vjp` /
+  `jacrev` raise, and `vmap` raises by an explicit check, since it would run one collective per
+  batch element and ranks that disagree on the batch size hang.
 - The **async** form is not differentiable and says so: its `AsyncCollectiveTensor` is a leaf, so a
   gradient would be dropped silently. Use `all_to_all_4d` when you need one.
 - **`out=` is not differentiable either**, and cannot say so: it reaches a mutating op with no

@@ -191,6 +191,81 @@ def main() -> None:
         ),
     )
 
+    # --- torch.vmap --------------------------------------------------------------------------
+    # Without a kernel on the batching key vmap does NOT fail: it falls back to a for-loop and
+    # issues one collective per batch element, silently. Ranks whose batch sizes differ then issue
+    # different numbers of collectives and hang -- the failure this library documents most loudly,
+    # with nothing raised and nothing timed out. So the check is that the call RAISES; an
+    # "accepted" here means the loop is back, and a torch that routes vmap through some other key
+    # would show up the same way.
+    batched = torch.randn(2, 2, 16, 4 * ws, 128, **kw16)
+    out_buf = torch.empty(*want_shape, **kw16)
+    frag = "does not support torch.vmap"
+    check.raises(
+        "vmap over the functional call",
+        frag,
+        lambda: torch.vmap(lambda t: group.all_to_all_4d(t, mode=0))(batched),
+    )
+    grad_src = good.detach().clone().requires_grad_(True)
+    want_out = torch.empty(*want_shape, dtype=torch.bfloat16, device=dev)
+    # The LEGACY batching key, which torch.vmap does not use but two supported entry points do:
+    # autograd.grad(is_grads_batched=True) and autograd.functional.jacobian(vectorize=True). A
+    # registration that covered only functorch's key left these looping silently.
+    check.raises(
+        "autograd.grad(is_grads_batched=True)",
+        frag,
+        lambda: torch.autograd.grad(
+            group.all_to_all_4d(grad_src, mode=0),
+            grad_src,
+            torch.stack([torch.randn_like(want_out) for _ in range(3)]),
+            is_grads_batched=True,
+        ),
+    )
+    check.raises(
+        "vmap over the out= call",
+        frag,
+        lambda: torch.vmap(lambda t: group.all_to_all_4d(t, mode=0, out=out_buf))(batched),
+    )
+    check.raises(
+        "vmap over the async call",
+        frag,
+        lambda: torch.vmap(lambda t: group.all_to_all_4d_async(t, mode=0).wait())(batched),
+    )
+    check.raises(
+        "vmap over the async out= call",
+        frag,
+        lambda: torch.vmap(lambda t: group.all_to_all_4d_async(t, mode=0, out=out_buf).wait())(
+            batched
+        ),
+    )
+    check.raises(
+        "vmap over empty_output",
+        frag,
+        lambda: torch.vmap(lambda t: group.empty_output(t, mode=0))(batched),
+    )
+    check.raises(
+        "vmap over the timed call",
+        frag,
+        lambda: torch.vmap(lambda t: group._timed(t, mode=0)[0])(batched),
+    )
+    # The LEGACY batching key, which is a second key and reaches the collective without functorch:
+    # torch.autograd.grad(..., is_grads_batched=True) -- and torch.autograd.functional.* with
+    # vectorize=True through it -- goes through torch._vmap_internals. Every check above enters
+    # through functorch, so all six would still pass with that key unregistered, and the BACKWARD
+    # would be the one looping a collective per row.
+    grad_in = good.detach().requires_grad_(True)
+    grad_out = group.all_to_all_4d(grad_in, mode=0)
+    check.raises(
+        "a batched grad_outputs, which is the legacy vmap",
+        frag,
+        lambda: torch.autograd.grad(
+            grad_out,
+            grad_in,
+            grad_outputs=torch.ones(2, *want_shape, **kw16),
+            is_grads_batched=True,
+        ),
+    )
+
     # --- the plan cache must not answer for a call it never saw ------------------------------
     # An even-split call and an EMPTY-split one differ only in whether the lists are present. Held
     # as bare vectors the two keys were identical, so the second inherited the first's plan instead
