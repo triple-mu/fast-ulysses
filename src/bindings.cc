@@ -37,9 +37,11 @@ void require_cuda(const at::Tensor& input)
 // of the plan cache key.
 void require_group_device(const UlyssesGroup& group, const at::Tensor& input)
 {
+    // static_cast: c10::DeviceIndex is int8_t, so streaming it prints a CHARACTER. Device 0 is a
+    // NUL, which truncates the rest of the message.
     TORCH_CHECK(input.device().index() == group.device_index(),
                 "input is on cuda:",
-                input.device().index(),
+                static_cast<int64_t>(input.device().index()),
                 " but this UlyssesGroup was built for cuda:",
                 group.device_index(),
                 "; one group serves exactly one device");
@@ -92,7 +94,7 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
         TORCH_CHECK(call.output.is_cuda() && call.output.is_contiguous(), "out must be a contiguous CUDA tensor");
         TORCH_CHECK(call.output.device().index() == group->device_index(),
                     "out is on cuda:",
-                    call.output.device().index(),
+                    static_cast<int64_t>(call.output.device().index()),
                     " but this UlyssesGroup was built for cuda:",
                     group->device_index());
         TORCH_CHECK(call.output.scalar_type() == call.x.scalar_type(),

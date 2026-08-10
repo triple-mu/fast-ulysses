@@ -15,6 +15,21 @@ That is the conservative form, but only the case below is reachable through the 
 one window a caller can hold is an empty_output() buffer, and passing it as `out` takes the
 zero-copy path, which is exempt by construction. A regression to the requirement form would
 therefore not be caught here -- or anywhere -- so leave the capacity form alone.
+
+TWO GUARDS IN prepare() ARE UNREACHABLE FROM HERE, and it is worth writing down why so nobody
+concludes they are untested by oversight. Both compare the window's byte size against what the
+call needs, and reaching either requires an `out` that passes the shape and dtype checks above it
+while sitting on an allocation too small in bytes:
+
+  - a smaller buffer fails the shape check first, so same-dtype reuse never gets that far;
+  - a different-dtype view of the buffer needs `elem_size` times the bytes, and torch refuses to
+    build it -- the storage is not resizable -- unless the window is strictly larger than this
+    rank's output, which happens only under uneven splits. There the construction succeeds on the
+    small-shard ranks and fails on the large one, so the call would be rank-dependent, and a
+    rank-dependent `out` changes whether window() allocates: that is a collective, and the worker
+    would hang rather than report.
+
+They are guards against a future caller, not against one that exists.
 """
 
 from __future__ import annotations
@@ -46,6 +61,18 @@ class Rejects:
             print(f"FAIL rank={self.rank} {name}: accepted", flush=True)
         # If a rejection were not rank-uniform, or happened after the opening handshake, the ranks
         # would already be out of step and this is where it shows.
+        dist.barrier()
+
+    def accepts(self, name: str, fn) -> None:
+        """`fn` must NOT raise. For checking that a rejection left nothing broken behind."""
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 -- any exception is the failure
+            self.failed += 1
+            print(f"FAIL rank={self.rank} {name}: {exc}", flush=True)
+        else:
+            if self.rank == 0:
+                print(f"OK ws={self.ws} {name}", flush=True)
         dist.barrier()
 
 
@@ -175,6 +202,31 @@ def main() -> None:
         lambda: group.all_to_all_4d(good, mode=0, seq_splits=[], head_splits=[]),
     )
 
+    # --- a tensor on another device -----------------------------------------------------------
+    # The staging buffer takes the INPUT's device and is cached by shape and dtype alone, so before
+    # the check moved ahead of stage() one wrong-device async call left a buffer on that device
+    # behind and every later call for that shape copied across devices before failing. Both entry
+    # points, because they check in different places: prepare() for the sync call, run_staged() for
+    # the async one.
+    other = torch.device("cuda", (dev.index + 1) % torch.cuda.device_count())
+    if other != dev:
+        stray = torch.randn(2, 16, 4 * ws, 128, dtype=torch.bfloat16, device=other)
+        check.raises(
+            "an input on another device",
+            "one group serves exactly one device",
+            lambda: group.all_to_all_4d(stray),
+        )
+        check.raises(
+            "an async input on another device",
+            "one group serves exactly one device",
+            lambda: group.all_to_all_4d_async(stray),
+        )
+        # The poisoning is what the check's placement fixes: the same shape has to still work.
+        check.accepts(
+            "the same shape after a wrong-device call",
+            lambda: group.all_to_all_4d_async(good).wait(),
+        )
+
     # --- a destroyed group --------------------------------------------------------------------
     # `out` from empty_output() takes the zero-copy path, which reaches neither window() nor
     # make_output() -- the only two places that used to check. Without a check in prepare() this
@@ -191,6 +243,14 @@ def main() -> None:
         "a copying call on a destroyed group",
         "has been destroyed",
         lambda: group.all_to_all_4d(good, mode=0),
+    )
+    # The async path checks in run_staged rather than in prepare(), and it has to check BEFORE
+    # stage(): destroy() returns early the second time, so a staging entry created after it is
+    # never freed and its event leaks with the group.
+    check.raises(
+        "an async call on a destroyed group",
+        "has been destroyed",
+        lambda: group.all_to_all_4d_async(good, mode=0),
     )
 
     verdict = torch.tensor([check.failed], device=dev)
