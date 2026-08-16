@@ -179,11 +179,24 @@ def check_python_context_guards(group: UlyssesGroup, device: int, ws: int) -> No
             f"a non-owner thread raised the wrong error: {thread_errors[0]!r}",
         )
 
-    with torch.inference_mode(False):
+    with torch.inference_mode(False), torch.enable_grad():
         raises(
             lambda: group.all_to_all_4d(good, 0, out=out),
-            "an exchange outside inference mode",
-            "requires torch.inference_mode()",
+            "an exchange with autograd enabled",
+            "requires autograd to be off",
+        )
+
+    # What the guard is really about is recording, not inference mode as such, so no_grad has to
+    # be accepted: it is what a serving stack that predates inference_mode still runs under. The
+    # tensors are allocated inside the block too, since that is how such a stack produces them.
+    with torch.inference_mode(False), torch.no_grad():
+        plain = torch.randn((1, 32, 2 * ws, 32), dtype=torch.bfloat16, device=device)
+        plain_out = group.allocate_output(plain, 0)
+        check(
+            torch.equal(
+                group.all_to_all_4d(plain, 0, out=plain_out), reference(plain, 0, ws)
+            ),
+            "an exchange under torch.no_grad() did not match the reference",
         )
 
     # A real graph capture is unsafe to start while a distributed test has live work. Patch the

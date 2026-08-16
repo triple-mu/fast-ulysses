@@ -175,8 +175,17 @@ class UlyssesGroup:
 
     def _check_execution_context(self, operation: str) -> None:
         self._check_owner_stream(operation)
-        if not torch.is_inference_mode_enabled():
-            raise RuntimeError(f"{operation} requires torch.inference_mode()")
+        if torch.is_grad_enabled():
+            # What this guards is the output workspace: it is handed back by
+            # identity and overwritten by the next call with the same geometry,
+            # so a recorded graph could later read a buffer that no longer
+            # holds what it saw. Recording is what has to be off, and no_grad
+            # stops it as completely as inference_mode does. The native side
+            # separately refuses an input that requires grad.
+            raise RuntimeError(
+                f"{operation} requires autograd to be off; run under "
+                "torch.inference_mode() or torch.no_grad()"
+            )
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(f"{operation} is unsupported during CUDA Graph capture")
         compiler = getattr(torch, "compiler", None)

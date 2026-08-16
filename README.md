@@ -6,7 +6,8 @@ Supported:
 
 - one rank per GPU, with 1, 2, 4, or 8 GPUs;
 - contiguous `[B, S, H, D]` FP16/BF16 tensors;
-- equal splits and eager `torch.inference_mode()` only;
+- equal splits, and eager execution with autograd off -- `torch.inference_mode()` or
+  `torch.no_grad()`;
 - one owning host thread and one CUDA stream, bound for the group's entire lifetime;
 - batch size 1 on the 8-GPU mlx5 path, where `heads * head_dim * itemsize` summed over all
   ranks must also fit 65535 bytes -- the MKey stride field. Larger shapes are refused;

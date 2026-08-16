@@ -299,7 +299,8 @@ int select_gid_index(const std::string& nic, ibv_context* context)
 {
     for (int index = 0; index < 128; ++index) {
         ibv_gid gid{};
-        if (ibv_query_gid(context, kPort, index, &gid)) break;
+        // An unpopulated index fails without meaning the table ends there, so keep scanning.
+        if (ibv_query_gid(context, kPort, index, &gid)) continue;
         const auto* bytes = reinterpret_cast<const uint8_t*>(&gid);
         const bool ipv4 = bytes[10] == 0xff && bytes[11] == 0xff;
         std::ifstream type("/sys/class/infiniband/" + nic +
@@ -332,8 +333,51 @@ struct RdmaTransport::Impl {
     std::array<GroupWire, kWorld> peers{};
     uint64_t next_wr_id = 1;
     int pending_completions = 0;
+    bool failed = false;
 
     bool cross(int peer) const { return peer / kQuad != rank / kQuad; }
+
+    // A failed or timed-out exchange leaves work requests outstanding, and the NIC may still
+    // write into memory this rank is about to reuse or release. Moving every QP to ERR flushes
+    // them; draining the CQ afterwards retires the flush completions so a later poll cannot
+    // miscount them as its own. Both are best-effort -- this runs while unwinding -- and the
+    // transport is marked dead either way, so every entry point reports the original failure
+    // instead of "previous RDMA exchange is unfinished" forever after.
+    void quiesce() noexcept
+    {
+        failed = true;
+        pending_completions = 0;
+        for (auto* qp : qps) {
+            if (!qp) continue;
+            ibv_qp_attr attr{};
+            attr.qp_state = IBV_QPS_ERR;
+            ibv_modify_qp(qp, &attr, IBV_QP_STATE);
+        }
+        if (!cq) return;
+        // The flush completions are not all queued the instant the QP reaches ERR, so one empty
+        // poll does not mean the queue is drained. Two in a row does, near enough, and the
+        // deadline bounds the case where it never settles.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        int consecutive_empty = 0;
+        while (consecutive_empty < 2 && std::chrono::steady_clock::now() < deadline) {
+            ibv_wc entries[kWorld]{};
+            consecutive_empty = ibv_poll_cq(cq, kWorld, entries) > 0 ? 0 : consecutive_empty + 1;
+        }
+    }
+
+    // Wraps anything that posts work requests or waits for them. Once a request is on a send
+    // queue, giving up without retiring it leaves completions that the next poll would count as
+    // its own, so every such region ends either complete or quiesced.
+    template <typename Body>
+    void retire_on_failure(Body&& body)
+    {
+        try {
+            body();
+        } catch (...) {
+            quiesce();
+            throw;
+        }
+    }
 
     void poll(int expected)
     {
@@ -676,6 +720,7 @@ std::unique_ptr<RdmaBuffer> RdmaTransport::register_buffer(void* pointer,
                                                            int64_t element_size)
 {
     TORCH_CHECK(impl_->connected, "RDMA transport is not connected");
+    TORCH_CHECK(!impl_->failed, "the mlx5 transport failed and is permanently unusable");
     TORCH_CHECK(pointer, "cannot register a null RDMA output pointer");
     checked_tensor_bytes(mode, bytes, batch, seq, heads, dim, element_size);
     const uint32_t payload = checked_payload(bytes);
@@ -718,18 +763,20 @@ std::unique_ptr<RdmaBuffer> RdmaTransport::register_buffer(void* pointer,
             if (!impl_->cross(peer)) continue;
             destination_mkeys[peer].reset(impl_->create_mkey());
         }
-        int configured = 0;
-        for (int peer = 0; peer < kWorld; ++peer) {
-            if (!impl_->cross(peer)) continue;
-            impl_->configure_mkey(
-                peer, destination_mkeys[peer].get(),
-                IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
-                    IBV_ACCESS_REMOTE_READ,
-                destination_addresses[peer], geometry.width, geometry.skip,
-                geometry.rows, output_mr->lkey);
-            ++configured;
-        }
-        impl_->poll(configured);
+        impl_->retire_on_failure([&] {
+            int configured = 0;
+            for (int peer = 0; peer < kWorld; ++peer) {
+                if (!impl_->cross(peer)) continue;
+                impl_->configure_mkey(
+                    peer, destination_mkeys[peer].get(),
+                    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                        IBV_ACCESS_REMOTE_READ,
+                    destination_addresses[peer], geometry.width, geometry.skip,
+                    geometry.rows, output_mr->lkey);
+                ++configured;
+            }
+            impl_->poll(configured);
+        });
         for (int peer = 0; peer < kWorld; ++peer)
             state->destination_mkeys[peer] = destination_mkeys[peer].release();
     }
@@ -836,6 +883,7 @@ void RdmaTransport::start_exchange(const void* input,
                                    int64_t dim,
                                    int64_t element_size)
 {
+    TORCH_CHECK(!impl_->failed, "the mlx5 transport failed and is permanently unusable");
     TORCH_CHECK(impl_->pending_completions == 0,
                 "previous RDMA exchange is unfinished");
     TORCH_CHECK(output.impl_->connected, "RDMA output metadata is not connected");
@@ -919,15 +967,17 @@ void RdmaTransport::start_exchange(const void* input,
                 if (!impl_->cross(peer)) continue;
                 source_mkeys[peer].reset(impl_->create_mkey());
             }
-            int configured = 0;
-            for (int peer = 0; peer < kWorld; ++peer) {
-                if (!impl_->cross(peer)) continue;
-                impl_->configure_mkey(peer, source_mkeys[peer].get(), 0,
-                                      source_mkey_addresses[peer], geometry.width,
-                                      geometry.skip, geometry.rows, input_mr->lkey);
-                ++configured;
-            }
-            impl_->poll(configured);
+            impl_->retire_on_failure([&] {
+                int configured = 0;
+                for (int peer = 0; peer < kWorld; ++peer) {
+                    if (!impl_->cross(peer)) continue;
+                    impl_->configure_mkey(peer, source_mkeys[peer].get(), 0,
+                                          source_mkey_addresses[peer], geometry.width,
+                                          geometry.skip, geometry.rows, input_mr->lkey);
+                    ++configured;
+                }
+                impl_->poll(configured);
+            });
             for (int peer = 0; peer < kWorld; ++peer)
                 state.source_mkeys[peer] = source_mkeys[peer].release();
         }
@@ -951,28 +1001,32 @@ void RdmaTransport::start_exchange(const void* input,
 
     // Every shape conversion, address calculation, and key lookup above is complete before the
     // first receive is posted. A validation failure therefore cannot strand half an exchange.
-    for (int step = kQuad; step < kWorld; ++step) {
-        impl_->post_receive(impl_->rank ^ step);
-        ++impl_->pending_completions;
-    }
-    for (int step = kQuad; step < kWorld; ++step) {
-        const int peer = impl_->rank ^ step;
-        if (mode == 0) {
-            impl_->post_write(peer, local_keys[peer], 0, payload,
-                              remote_keys[peer], remote_addresses[peer]);
-        } else {
-            impl_->post_write(peer, local_keys[peer], local_addresses[peer], payload,
-                              remote_keys[peer], 0);
+    // A posting failure still can, so it retires whatever was posted before it gives up.
+    impl_->retire_on_failure([&] {
+        for (int step = kQuad; step < kWorld; ++step) {
+            impl_->post_receive(impl_->rank ^ step);
+            ++impl_->pending_completions;
         }
-        ++impl_->pending_completions;
-    }
+        for (int step = kQuad; step < kWorld; ++step) {
+            const int peer = impl_->rank ^ step;
+            if (mode == 0) {
+                impl_->post_write(peer, local_keys[peer], 0, payload,
+                                  remote_keys[peer], remote_addresses[peer]);
+            } else {
+                impl_->post_write(peer, local_keys[peer], local_addresses[peer], payload,
+                                  remote_keys[peer], 0);
+            }
+            ++impl_->pending_completions;
+        }
+    });
 }
 
 void RdmaTransport::finish_exchange()
 {
+    TORCH_CHECK(!impl_->failed, "the mlx5 transport failed and is permanently unusable");
     const int pending = impl_->pending_completions;
     TORCH_CHECK(pending > 0, "no RDMA exchange is pending");
-    impl_->poll(pending);
+    impl_->retire_on_failure([&] { impl_->poll(pending); });
     impl_->pending_completions = 0;
 }
 
