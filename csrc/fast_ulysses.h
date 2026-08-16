@@ -44,7 +44,9 @@ public:
                  int64_t rank,
                  int64_t world_size,
                  int64_t device,
-                 std::vector<int64_t> devices);
+                 std::vector<int64_t> devices,
+                 bool enable_rdma,
+                 std::vector<std::string> nics);
     ~UlyssesGroup() override;
 
     at::Tensor allocate_output(const at::Tensor& input, int64_t mode);
@@ -75,6 +77,7 @@ private:
     std::unordered_map<const c10::TensorImpl*, Buffer*> outputs_;
 };
 
+// quad_only restricts the copies to this rank's quad; the NIC carries the rest.
 void launch_all_to_all(const void* input,
                        const std::vector<uint64_t>& peers,
                        int mode,
@@ -84,18 +87,8 @@ void launch_all_to_all(const void* input,
                        int64_t dim,
                        int64_t element_size,
                        int rank,
-                       cudaStream_t stream);
-
-void launch_local_all_to_all(const void* input,
-                             const std::vector<uint64_t>& peers,
-                             int mode,
-                             int64_t batch,
-                             int64_t seq,
-                             int64_t heads,
-                             int64_t dim,
-                             int64_t element_size,
-                             int rank,
-                             cudaStream_t stream);
+                       cudaStream_t stream,
+                       bool quad_only);
 
 void barrier(cudaStream_t stream,
              const std::vector<uint64_t>& flags,

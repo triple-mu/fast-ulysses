@@ -46,17 +46,17 @@ void barrier(cudaStream_t stream,
     FU_CUDA_CHECK(cudaGetLastError());
 }
 
-static void launch_impl(const void* input,
-                        const std::vector<uint64_t>& peers,
-                        int mode,
-                        int64_t batch,
-                        int64_t seq,
-                        int64_t heads,
-                        int64_t dim,
-                        int64_t element_size,
-                        int rank,
-                        cudaStream_t stream,
-                        bool local_only)
+void launch_all_to_all(const void* input,
+                       const std::vector<uint64_t>& peers,
+                       int mode,
+                       int64_t batch,
+                       int64_t seq,
+                       int64_t heads,
+                       int64_t dim,
+                       int64_t element_size,
+                       int rank,
+                       cudaStream_t stream,
+                       bool quad_only)
 {
     const int world_size = peers.size();
     const auto* source = static_cast<const uint8_t*>(input);
@@ -90,39 +90,11 @@ static void launch_impl(const void* input,
         }
     };
 
-    const int end = local_only ? 4 : world_size;
+    // XOR-shift peer order. Stopping at kQuad keeps the copies inside this rank's quad, which is
+    // exactly the set reachable through IPC pointers when the NIC carries the other quad.
+    const int end = quad_only ? kQuad : world_size;
     for (int step = 1; step < end; ++step) copy(rank ^ step);
     copy(rank);
-}
-
-void launch_all_to_all(const void* input,
-                       const std::vector<uint64_t>& peers,
-                       int mode,
-                       int64_t batch,
-                       int64_t seq,
-                       int64_t heads,
-                       int64_t dim,
-                       int64_t element_size,
-                       int rank,
-                       cudaStream_t stream)
-{
-    launch_impl(input, peers, mode, batch, seq, heads, dim, element_size, rank, stream,
-                false);
-}
-
-void launch_local_all_to_all(const void* input,
-                             const std::vector<uint64_t>& peers,
-                             int mode,
-                             int64_t batch,
-                             int64_t seq,
-                             int64_t heads,
-                             int64_t dim,
-                             int64_t element_size,
-                             int rank,
-                             cudaStream_t stream)
-{
-    launch_impl(input, peers, mode, batch, seq, heads, dim, element_size, rank, stream,
-                true);
 }
 
 }  // namespace ulysses

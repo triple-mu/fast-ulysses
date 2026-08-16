@@ -76,7 +76,7 @@ def torch_cmake_prefix() -> Path:
             return candidate.resolve()
     raise RuntimeError(
         "PyTorch CMake files were not found in the active environment. "
-        "Activate sgl-env or set FAST_ULYSSES_TORCH_PREFIX."
+        "Activate the environment that has torch, or set FAST_ULYSSES_TORCH_PREFIX."
     )
 
 

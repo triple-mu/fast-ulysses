@@ -7,6 +7,16 @@
 
 namespace ulysses {
 
+// The supported 8-GPU host splits into two quads. Peers inside a quad are reachable through CUDA
+// IPC pointers and are copied to directly; peers across quads are reached only through the NIC.
+// Every peer index arithmetic in the transport rests on this split.
+constexpr int kQuad = 4;
+
+// An interleaved MKey's stride is a 16-bit field. A larger one is accepted by every verbs call
+// on the way in and then gathers the wrong bytes at transfer time -- no completion reports it --
+// so a shape that needs one has to be refused up front.
+constexpr int64_t kMaxInterleavedStride = 65535;
+
 class RdmaBuffer {
 public:
     ~RdmaBuffer();
@@ -20,8 +30,11 @@ private:
 
 class RdmaTransport {
 public:
+    // nics is either empty, for sysfs discovery, or one mlx5 name per rank. Both it and enable
+    // come from the environment, which is read in Python.
     RdmaTransport(int rank, int world_size, int device,
-                  const std::vector<int64_t>& devices);
+                  const std::vector<int64_t>& devices,
+                  bool enable, const std::vector<std::string>& nics);
     ~RdmaTransport();
 
     bool enabled() const;

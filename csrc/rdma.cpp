@@ -8,11 +8,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -77,15 +75,6 @@ ibv_mr* register_gpu_mr(ibv_pd* pd, void* pointer, size_t bytes, int access)
     return mr;
 }
 
-std::vector<std::string> split(const std::string& text, char delimiter)
-{
-    std::vector<std::string> result;
-    std::stringstream stream(text);
-    std::string item;
-    while (std::getline(stream, item, delimiter)) result.push_back(item);
-    return result;
-}
-
 int nic_number(const std::string& name)
 {
     return std::stoi(name.substr(name.find('_') + 1));
@@ -102,13 +91,12 @@ int path_distance(const std::filesystem::path& left,
     return static_cast<int>(a.size() + b.size() - 2 * common);
 }
 
-std::string select_nic(int rank, int device)
+std::string select_nic(int rank, int device, const std::vector<std::string>& configured)
 {
-    if (const char* configured = std::getenv("FAST_ULYSSES_NICS")) {
-        auto names = split(configured, ',');
-        TORCH_CHECK(names.size() == kWorld,
-                    "FAST_ULYSSES_NICS must contain eight comma-separated mlx5 names");
-        return names[rank];
+    if (!configured.empty()) {
+        TORCH_CHECK(static_cast<int>(configured.size()) == kWorld,
+                    "an explicit NIC list must name one mlx5 device per rank");
+        return configured[rank];
     }
 
     char pci_id[32]{};
@@ -189,7 +177,7 @@ struct RdmaTransport::Impl {
     uint64_t next_wr_id = 1;
     int pending_completions = 0;
 
-    bool cross(int peer) const { return peer / 4 != rank / 4; }
+    bool cross(int peer) const { return peer / kQuad != rank / kQuad; }
 
     void poll(int expected)
     {
@@ -205,7 +193,9 @@ struct RdmaTransport::Impl {
                             " vendor_err=", entries[i].vendor_err);
             }
             completed += count;
-            TORCH_CHECK(std::chrono::steady_clock::now() < deadline,
+            // Only an empty poll can time out: a poll that completed the set has succeeded
+            // whatever the clock says.
+            TORCH_CHECK(count > 0 || std::chrono::steady_clock::now() < deadline,
                         "timed out waiting for mlx5 completion");
         }
     }
@@ -320,7 +310,9 @@ RdmaBuffer::~RdmaBuffer() = default;
 RdmaTransport::RdmaTransport(int rank,
                              int world_size,
                              int device,
-                             const std::vector<int64_t>& devices)
+                             const std::vector<int64_t>& devices,
+                             bool enable,
+                             const std::vector<std::string>& nics)
     : impl_(std::make_unique<Impl>())
 {
     impl_->rank = rank;
@@ -329,11 +321,11 @@ RdmaTransport::RdmaTransport(int rank,
     cuda_check(cudaDeviceGetAttribute(&impl_->write_ordering,
                                       cudaDevAttrGPUDirectRDMAWritesOrdering, device),
                "cudaDeviceGetAttribute(GPUDirectRDMAWritesOrdering)");
-    if (world_size != kWorld || std::getenv("FAST_ULYSSES_DISABLE_RDMA")) return;
+    if (world_size != kWorld || !enable) return;
     for (int i = 0; i < kWorld; ++i)
         if (devices[i] != i) return;
 
-    impl_->nic_name = select_nic(rank, device);
+    impl_->nic_name = select_nic(rank, device, nics);
     int count = 0;
     ibv_device** list = ibv_get_device_list(&count);
     TORCH_CHECK(list, "ibv_get_device_list failed: ", std::strerror(errno));
@@ -472,8 +464,9 @@ std::unique_ptr<RdmaBuffer> RdmaTransport::register_buffer(void* pointer,
     state->mode = mode;
     state->output_pointer = pointer;
     state->peer_pointers[impl_->rank] = pointer;
-    cuda_check(cudaMalloc(&state->flags, 4 * sizeof(uint64_t)), "cudaMalloc RDMA flags");
-    cuda_check(cudaMemset(state->flags, 0, 4 * sizeof(uint64_t)), "cudaMemset RDMA flags");
+    cuda_check(cudaMalloc(&state->flags, kWorld * sizeof(uint64_t)), "cudaMalloc RDMA flags");
+    cuda_check(cudaMemset(state->flags, 0, kWorld * sizeof(uint64_t)),
+               "cudaMemset RDMA flags");
     state->peer_flags[impl_->rank] = state->flags;
     state->output_mr = register_gpu_mr(
         impl_->pd, pointer, bytes,
@@ -485,7 +478,8 @@ std::unique_ptr<RdmaBuffer> RdmaTransport::register_buffer(void* pointer,
         const int64_t rows64 = batch * seq / kWorld;
         const int64_t width64 = heads * dim * element_size;
         const int64_t pitch64 = heads * kWorld * dim * element_size;
-        TORCH_CHECK(rows64 <= UINT32_MAX && width64 <= UINT32_MAX && pitch64 <= UINT32_MAX,
+        TORCH_CHECK(rows64 <= UINT32_MAX && width64 <= UINT32_MAX &&
+                        pitch64 <= kMaxInterleavedStride,
                     "mode=1 shape exceeds mlx5 UMR limits");
         for (int peer = 0; peer < kWorld; ++peer) {
             if (!impl_->cross(peer)) continue;
@@ -498,7 +492,7 @@ std::unique_ptr<RdmaBuffer> RdmaTransport::register_buffer(void* pointer,
                 static_cast<uint32_t>(width64), static_cast<uint32_t>(pitch64 - width64),
                 static_cast<uint32_t>(rows64), state->output_mr->lkey);
         }
-        impl_->poll(4);
+        impl_->poll(kWorld - kQuad);
     }
     return std::unique_ptr<RdmaBuffer>(new RdmaBuffer(std::move(state)));
 }
@@ -526,11 +520,14 @@ void RdmaTransport::connect_buffer(
     for (int peer = 0; peer < kWorld; ++peer)
         buffer.impl_->peers[peer] = decode<BufferWire>(encoded_peers[peer]);
     for (int peer = 0; peer < kWorld; ++peer) {
-        if (peer == impl_->rank || impl_->cross(peer)) continue;
-        cuda_check(cudaIpcOpenMemHandle(&buffer.impl_->peer_pointers[peer],
-                                        buffer.impl_->peers[peer].ipc,
-                                        cudaIpcMemLazyEnablePeerAccess),
-                   "cudaIpcOpenMemHandle");
+        if (peer == impl_->rank) continue;
+        if (!impl_->cross(peer))
+            cuda_check(cudaIpcOpenMemHandle(&buffer.impl_->peer_pointers[peer],
+                                            buffer.impl_->peers[peer].ipc,
+                                            cudaIpcMemLazyEnablePeerAccess),
+                       "cudaIpcOpenMemHandle");
+        // Flags are mapped from every rank, not just the quad: the payload crosses the quad
+        // boundary through the NIC, but the handshake is a single word and P2P reaches it.
         cuda_check(cudaIpcOpenMemHandle(&buffer.impl_->peer_flags[peer],
                                         buffer.impl_->peers[peer].flag_ipc,
                                         cudaIpcMemLazyEnablePeerAccess),
@@ -549,10 +546,9 @@ std::vector<uint64_t> RdmaTransport::peer_pointers(const RdmaBuffer& buffer) con
 
 std::vector<uint64_t> RdmaTransport::peer_flags(const RdmaBuffer& buffer) const
 {
-    std::vector<uint64_t> result(4);
-    const int first = impl_->rank / 4 * 4;
-    for (int index = 0; index < 4; ++index)
-        result[index] = reinterpret_cast<uint64_t>(buffer.impl_->peer_flags[first + index]);
+    std::vector<uint64_t> result(kWorld);
+    for (int peer = 0; peer < kWorld; ++peer)
+        result[peer] = reinterpret_cast<uint64_t>(buffer.impl_->peer_flags[peer]);
     return result;
 }
 
@@ -589,7 +585,7 @@ void RdmaTransport::start_exchange(const void* input,
             const int64_t width64 = heads / kWorld * dim * element_size;
             const int64_t pitch64 = heads * dim * element_size;
             TORCH_CHECK(rows64 <= UINT32_MAX && width64 <= UINT32_MAX &&
-                            pitch64 <= UINT32_MAX,
+                            pitch64 <= kMaxInterleavedStride,
                         "mode=0 shape exceeds mlx5 UMR limits");
             for (int peer = 0; peer < kWorld; ++peer) {
                 if (!impl_->cross(peer)) continue;
@@ -601,18 +597,18 @@ void RdmaTransport::start_exchange(const void* input,
                     static_cast<uint32_t>(pitch64 - width64),
                     static_cast<uint32_t>(rows64), state.input_mr->lkey);
             }
-            impl_->poll(4);
+            impl_->poll(kWorld - kQuad);
         }
     }
 
     const int64_t payload64 = input_bytes / kWorld;
     TORCH_CHECK(payload64 <= UINT32_MAX, "per-peer payload exceeds mlx5 WR limit");
     const uint32_t payload = static_cast<uint32_t>(payload64);
-    for (int step = 4; step < kWorld; ++step) {
+    for (int step = kQuad; step < kWorld; ++step) {
         impl_->post_receive(impl_->rank ^ step);
         ++impl_->pending_completions;
     }
-    for (int step = 4; step < kWorld; ++step) {
+    for (int step = kQuad; step < kWorld; ++step) {
         const int peer = impl_->rank ^ step;
         if (mode == 0) {
             impl_->post_write(peer, state.source_mkeys[peer]->lkey, 0, payload,

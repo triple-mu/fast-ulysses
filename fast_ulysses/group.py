@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import warnings
 
 import torch
@@ -29,12 +30,16 @@ class UlyssesGroup:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             symm_mem.enable_symm_mem_for_group(self.pg.group_name)
+        # The environment is read here and passed down; the extension reads none itself.
+        nics = os.environ.get("FAST_ULYSSES_NICS", "")
         self._group = torch.classes.fast_ulysses.UlyssesGroup(
             self.pg.group_name,
             self.rank,
             self.world_size,
             self.device.index,
             devices,
+            not os.environ.get("FAST_ULYSSES_DISABLE_RDMA"),
+            nics.split(",") if nics else [],
         )
         self.backend = self._group.backend()
         if self.backend == "mlx5":
@@ -80,12 +85,11 @@ class UlyssesGroup:
         selected = stream or torch.cuda.current_stream(self.device)
         if torch.device(selected.device) != self.device:
             raise ValueError("stream is on the wrong GPU")
+        self._group.all_to_all_4d(x, out, mode, selected.cuda_stream)
         if self.backend == "mlx5":
+            # The cross-quad half finishes on the host, in the completion poll, while the closing
+            # barrier is on the stream. This lines the two back up.
             selected.synchronize()
-            self._group.all_to_all_4d(x, out, mode, selected.cuda_stream)
-            selected.synchronize()
-        else:
-            self._group.all_to_all_4d(x, out, mode, selected.cuda_stream)
         return out
 
     def destroy(self):

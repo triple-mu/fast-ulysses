@@ -30,7 +30,9 @@ UlyssesGroup::UlyssesGroup(std::string name,
                            int64_t rank,
                            int64_t world_size,
                            int64_t device,
-                           std::vector<int64_t> devices)
+                           std::vector<int64_t> devices,
+                           bool enable_rdma,
+                           std::vector<std::string> nics)
     : name_(std::move(name)),
       rank_(rank),
       world_size_(world_size),
@@ -47,7 +49,8 @@ UlyssesGroup::UlyssesGroup(std::string name,
     TORCH_CHECK(devices[rank_] == device_, "rank is using the wrong GPU");
     TORCH_CHECK(supports_p2p(devices), "CUDA P2P is required between every GPU");
     const at::cuda::CUDAGuard guard(device_);
-    rdma_ = std::make_unique<RdmaTransport>(rank_, world_size_, device_, devices);
+    rdma_ = std::make_unique<RdmaTransport>(rank_, world_size_, device_, devices,
+                                            enable_rdma, nics);
 }
 
 UlyssesGroup::~UlyssesGroup()
@@ -66,8 +69,17 @@ void UlyssesGroup::validate(const at::Tensor& input, int64_t mode) const
                 "input must be float16 or bfloat16");
     TORCH_CHECK(!input.requires_grad(), "inference only");
     for (int64_t size : input.sizes()) TORCH_CHECK(size > 0, "empty dimensions are unsupported");
-    if (rdma_ && rdma_->enabled())
+    if (rdma_ && rdma_->enabled()) {
         TORCH_CHECK(input.size(0) == 1, "mlx5 RDMA backend currently supports batch=1");
+        // Both modes program the same stride: one row of the global head dimension.
+        const int64_t heads = mode == 0 ? input.size(2) : input.size(2) * world_size_;
+        const int64_t stride = heads * input.size(3) * input.element_size();
+        TORCH_CHECK(stride <= kMaxInterleavedStride,
+                    "heads*dim*itemsize over all ranks is ", stride,
+                    " bytes, above the ", kMaxInterleavedStride,
+                    "-byte mlx5 MKey stride limit; set FAST_ULYSSES_DISABLE_RDMA=1 to use the "
+                    "CUDA P2P backend for this shape");
+    }
     TORCH_CHECK(input.size(mode == 0 ? 2 : 1) % world_size_ == 0,
                 "split dimension must divide world_size");
 }
@@ -151,31 +163,47 @@ void UlyssesGroup::all_to_all_4d(const at::Tensor& input,
     TORCH_CHECK(buffer.shape == shape && buffer.dtype == input.scalar_type(),
                 "output was allocated for another mode or shape");
     TORCH_CHECK(input.data_ptr() != output.data_ptr(), "input and output alias");
+    TORCH_CHECK(buffer.peers.size() == static_cast<size_t>(world_size_),
+                "output has not been connected to its peers");
 
     const at::cuda::CUDAGuard guard(device_);
     auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
     if (rdma_ && rdma_->enabled()) {
         TORCH_CHECK(buffer.rdma, "RDMA output is not registered");
+        // The input MR is cached on the bare pointer, so the tensor behind it has to stay alive:
+        // once it is freed the caching allocator can hand the same address to something else and
+        // the registration would silently point at other data. Dropping the previous owner only
+        // after the new one is held keeps the address from being recycled in between.
         at::Tensor previous_input;
         if (!buffer.input_owner.defined() ||
             buffer.input_owner.data_ptr() != input.data_ptr()) {
             previous_input = std::move(buffer.input_owner);
             buffer.input_owner = input;
         }
+        // A cross-quad RDMA write lands in the peer's output the moment it is posted -- a receive
+        // queue entry holds back the completion, not the data -- so the next call would overwrite
+        // a result its peers have not read yet. The opening barrier is what stops that. It covers
+        // all eight ranks, not just the quad, because it is the cross-quad half that races.
+        barrier(stream, buffer.flags, rank_, ++buffer.epoch);
+        // The NIC reads the input on its own, outside the stream. This one wait covers both that
+        // and the barrier above, since the posting below is host-side and would otherwise run
+        // ahead of each.
+        FU_CUDA_CHECK(cudaStreamSynchronize(stream));
         rdma_->start_exchange(input.data_ptr(), input.numel() * input.element_size(),
                               *buffer.rdma, mode, input.size(0), input.size(1),
                               input.size(2), input.size(3), input.element_size());
-        launch_local_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0),
-                                input.size(1), input.size(2), input.size(3),
-                                input.element_size(), rank_, stream);
-        barrier(stream, buffer.flags, rank_ % 4, ++buffer.epoch);
+        launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0),
+                          input.size(1), input.size(2), input.size(3),
+                          input.element_size(), rank_, stream, true);
+        barrier(stream, buffer.flags, rank_, ++buffer.epoch);
         rdma_->finish_exchange();
         rdma_->flush();
         return;
     }
     barrier(stream, buffer.flags, rank_, ++buffer.epoch);
     launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0), input.size(1),
-                      input.size(2), input.size(3), input.element_size(), rank_, stream);
+                      input.size(2), input.size(3), input.element_size(), rank_, stream,
+                      false);
     barrier(stream, buffer.flags, rank_, ++buffer.epoch);
 }
 
@@ -226,6 +254,9 @@ void UlyssesGroup::destroy()
 {
     if (destroyed_) return;
     destroyed_ = true;
+    // cudaIpcCloseMemHandle acts on the current device's context, and this runs from a destructor
+    // that Python can trigger under any device.
+    const at::cuda::CUDAGuard guard(device_);
     outputs_.clear();
     buffers_.clear();
     rdma_.reset();
@@ -236,8 +267,8 @@ void UlyssesGroup::destroy()
 TORCH_LIBRARY(fast_ulysses, m)
 {
     m.class_<ulysses::UlyssesGroup>("UlyssesGroup")
-        .def(torch::init<std::string, int64_t, int64_t, int64_t,
-                         std::vector<int64_t>>())
+        .def(torch::init<std::string, int64_t, int64_t, int64_t, std::vector<int64_t>,
+                         bool, std::vector<std::string>>())
         .def("allocate_output", &ulysses::UlyssesGroup::allocate_output)
         .def("all_to_all_4d", &ulysses::UlyssesGroup::all_to_all_4d)
         .def("backend", &ulysses::UlyssesGroup::backend)
