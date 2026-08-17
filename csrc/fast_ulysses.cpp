@@ -266,33 +266,55 @@ void UlyssesGroup::all_to_all_4d(const at::Tensor& input,
     TORCH_CHECK(capture_status == cudaStreamCaptureStatusNone,
                 "CUDA Graph capture is unsupported");
     bind_or_validate_input(buffer, input);
+    FU_NVTX(mode == 0 ? "fu::exchange(mode=0)" : "fu::exchange(mode=1)");
     if (rdma_ && rdma_->enabled()) {
         TORCH_CHECK(buffer.rdma, "RDMA output is not registered");
         // A cross-quad RDMA write lands in the peer's output the moment it is posted -- a receive
         // queue entry holds back the completion, not the data -- so the next call would overwrite
         // a result its peers have not read yet. The opening barrier is what stops that. It covers
         // all eight ranks, not just the quad, because it is the cross-quad half that races.
-        barrier(stream, buffer.flags, rank_, ++buffer.epoch);
-        // The NIC reads the input on its own, outside the stream. This one wait covers both that
-        // and the barrier above, since the posting below is host-side and would otherwise run
-        // ahead of each.
-        FU_CUDA_CHECK(cudaStreamSynchronize(stream));
+        {
+            FU_NVTX("fu::open_barrier");
+            barrier(stream, buffer.flags, rank_, ++buffer.epoch);
+        }
+        {
+            // The NIC reads the input on its own, outside the stream. This one wait covers both
+            // that and the barrier above, since the posting below is host-side and would
+            // otherwise run ahead of each. It is a host wait, so it shows on no CUDA timeline.
+            FU_NVTX("fu::drain_before_post");
+            FU_CUDA_CHECK(cudaStreamSynchronize(stream));
+        }
         rdma_->start_exchange(input.data_ptr(), input.numel() * input.element_size(),
                               *buffer.rdma, mode, input.size(0), input.size(1),
                               input.size(2), input.size(3), input.element_size());
-        launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0),
-                          input.size(1), input.size(2), input.size(3),
-                          input.element_size(), rank_, stream, true);
-        barrier(stream, buffer.flags, rank_, ++buffer.epoch);
+        {
+            FU_NVTX("fu::quad_copies_enqueue");
+            launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0),
+                              input.size(1), input.size(2), input.size(3),
+                              input.element_size(), rank_, stream, true);
+        }
+        {
+            FU_NVTX("fu::close_barrier");
+            barrier(stream, buffer.flags, rank_, ++buffer.epoch);
+        }
         rdma_->finish_exchange();
         rdma_->flush();
         return;
     }
-    barrier(stream, buffer.flags, rank_, ++buffer.epoch);
-    launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0), input.size(1),
-                      input.size(2), input.size(3), input.element_size(), rank_, stream,
-                      false);
-    barrier(stream, buffer.flags, rank_, ++buffer.epoch);
+    {
+        FU_NVTX("fu::open_barrier");
+        barrier(stream, buffer.flags, rank_, ++buffer.epoch);
+    }
+    {
+        FU_NVTX("fu::copies_enqueue");
+        launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0), input.size(1),
+                          input.size(2), input.size(3), input.element_size(), rank_, stream,
+                          false);
+    }
+    {
+        FU_NVTX("fu::close_barrier");
+        barrier(stream, buffer.flags, rank_, ++buffer.epoch);
+    }
 }
 
 std::string UlyssesGroup::backend() const

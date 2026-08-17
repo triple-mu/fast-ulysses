@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nvtx.h"
 #include "rdma.h"
 
 #include <ATen/ATen.h>

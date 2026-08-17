@@ -1,5 +1,7 @@
 #include "rdma.h"
 
+#include "nvtx.h"
+
 #include <c10/util/Exception.h>
 #include <cuda_runtime.h>
 #include <infiniband/mlx5dv.h>
@@ -992,6 +994,11 @@ void RdmaTransport::start_exchange(const void* input,
     }
 
     if (!state.input_mr) {
+        // First call for this workspace only: pinning the input for the NIC and, in mode 0,
+        // building the MKeys that gather from it. Milliseconds, and it lands inside a call the
+        // other seven ranks are already blocked on, so it is worth seeing separately from the
+        // per-call posting below.
+        FU_NVTX("fu::register_input");
         MrHandle input_mr(register_gpu_mr(
             impl_->pd, const_cast<void*>(input), checked_registration_bytes(input_bytes),
             IBV_ACCESS_LOCAL_WRITE));
@@ -1036,6 +1043,7 @@ void RdmaTransport::start_exchange(const void* input,
     // Every shape conversion, address calculation, and key lookup above is complete before the
     // first receive is posted. A validation failure therefore cannot strand half an exchange.
     // A posting failure still can, so it retires whatever was posted before it gives up.
+    FU_NVTX("fu::post");
     impl_->retire_on_failure([&] {
         for (int step = kQuad; step < kWorld; ++step) {
             impl_->post_receive(impl_->rank ^ step);
@@ -1060,6 +1068,11 @@ void RdmaTransport::finish_exchange()
     TORCH_CHECK(!impl_->failed, "the mlx5 transport failed and is permanently unusable");
     const int pending = impl_->pending_completions;
     TORCH_CHECK(pending > 0, "no RDMA exchange is pending");
+    // The host spins here until the NIC has moved the cross-quad share both ways. It is the one
+    // place the exchange can be slower than the GPU work it brackets: the near-quad copies are
+    // already enqueued and finish on the copy engines, so whatever this outlasts them by is a
+    // gap with nothing on the stream and no owner on a CUDA timeline.
+    FU_NVTX("fu::cq_spin");
     impl_->retire_on_failure([&] { impl_->poll(pending); });
     impl_->pending_completions = 0;
 }

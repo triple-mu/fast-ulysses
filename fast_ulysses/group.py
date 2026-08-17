@@ -250,8 +250,11 @@ class UlyssesGroup:
         self._group.all_to_all_4d(x, out, mode, self.stream.cuda_stream)
         if self.backend == "mlx5":
             # The cross-quad half finishes on the host, in the completion poll, while the closing
-            # barrier is on the stream. This lines the two back up.
-            self.stream.synchronize()
+            # barrier is on the stream. This lines the two back up. It carries its own NVTX range
+            # because it is the last of the three host waits in a call and, like the other two,
+            # shows on no CUDA timeline.
+            with torch.cuda.nvtx.range("fu::trailing_sync"):
+                self.stream.synchronize()
         return out
 
     def destroy(self) -> None:
