@@ -38,7 +38,15 @@ public:
     ~RdmaTransport();
 
     bool enabled() const;
-    const std::string& nic() const;
+    // Why this shape cannot go over the NIC, or "" if it can. Answered by dry-running the
+    // geometry the transfer itself will program, not by a second copy of the rules: a shape
+    // that passes here and then fails inside register_buffer would make the query a lie.
+    std::string shape_reason(int mode,
+                             int64_t batch,
+                             int64_t seq,
+                             int64_t heads,
+                             int64_t dim,
+                             int64_t element_size) const;
     std::vector<int64_t> connection_info() const;
     void connect(const std::vector<std::vector<int64_t>>& peers);
 

@@ -316,7 +316,6 @@ int select_gid_index(const std::string& nic, ibv_context* context)
 
 struct RdmaTransport::Impl {
     int rank = 0;
-    int world_size = 0;
     int device = 0;
     bool active = false;
     bool connected = false;
@@ -562,7 +561,6 @@ RdmaTransport::RdmaTransport(int rank,
     : impl_(std::make_unique<Impl>())
 {
     impl_->rank = rank;
-    impl_->world_size = world_size;
     impl_->device = device;
     if (world_size != kWorld || !enable) return;
     if (devices.size() != kWorld) return;
@@ -646,7 +644,43 @@ RdmaTransport::RdmaTransport(int rank,
 RdmaTransport::~RdmaTransport() = default;
 
 bool RdmaTransport::enabled() const { return impl_->active; }
-const std::string& RdmaTransport::nic() const { return impl_->nic_name; }
+
+std::string RdmaTransport::shape_reason(int mode,
+                                        int64_t batch,
+                                        int64_t seq,
+                                        int64_t heads,
+                                        int64_t dim,
+                                        int64_t element_size) const
+{
+    if (!impl_->active) return {};
+    if (batch != 1) {
+        return "the mlx5 backend requires batch 1: the per-rank share is only contiguous "
+               "at B == 1";
+    }
+    // Ask the code that will do the work rather than restating its rules. checked_tensor_bytes,
+    // checked_payload and mkey_geometry hold every refusal between them -- the divisibility, the
+    // UINT32 row and width bounds, the per-peer payload limit, and the 16-bit MKey stride -- and
+    // today a caller only meets them from inside register_buffer or start_exchange, by which
+    // point seven peers are already committed. Running them here cannot drift from running them
+    // there, because it is the same call.
+    try {
+        const int64_t bytes = checked_mul(
+            checked_mul(checked_mul(batch, seq, "shape"), checked_mul(heads, dim, "shape"),
+                        "shape"),
+            element_size, "shape");
+        checked_tensor_bytes(mode, bytes, batch, seq, heads, dim, element_size);
+        const uint32_t payload = checked_payload(bytes);
+        const MkeyGeometry geometry =
+            mkey_geometry(mode, batch, seq, heads, dim, element_size);
+        TORCH_CHECK(checked_offset_mul(geometry.rows, geometry.width, "MKey payload") == payload,
+                    "MKey geometry does not match the per-peer payload");
+    } catch (const c10::Error& error) {
+        return std::string(error.what_without_backtrace()) +
+               "; set FAST_ULYSSES_DISABLE_RDMA=1 to run this shape on the CUDA P2P backend, "
+               "which has no such limit";
+    }
+    return {};
+}
 
 std::vector<int64_t> RdmaTransport::connection_info() const
 {

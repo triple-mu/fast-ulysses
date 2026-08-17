@@ -15,13 +15,19 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import warnings
 
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from benchmark import nccl_mode0, nccl_mode1
-from fast_ulysses import UlyssesGroup
+from fast_ulysses import (
+    SUPPORTED_WORLD_SIZES,
+    UlyssesGroup,
+    supports_dtype,
+    supports_world_size,
+)
 
 # About 130 us at a 1.5 GHz clock, against a host gap between two calls of about 10 us.
 SKEW_CYCLES = 200_000
@@ -267,6 +273,94 @@ def scheduler_smoke(device: int, ws: int, rank: int, pg) -> int:
     return torn
 
 
+def check_asymmetric_construction(device: int, ws: int, rank: int) -> None:
+    """One rank failing to build must return None on all of them, not strand the rest.
+
+    This is the shape of the real hazard: mlx5 setup fails per rank, because select_nic hands
+    each rank a different NIC, so a failure only one rank sees still has to become a decision
+    all of them make. A bad device on rank 1 stands in for it -- it fails at the same point in
+    the sequence, locally and before the first collective. If the agreement were missing, the
+    other seven would block here rather than fail.
+    """
+    if ws < 2:
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        group = UlyssesGroup.create(device="cpu" if rank == 1 else device)
+    check(group is None, "an asymmetric construction failure still produced a group")
+    if group is not None:
+        group.destroy()
+
+
+def check_capability_query(group: UlyssesGroup, device: int, ws: int) -> None:
+    """The query has to agree with the refusal, or acting on it is worse than not having it.
+
+    A caller branches on `supports` to skip a collective. If the query ever says yes where
+    allocate_output says no, that branch turns a loud rank-local failure into a hang, so
+    every shape the suite exercises is checked both ways.
+    """
+    for dtype in (torch.bfloat16, torch.float16):
+        for batch, seq, heads, dim in shapes(ws, group.backend):
+            for mode in (0, 1):
+                shape = (
+                    (batch, seq * ws, heads // ws, dim)
+                    if mode
+                    else (batch, seq, heads, dim)
+                )
+                check(
+                    group.supports(shape, dtype, mode),
+                    f"the query refused {shape} {dtype} mode={mode}, which the suite exchanges",
+                )
+                check(
+                    tuple(group.output_shape(shape, mode))
+                    == tuple(
+                        group.allocate_output(
+                            torch.empty(shape, dtype=dtype, device=device), mode
+                        ).shape
+                    ),
+                    f"output_shape disagrees with allocate_output for {shape} mode={mode}",
+                )
+
+    refused = [
+        ((1, 64, 4 * ws, 128), torch.float32, 0, "a float32 shape"),
+        ((1, 64, 4 * ws, 128), torch.bfloat16, 2, "an invalid mode"),
+        ((1, 64, 4 * ws, 128, 1), torch.bfloat16, 0, "a 5-D shape"),
+        ((1, 0, 4 * ws, 128), torch.bfloat16, 0, "an empty dimension"),
+    ]
+    if ws > 1:
+        refused.append(
+            ((1, 64, 4 * ws + 1, 128), torch.bfloat16, 0, "an indivisible head count")
+        )
+    for shape, dtype, mode, what in refused:
+        check(
+            group.unsupported_reason(shape, dtype, mode) is not None,
+            f"the query accepted {what}",
+        )
+
+    # The MKey stride is mlx5's limit and only mlx5's. A caller that transcribes it instead of
+    # asking refuses this shape on p2p too, where it is perfectly legal -- which is the whole
+    # reason the query exists.
+    wide = ((1, 64, 256, 128), torch.bfloat16, 0)
+    if group.backend == "mlx5":
+        reason = group.unsupported_reason(*wide)
+        check(reason is not None, "mlx5 accepted a head stride over the MKey limit")
+        check(
+            reason is None or "DISABLE_RDMA" in reason,
+            f"the MKey refusal does not say what to do about it: {reason!r}",
+        )
+    else:
+        check(
+            group.supports(*wide),
+            "p2p refused a head stride that only the MKey has a limit on",
+        )
+
+    check(ws in tuple(SUPPORTED_WORLD_SIZES), f"world size {ws} is not advertised")
+    check(supports_dtype(torch.bfloat16), "bfloat16 is not advertised")
+    check(not supports_dtype(torch.float32), "float32 is advertised")
+    check(supports_world_size(ws), f"supports_world_size({ws}) is False")
+    check(not supports_world_size(3), "world size 3 is advertised")
+
+
 def check_rejections(group: UlyssesGroup, device: int, ws: int) -> None:
     """Every rank runs these, so no rank is left alone in a collective."""
     good = torch.randn((1, 64, 4 * ws, 128), dtype=torch.bfloat16, device=device)
@@ -333,6 +427,12 @@ def main() -> None:
     torch.manual_seed(1234 + rank)
 
     expected = expected_backend(ws)
+    check_asymmetric_construction(local_rank, ws, rank)
+    created = UlyssesGroup.create(device=local_rank)
+    check(created is not None, "create() refused a group the constructor accepts")
+    if created is not None:
+        created.destroy()
+
     with UlyssesGroup(device=local_rank) as group:
         check(
             group.backend == expected,
@@ -345,6 +445,7 @@ def main() -> None:
                 f"rounds={ROUNDS} skew={SKEW_CYCLES} skewed_ranks={skewed}"
             )
 
+        check_capability_query(group, local_rank, ws)
         check_shapes(group, local_rank, ws)
         check_output_workspaces(group, local_rank, ws)
         check_fixed_storage(group, local_rank, ws)

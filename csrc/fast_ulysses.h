@@ -28,6 +28,26 @@ static_assert(TORCH_VERSION_MAJOR > 2 ||
 
 namespace ulysses {
 
+// The p2p barrier addresses peers through PeerFlags::ptr[8] in transfer.cu, which is what
+// bounds a group. Deliberately NOT the same quantity as rdma.cpp's kWorld: that one is mlx5's
+// equality precondition (exactly eight ranks, device i on rank i), while this is a capacity.
+// Merging them would let a future widening here silently rewrite mlx5's entry test.
+constexpr int64_t kMaxWorldSize = 8;
+
+// The two admissibility rules that a caller has to answer before a group exists, so they are
+// free functions rather than members. Everything else a shape can be refused for depends on
+// the group's transport and lives in UlyssesGroup::unsupported_reason.
+constexpr bool supported_world_size(int64_t world_size)
+{
+    return world_size >= 1 && world_size <= kMaxWorldSize &&
+           (world_size & (world_size - 1)) == 0;
+}
+
+inline bool supported_dtype(at::ScalarType dtype)
+{
+    return dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
 struct Buffer {
     // Keep the allocation itself alive independently of tensor: set_() mutates the shared
     // TensorImpl behind every at::Tensor handle, but cannot replace this Storage owner.
@@ -70,19 +90,29 @@ public:
                        at::Tensor output,
                        int64_t mode,
                        int64_t stream);
+    // Why this shape cannot be exchanged, or "" if it can. Pure, local, and collective-free,
+    // so a caller can decide before entering allocate_output -- which is collective, and which
+    // hangs the other ranks if only some of them reach it. The answer is a function of
+    // (mode, sizes, dtype, world_size, transport) alone: every term is identical on every rank,
+    // so acting on it cannot make the ranks disagree. Nothing per-tensor or per-host may enter
+    // it for that reason.
+    std::string unsupported_reason(std::vector<int64_t> sizes,
+                                   at::ScalarType dtype,
+                                   int64_t mode) const;
+    std::vector<int64_t> output_shape_for(std::vector<int64_t> sizes, int64_t mode) const;
     std::string backend() const;
     std::vector<int64_t> connection_info() const;
     void connect(const std::vector<std::vector<int64_t>>& peers);
     std::vector<int64_t> buffer_info(at::Tensor output) const;
     void connect_buffer(at::Tensor output,
                         const std::vector<std::vector<int64_t>>& peers);
-    void flush() const;
     void close_imports();
     void destroy();
 
 private:
     void validate(const at::Tensor& input, int64_t mode) const;
     std::vector<int64_t> output_shape(const at::Tensor& input, int64_t mode) const;
+    void require_supported(std::vector<int64_t> sizes, at::ScalarType dtype, int64_t mode) const;
     Buffer& lookup_output(const at::Tensor& output) const;
     void bind_or_validate_input(Buffer& buffer, const at::Tensor& input) const;
     bool has_rdma_buffers() const noexcept;

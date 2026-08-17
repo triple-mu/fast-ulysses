@@ -73,40 +73,67 @@ UlyssesGroup::~UlyssesGroup() noexcept
     if (!destroyed_) leak_unsafe_resources();
 }
 
+std::string UlyssesGroup::unsupported_reason(std::vector<int64_t> sizes,
+                                             at::ScalarType dtype,
+                                             int64_t mode) const
+{
+    if (mode != 0 && mode != 1) return "mode must be 0 or 1";
+    if (sizes.size() != 4) return "shape must be 4-D [B, S, H, D]";
+    for (int64_t size : sizes) {
+        if (size <= 0) return "empty dimensions are unsupported";
+    }
+    if (!supported_dtype(dtype)) return "dtype must be float16 or bfloat16";
+    if (sizes[mode == 0 ? 2 : 1] % world_size_ != 0) {
+        return "the dimension this mode splits must divide world_size";
+    }
+    // Everything past here is the transport's own admissibility, and the transport answers it:
+    // batch, the divisibility mlx5 needs on top of the group's, the UINT32 MKey bounds, and the
+    // 16-bit stride. Restating any of it here is how the two would drift apart.
+    if (rdma_ && rdma_->enabled()) {
+        return rdma_->shape_reason(static_cast<int>(mode), sizes[0], sizes[1], sizes[2],
+                                   sizes[3], c10::elementSize(dtype));
+    }
+    return {};
+}
+
+void UlyssesGroup::require_supported(std::vector<int64_t> sizes,
+                                     at::ScalarType dtype,
+                                     int64_t mode) const
+{
+    const std::string reason = unsupported_reason(std::move(sizes), dtype, mode);
+    TORCH_CHECK(reason.empty(), reason);
+}
+
 void UlyssesGroup::validate(const at::Tensor& input, int64_t mode) const
 {
     TORCH_CHECK(!destroyed_, "group is destroyed");
     TORCH_CHECK(!imports_closed_, "group imports are closed");
-    TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 or 1");
     TORCH_CHECK(input.is_cuda() && input.get_device() == device_, "wrong CUDA device");
     TORCH_CHECK(input.dim() == 4 && input.is_contiguous(),
                 "input must be contiguous [B, S, H, D]");
-    TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
-                "input must be float16 or bfloat16");
     TORCH_CHECK(!input.requires_grad(), "inference only");
-    for (int64_t size : input.sizes()) TORCH_CHECK(size > 0, "empty dimensions are unsupported");
-    if (rdma_ && rdma_->enabled()) {
-        TORCH_CHECK(input.size(0) == 1, "mlx5 RDMA backend currently supports batch=1");
-        // Both modes program the same stride: one row of the global head dimension.
-        const int64_t heads = mode == 0 ? input.size(2) : input.size(2) * world_size_;
-        const int64_t stride = heads * input.size(3) * input.element_size();
-        TORCH_CHECK(stride <= kMaxInterleavedStride,
-                    "heads*dim*itemsize over all ranks is ", stride,
-                    " bytes, above the ", kMaxInterleavedStride,
-                    "-byte mlx5 MKey stride limit; set FAST_ULYSSES_DISABLE_RDMA=1 to use the "
-                    "CUDA P2P backend for this shape");
-    }
-    TORCH_CHECK(input.size(mode == 0 ? 2 : 1) % world_size_ == 0,
-                "split dimension must divide world_size");
+    // The shape and dtype half is the part a caller can ask about in advance; keeping it in one
+    // function is what makes the answer to unsupported_reason() and the reason this throws the
+    // same sentence.
+    require_supported(input.sizes().vec(), input.scalar_type(), mode);
+}
+
+std::vector<int64_t> UlyssesGroup::output_shape_for(std::vector<int64_t> sizes,
+                                                    int64_t mode) const
+{
+    TORCH_CHECK(mode == 0 || mode == 1, "mode must be 0 or 1");
+    TORCH_CHECK(sizes.size() == 4, "shape must be 4-D [B, S, H, D]");
+    TORCH_CHECK(sizes[mode == 0 ? 2 : 1] % world_size_ == 0,
+                "the dimension this mode splits must divide world_size");
+    const auto b = sizes[0], s = sizes[1], h = sizes[2], d = sizes[3];
+    if (mode == 0) return {b, s * world_size_, h / world_size_, d};
+    return {b, s / world_size_, h * world_size_, d};
 }
 
 std::vector<int64_t> UlyssesGroup::output_shape(const at::Tensor& input, int64_t mode) const
 {
     validate(input, mode);
-    const auto b = input.size(0), s = input.size(1);
-    const auto h = input.size(2), d = input.size(3);
-    if (mode == 0) return {b, s * world_size_, h / world_size_, d};
-    return {b, s / world_size_, h * world_size_, d};
+    return output_shape_for(input.sizes().vec(), mode);
 }
 
 at::Tensor UlyssesGroup::allocate_output(const at::Tensor& input, int64_t mode)
@@ -310,13 +337,6 @@ void UlyssesGroup::connect_buffer(
     buffer.flags = rdma_->peer_flags(*buffer.rdma);
 }
 
-void UlyssesGroup::flush() const
-{
-    TORCH_CHECK(!destroyed_, "group is destroyed");
-    TORCH_CHECK(!imports_closed_, "group imports are closed");
-    if (rdma_) rdma_->flush();
-}
-
 void UlyssesGroup::close_imports()
 {
     TORCH_CHECK(!destroyed_, "group is destroyed");
@@ -367,14 +387,28 @@ TORCH_LIBRARY(fast_ulysses, m)
                          bool, std::vector<std::string>>())
         .def("allocate_output", &ulysses::UlyssesGroup::allocate_output)
         .def("all_to_all_4d", &ulysses::UlyssesGroup::all_to_all_4d)
+        .def("unsupported_reason", &ulysses::UlyssesGroup::unsupported_reason)
+        .def("output_shape_for", &ulysses::UlyssesGroup::output_shape_for)
         .def("backend", &ulysses::UlyssesGroup::backend)
         .def("connection_info", &ulysses::UlyssesGroup::connection_info)
         .def("connect", &ulysses::UlyssesGroup::connect)
         .def("buffer_info", &ulysses::UlyssesGroup::buffer_info)
         .def("connect_buffer", &ulysses::UlyssesGroup::connect_buffer)
-        .def("flush", &ulysses::UlyssesGroup::flush)
         .def("close_imports", &ulysses::UlyssesGroup::close_imports)
         .def("destroy", &ulysses::UlyssesGroup::destroy);
 }
 
-PYBIND11_MODULE(_C, m) {}
+// The two rules a caller has to consult before a group exists, so they cannot be methods. Both
+// are derived from the predicates the constructor itself uses, rather than restated, because a
+// caller that has to transcribe a limit will eventually transcribe it wrongly -- and will not
+// find out, since the transcription lives where the library cannot see it.
+PYBIND11_MODULE(_C, m)
+{
+    std::vector<int64_t> world_sizes;
+    for (int64_t size = 1; size <= ulysses::kMaxWorldSize; ++size) {
+        if (ulysses::supported_world_size(size)) world_sizes.push_back(size);
+    }
+    m.attr("SUPPORTED_WORLD_SIZES") = pybind11::cast(world_sizes);
+    m.def("supports_world_size", &ulysses::supported_world_size);
+    m.def("supports_dtype", &ulysses::supported_dtype);
+}

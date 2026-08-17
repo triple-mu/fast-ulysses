@@ -64,6 +64,27 @@ with torch.inference_mode():
         consume(output)  # on the same bound stream
 ```
 
+A caller with a fallback wants `create()` instead, which returns `None` on **every** rank if any
+rank could not build a group, and `unsupported_reason()` instead of catching a refusal:
+
+```python
+group = UlyssesGroup.create(stream=stream)   # None everywhere, or a group everywhere
+if group is not None and group.supports(x.shape, x.dtype, mode=0):
+    output = group.all_to_all_4d(x, mode=0)
+else:
+    output = fallback(x)
+```
+
+Both exist because the obvious spellings are wrong. `except: fall back` around the constructor is
+only safe when the failure is the same on every rank, and mlx5 setup fails per rank -- each rank
+gets a different NIC, so one missing IPv4 GID raises on one of them and leaves the other seven
+inside a collective it has already left. And a caller that transcribes the shape limits instead of
+asking gets them wrong: the 16-bit MKey stride is mlx5's and only mlx5's, so a hardcoded copy
+refuses shapes the p2p backend carries perfectly well. `unsupported_reason` is pure, collective-
+free and rank-invariant -- it depends only on the mode, shape, dtype, world size and transport --
+so skipping a call on the strength of it skips it on every rank. `supports_world_size()`,
+`supports_dtype()` and `SUPPORTED_WORLD_SIZES` answer the same way before a group exists.
+
 The thread that constructs the group owns it. `allocate_output()`, `all_to_all_4d()`, and
 `destroy()` must run on that thread with the group's device and bound stream current. Passing a
 different stream per call is intentionally unsupported. A producer on another stream must record
@@ -92,7 +113,8 @@ allocations, exchanges, and destruction in exactly the same order. Cold allocati
 ordinal, mode, shape, dtype, and byte count across ranks. Exchanges deliberately add no hot-path
 host collective for argument validation. A rank-local error, timeout, or process exit therefore
 poisons the run: terminate every torchrun process with an external watchdog, and never catch an
-error and continue using the group.
+error and continue using the group. Construction is the one exception, and only because `create()`
+agrees its outcome explicitly; nothing after it does.
 
 On the supported 8-GPU PCIe host, same-socket transfers use CUDA IPC pointers. Cross-socket
 transfers use mlx5 interleaved MKeys: the NIC gathers or scatters the strided `[S,H,D]` slices
