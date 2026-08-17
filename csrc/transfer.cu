@@ -1,5 +1,7 @@
 #include "fast_ulysses.h"
 
+#include <cstdio>
+
 namespace ulysses {
 namespace {
 
@@ -58,11 +60,21 @@ void launch_all_to_all(const void* input,
                        cudaStream_t stream,
                        bool quad_only)
 {
+    FU_NVTX(quad_only ? "fu::copies[near-quad only]" : "fu::copies[all peers]");
     const int world_size = peers.size();
     const auto* source = static_cast<const uint8_t*>(input);
     const int64_t width = (mode == 0 ? heads / world_size : heads) * dim * element_size;
 
     auto copy = [&](int peer) {
+        // One range per destination, named by the only distinction the transfer itself makes:
+        // whether the peer is in this rank's quad. The two classes do not run at the same rate,
+        // and nsys attributes each device-side copy to the API call inside this range, so
+        // without the name a profile shows one undifferentiated band of peer memcpys.
+        char name[56];
+        std::snprintf(name, sizeof(name), "fu::copy[peer=%d %s]", peer,
+                      peer == rank ? "self"
+                                   : (peer / kQuad == rank / kQuad ? "near-quad" : "cross-quad"));
+        FU_NVTX(name);
         for (int64_t batch_index = 0; batch_index < batch; ++batch_index) {
             int64_t src_offset, dst_offset, src_pitch, dst_pitch, rows;
             if (mode == 0) {

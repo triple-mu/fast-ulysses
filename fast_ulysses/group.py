@@ -234,28 +234,32 @@ class UlyssesGroup:
         mode, shape, and dtype. Pass an explicit ``out`` when multiple results
         with the same geometry must remain live simultaneously.
         """
-        self._check_execution_context("all_to_all_4d")
-        if mode not in (0, 1):
-            raise ValueError(f"mode must be 0 or 1, got {mode!r}")
-        if out is None:
-            key = (mode, tuple(x.shape), x.dtype)
-            out = self._output_pool.get(key)
+        # The outer range covers everything a caller pays for a call, including the pool lookup
+        # and the cold allocation a pool miss triggers, so a profile cannot attribute those to
+        # whatever ran before them.
+        with torch.cuda.nvtx.range(f"fu.py::all_to_all_4d[mode={mode}]"):
+            self._check_execution_context("all_to_all_4d")
+            if mode not in (0, 1):
+                raise ValueError(f"mode must be 0 or 1, got {mode!r}")
             if out is None:
-                out = self.allocate_output(x, mode)
-                self._output_pool[key] = out
-        if self.backend == "p2p":
-            # Native P2P copies are stream-asynchronous. Tell the caching allocator not to
-            # recycle the input while the bound stream can still be reading it.
-            x.record_stream(self.stream)
-        self._group.all_to_all_4d(x, out, mode, self.stream.cuda_stream)
-        if self.backend == "mlx5":
-            # The cross-quad half finishes on the host, in the completion poll, while the closing
-            # barrier is on the stream. This lines the two back up. It carries its own NVTX range
-            # because it is the last of the three host waits in a call and, like the other two,
-            # shows on no CUDA timeline.
-            with torch.cuda.nvtx.range("fu::trailing_sync"):
-                self.stream.synchronize()
-        return out
+                key = (mode, tuple(x.shape), x.dtype)
+                out = self._output_pool.get(key)
+                if out is None:
+                    out = self.allocate_output(x, mode)
+                    self._output_pool[key] = out
+            if self.backend == "p2p":
+                # Native P2P copies are stream-asynchronous. Tell the caching allocator not to
+                # recycle the input while the bound stream can still be reading it.
+                x.record_stream(self.stream)
+            self._group.all_to_all_4d(x, out, mode, self.stream.cuda_stream)
+            if self.backend == "mlx5":
+                # The cross-quad half finishes on the host, in the completion poll, while the
+                # closing barrier is on the stream. This lines the two back up. It carries its
+                # own range because it is the last of the three host waits in a call and, like
+                # the other two, shows on no CUDA timeline.
+                with torch.cuda.nvtx.range("fu::trailing_sync"):
+                    self.stream.synchronize()
+            return out
 
     def destroy(self) -> None:
         if self._destroyed:

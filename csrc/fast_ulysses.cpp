@@ -138,11 +138,16 @@ std::vector<int64_t> UlyssesGroup::output_shape(const at::Tensor& input, int64_t
 
 at::Tensor UlyssesGroup::allocate_output(const at::Tensor& input, int64_t mode)
 {
+    // Cold path, but it lands inside whichever request first sees a shape, so it is worth
+    // seeing: a symmetric-memory rendezvous and an RDMA registration are both collective or
+    // millisecond-scale, and neither is visible as GPU work.
+    FU_NVTX("fu::allocate_output");
     const auto shape = output_shape(input, mode);
     const at::cuda::CUDAGuard guard(device_);
     auto buffer = std::make_unique<Buffer>();
     at::Tensor tensor;
     if (rdma_ && rdma_->enabled()) {
+        FU_NVTX("fu::allocate_output[cudaMalloc]");
         void* pointer = nullptr;
         FU_CUDA_CHECK(cudaMalloc(&pointer, input.numel() * input.element_size()));
         tensor = at::from_blob(
@@ -156,9 +161,12 @@ at::Tensor UlyssesGroup::allocate_output(const at::Tensor& input, int64_t mode)
             },
             input.options());
     } else {
+        FU_NVTX("fu::allocate_output[symm_mem]");
         tensor = symm::empty_strided_p2p(
             {input.numel()}, {1}, input.scalar_type(),
             c10::Device(c10::DeviceType::CUDA, device_), name_, std::nullopt);
+        // Collective, and the only one on the p2p allocation path: every rank has to reach it.
+        FU_NVTX("fu::allocate_output[rendezvous]");
         auto memory = symm::rendezvous(tensor, name_);
         TORCH_CHECK(memory, "symmetric-memory rendezvous failed");
         for (void* ptr : memory->get_buffer_ptrs())
@@ -184,6 +192,7 @@ at::Tensor UlyssesGroup::allocate_output(const at::Tensor& input, int64_t mode)
     buffer->output_storage_offset = output.storage_offset();
     buffer->output_nbytes = tensor_nbytes(output);
     if (rdma_ && rdma_->enabled()) {
+        FU_NVTX("fu::register_output");
         buffer->rdma = rdma_->register_buffer(
             buffer->output_data_ptr, buffer->output_nbytes, mode,
             input.size(0), input.size(1), input.size(2), input.size(3),
