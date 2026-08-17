@@ -214,7 +214,6 @@ def main():
         f"world_size: {ws}",
         "dtype: bfloat16",
         f"backend: {group.backend}",
-        f"FAST_ULYSSES_DISABLE_RDMA: {os.getenv('FAST_ULYSSES_DISABLE_RDMA', '<unset>')}",
         f"FAST_ULYSSES_NICS: {os.getenv('FAST_ULYSSES_NICS', '<auto>')}",
         f"NCCL_P2P_LEVEL: {os.getenv('NCCL_P2P_LEVEL', '<unset>')}",
         f"warmup: {args.warmup} calls/case",

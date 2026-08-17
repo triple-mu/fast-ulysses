@@ -41,9 +41,7 @@ UlyssesGroup::UlyssesGroup(std::string name,
                            int64_t rank,
                            int64_t world_size,
                            int64_t device,
-                           std::vector<int64_t> devices,
-                           bool enable_rdma,
-                           std::vector<std::string> nics)
+                           std::vector<int64_t> devices)
     : name_(std::move(name)),
       rank_(rank),
       world_size_(world_size),
@@ -59,16 +57,13 @@ UlyssesGroup::UlyssesGroup(std::string name,
                 "one rank per GPU is required");
     TORCH_CHECK(devices[rank_] == device_, "rank is using the wrong GPU");
     TORCH_CHECK(supports_p2p(devices), "CUDA P2P is required between every GPU");
-    const at::cuda::CUDAGuard guard(device_);
-    rdma_ = std::make_unique<RdmaTransport>(rank_, world_size_, device_, devices,
-                                            enable_rdma, nics);
 }
 
 UlyssesGroup::~UlyssesGroup() noexcept
 {
     // Destruction can be triggered by Python under an arbitrary CUDA context and cannot perform
     // the rank-coordinated IPC shutdown protocol. If explicit shutdown was skipped, retain all
-    // CUDA and RDMA resources until process exit rather than freeing them under an unsafe context
+    // CUDA resources until process exit rather than freeing them under an unsafe context
     // or closing peer mappings out of order.
     if (!destroyed_) leak_unsafe_resources();
 }
@@ -86,13 +81,6 @@ std::string UlyssesGroup::unsupported_reason(std::vector<int64_t> sizes,
     if (sizes[mode == 0 ? 2 : 1] % world_size_ != 0) {
         return "the dimension this mode splits must divide world_size";
     }
-    // Everything past here is the transport's own admissibility, and the transport answers it:
-    // batch, the divisibility mlx5 needs on top of the group's, the UINT32 MKey bounds, and the
-    // 16-bit stride. Restating any of it here is how the two would drift apart.
-    if (rdma_ && rdma_->enabled()) {
-        return rdma_->shape_reason(static_cast<int>(mode), sizes[0], sizes[1], sizes[2],
-                                   sizes[3], c10::elementSize(dtype));
-    }
     return {};
 }
 
@@ -107,7 +95,6 @@ void UlyssesGroup::require_supported(std::vector<int64_t> sizes,
 void UlyssesGroup::validate(const at::Tensor& input, int64_t mode) const
 {
     TORCH_CHECK(!destroyed_, "group is destroyed");
-    TORCH_CHECK(!imports_closed_, "group imports are closed");
     TORCH_CHECK(input.is_cuda() && input.get_device() == device_, "wrong CUDA device");
     TORCH_CHECK(input.dim() == 4 && input.is_contiguous(),
                 "input must be contiguous [B, S, H, D]");
@@ -138,27 +125,20 @@ std::vector<int64_t> UlyssesGroup::output_shape(const at::Tensor& input, int64_t
 
 at::Tensor UlyssesGroup::allocate_output(const at::Tensor& input, int64_t mode)
 {
+    // Cold path, but it lands inside whichever request first sees a shape, so it is worth
+    // seeing: the symmetric-memory rendezvous is collective and is not visible as GPU work.
+    FU_NVTX("fu::allocate_output");
     const auto shape = output_shape(input, mode);
     const at::cuda::CUDAGuard guard(device_);
     auto buffer = std::make_unique<Buffer>();
     at::Tensor tensor;
-    if (rdma_ && rdma_->enabled()) {
-        void* pointer = nullptr;
-        FU_CUDA_CHECK(cudaMalloc(&pointer, input.numel() * input.element_size()));
-        tensor = at::from_blob(
-            pointer, {input.numel()},
-            [device = device_](void* allocation) {
-                int previous = 0;
-                cudaGetDevice(&previous);
-                cudaSetDevice(device);
-                cudaFree(allocation);
-                cudaSetDevice(previous);
-            },
-            input.options());
-    } else {
+    {
+        FU_NVTX("fu::allocate_output[symm_mem]");
         tensor = symm::empty_strided_p2p(
             {input.numel()}, {1}, input.scalar_type(),
             c10::Device(c10::DeviceType::CUDA, device_), name_, std::nullopt);
+        // Collective, and the only one on the p2p allocation path: every rank has to reach it.
+        FU_NVTX("fu::allocate_output[rendezvous]");
         auto memory = symm::rendezvous(tensor, name_);
         TORCH_CHECK(memory, "symmetric-memory rendezvous failed");
         for (void* ptr : memory->get_buffer_ptrs())
@@ -183,12 +163,6 @@ at::Tensor UlyssesGroup::allocate_output(const at::Tensor& input, int64_t mode)
     buffer->output_data_ptr = output.data_ptr();
     buffer->output_storage_offset = output.storage_offset();
     buffer->output_nbytes = tensor_nbytes(output);
-    if (rdma_ && rdma_->enabled()) {
-        buffer->rdma = rdma_->register_buffer(
-            buffer->output_data_ptr, buffer->output_nbytes, mode,
-            input.size(0), input.size(1), input.size(2), input.size(3),
-            input.element_size());
-    }
     Buffer* raw = buffer.get();
     buffers_.push_back(std::move(buffer));
     outputs_[output.unsafeGetTensorImpl()] = raw;
@@ -198,7 +172,6 @@ at::Tensor UlyssesGroup::allocate_output(const at::Tensor& input, int64_t mode)
 Buffer& UlyssesGroup::lookup_output(const at::Tensor& output) const
 {
     TORCH_CHECK(!destroyed_, "group is destroyed");
-    TORCH_CHECK(!imports_closed_, "group imports are closed");
     const auto it = outputs_.find(output.unsafeGetTensorImpl());
     TORCH_CHECK(it != outputs_.end(), "output must come from allocate_output()");
     Buffer& buffer = *it->second;
@@ -267,40 +240,6 @@ void UlyssesGroup::all_to_all_4d(const at::Tensor& input,
                 "CUDA Graph capture is unsupported");
     bind_or_validate_input(buffer, input);
     FU_NVTX(mode == 0 ? "fu::exchange(mode=0)" : "fu::exchange(mode=1)");
-    if (rdma_ && rdma_->enabled()) {
-        TORCH_CHECK(buffer.rdma, "RDMA output is not registered");
-        // A cross-quad RDMA write lands in the peer's output the moment it is posted -- a receive
-        // queue entry holds back the completion, not the data -- so the next call would overwrite
-        // a result its peers have not read yet. The opening barrier is what stops that. It covers
-        // all eight ranks, not just the quad, because it is the cross-quad half that races.
-        {
-            FU_NVTX("fu::open_barrier");
-            barrier(stream, buffer.flags, rank_, ++buffer.epoch);
-        }
-        {
-            // The NIC reads the input on its own, outside the stream. This one wait covers both
-            // that and the barrier above, since the posting below is host-side and would
-            // otherwise run ahead of each. It is a host wait, so it shows on no CUDA timeline.
-            FU_NVTX("fu::drain_before_post");
-            FU_CUDA_CHECK(cudaStreamSynchronize(stream));
-        }
-        rdma_->start_exchange(input.data_ptr(), input.numel() * input.element_size(),
-                              *buffer.rdma, mode, input.size(0), input.size(1),
-                              input.size(2), input.size(3), input.element_size());
-        {
-            FU_NVTX("fu::quad_copies_enqueue");
-            launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0),
-                              input.size(1), input.size(2), input.size(3),
-                              input.element_size(), rank_, stream, true);
-        }
-        {
-            FU_NVTX("fu::close_barrier");
-            barrier(stream, buffer.flags, rank_, ++buffer.epoch);
-        }
-        rdma_->finish_exchange();
-        rdma_->flush();
-        return;
-    }
     {
         FU_NVTX("fu::open_barrier");
         barrier(stream, buffer.flags, rank_, ++buffer.epoch);
@@ -308,8 +247,8 @@ void UlyssesGroup::all_to_all_4d(const at::Tensor& input,
     {
         FU_NVTX("fu::copies_enqueue");
         launch_all_to_all(input.data_ptr(), buffer.peers, mode, input.size(0), input.size(1),
-                          input.size(2), input.size(3), input.element_size(), rank_, stream,
-                          false);
+                          input.size(2), input.size(3), input.element_size(), rank_,
+                          stream);
     }
     {
         FU_NVTX("fu::close_barrier");
@@ -317,87 +256,22 @@ void UlyssesGroup::all_to_all_4d(const at::Tensor& input,
     }
 }
 
-std::string UlyssesGroup::backend() const
-{
-    if (rdma_ && rdma_->enabled()) return "mlx5";
-    return "p2p";
-}
-
-std::vector<int64_t> UlyssesGroup::connection_info() const
-{
-    TORCH_CHECK(!destroyed_, "group is destroyed");
-    TORCH_CHECK(!imports_closed_, "group imports are closed");
-    TORCH_CHECK(rdma_ && rdma_->enabled(), "mlx5 backend is disabled");
-    return rdma_->connection_info();
-}
-
-void UlyssesGroup::connect(const std::vector<std::vector<int64_t>>& peers)
-{
-    TORCH_CHECK(!destroyed_, "group is destroyed");
-    TORCH_CHECK(!imports_closed_, "group imports are closed");
-    TORCH_CHECK(rdma_ && rdma_->enabled(), "mlx5 backend is disabled");
-    rdma_->connect(peers);
-}
-
-std::vector<int64_t> UlyssesGroup::buffer_info(at::Tensor output) const
-{
-    Buffer& buffer = lookup_output(output);
-    TORCH_CHECK(buffer.rdma,
-                "output must be an RDMA allocate_output() result");
-    return rdma_->buffer_info(*buffer.rdma);
-}
-
-void UlyssesGroup::connect_buffer(
-    at::Tensor output,
-    const std::vector<std::vector<int64_t>>& peers)
-{
-    Buffer& buffer = lookup_output(output);
-    TORCH_CHECK(buffer.rdma,
-                "output must be an RDMA allocate_output() result");
-    rdma_->connect_buffer(*buffer.rdma, peers);
-    buffer.peers = rdma_->peer_pointers(*buffer.rdma);
-    buffer.flags = rdma_->peer_flags(*buffer.rdma);
-}
-
-void UlyssesGroup::close_imports()
-{
-    TORCH_CHECK(!destroyed_, "group is destroyed");
-    if (imports_closed_) return;
-    const at::cuda::CUDAGuard guard(device_);
-    if (rdma_ && rdma_->enabled()) {
-        for (auto& buffer : buffers_) {
-            if (buffer->rdma) rdma_->close_buffer_imports(*buffer->rdma);
-        }
-    }
-    imports_closed_ = true;
-}
-
-bool UlyssesGroup::has_rdma_buffers() const noexcept
-{
-    for (const auto& buffer : buffers_) {
-        if (buffer && buffer->rdma) return true;
-    }
-    return false;
-}
+std::string UlyssesGroup::backend() const { return "p2p"; }
 
 void UlyssesGroup::leak_unsafe_resources() noexcept
 {
     for (auto& buffer : buffers_) static_cast<void>(buffer.release());
-    static_cast<void>(rdma_.release());
 }
 
 void UlyssesGroup::destroy()
 {
     if (destroyed_) return;
-    TORCH_CHECK(!has_rdma_buffers() || imports_closed_,
-                "close_imports() must complete on every rank before destroy()");
-    // cudaIpcCloseMemHandle acts on the current device's context, while explicit shutdown may be
-    // initiated under any device.
+    // Symmetric-memory teardown acts on the current device's context, while explicit shutdown
+    // may be initiated under any device.
     const at::cuda::CUDAGuard guard(device_);
     destroyed_ = true;
     outputs_.clear();
     buffers_.clear();
-    rdma_.reset();
 }
 
 }  // namespace ulysses
@@ -405,18 +279,12 @@ void UlyssesGroup::destroy()
 TORCH_LIBRARY(fast_ulysses, m)
 {
     m.class_<ulysses::UlyssesGroup>("UlyssesGroup")
-        .def(torch::init<std::string, int64_t, int64_t, int64_t, std::vector<int64_t>,
-                         bool, std::vector<std::string>>())
+        .def(torch::init<std::string, int64_t, int64_t, int64_t, std::vector<int64_t>>())
         .def("allocate_output", &ulysses::UlyssesGroup::allocate_output)
         .def("all_to_all_4d", &ulysses::UlyssesGroup::all_to_all_4d)
         .def("unsupported_reason", &ulysses::UlyssesGroup::unsupported_reason)
         .def("output_shape_for", &ulysses::UlyssesGroup::output_shape_for)
         .def("backend", &ulysses::UlyssesGroup::backend)
-        .def("connection_info", &ulysses::UlyssesGroup::connection_info)
-        .def("connect", &ulysses::UlyssesGroup::connect)
-        .def("buffer_info", &ulysses::UlyssesGroup::buffer_info)
-        .def("connect_buffer", &ulysses::UlyssesGroup::connect_buffer)
-        .def("close_imports", &ulysses::UlyssesGroup::close_imports)
         .def("destroy", &ulysses::UlyssesGroup::destroy);
 }
 

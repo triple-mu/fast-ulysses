@@ -9,9 +9,6 @@ Supported:
 - equal splits, and eager execution with autograd off -- `torch.inference_mode()` or
   `torch.no_grad()`;
 - one owning host thread and one CUDA stream, bound for the group's entire lifetime;
-- batch size 1 on the 8-GPU mlx5 path, where `heads * head_dim * itemsize` summed over all
-  ranks must also fit 65535 bytes -- the MKey stride field. Larger shapes are refused;
-  `FAST_ULYSSES_DISABLE_RDMA=1` runs them on the CUDA P2P backend;
 - mode 0 `[B, S_local, H_global, D] -> [B, S_global, H_local, D]`;
 - mode 1 `[B, S_global, H_local, D] -> [B, S_local, H_global, D]`.
 
@@ -42,7 +39,6 @@ It uses up to 32 parallel jobs by default; override that with `CMAKE_BUILD_PARAL
 `FAST_ULYSSES_BUILD_JOBS`. If `ccache` is on `PATH`, it is enabled automatically for both C++ and
 CUDA. `FAST_ULYSSES_CCACHE=/path/to/ccache` selects it explicitly, while
 `FAST_ULYSSES_CCACHE=0` disables it.
-The build also links the system `libibverbs` and `libmlx5` libraries.
 
 For example:
 
@@ -75,25 +71,22 @@ else:
     output = fallback(x)
 ```
 
-Both exist because the obvious spellings are wrong. `except: fall back` around the constructor is
-only safe when the failure is the same on every rank, and mlx5 setup fails per rank -- each rank
-gets a different NIC, so one missing IPv4 GID raises on one of them and leaves the other seven
-inside a collective it has already left. And a caller that transcribes the shape limits instead of
-asking gets them wrong: the 16-bit MKey stride is mlx5's and only mlx5's, so a hardcoded copy
-refuses shapes the p2p backend carries perfectly well. `unsupported_reason` is pure, collective-
-free and rank-invariant -- it depends only on the mode, shape, dtype, world size and transport --
-so skipping a call on the strength of it skips it on every rank. `supports_world_size()`,
-`supports_dtype()` and `SUPPORTED_WORLD_SIZES` answer the same way before a group exists.
+Both exist because the obvious spellings are wrong. `except: fall back` around a constructor is
+only safe when the failure is the same on every rank, which a device or stream a caller got wrong
+on one rank is not; and a caller that transcribes the shape limits instead of asking will get them
+wrong somewhere the library cannot see. `unsupported_reason` is pure, collective-free and
+rank-invariant -- it depends only on the mode, shape, dtype and world size -- so skipping a call on
+the strength of it skips it on every rank. `supports_world_size()`, `supports_dtype()` and
+`SUPPORTED_WORLD_SIZES` answer the same way before a group exists.
 
 The thread that constructs the group owns it. `allocate_output()`, `all_to_all_4d()`, and
 `destroy()` must run on that thread with the group's device and bound stream current. Passing a
 different stream per call is intentionally unsupported. A producer on another stream must record
 an event and make the bound stream wait before the call; a consumer on another stream must wait
 for the bound stream before reading the result, then make the bound stream wait for that consumer
-before the workspace is overwritten or the group is destroyed. The P2P backend records the input
-on the bound stream so the caching allocator cannot recycle it while a copy is in flight. The
-mlx5 call is host-synchronous; the public consumption contract is nevertheless the same bound
-stream.
+before the workspace is overwritten or the group is destroyed. The input is recorded on the bound
+stream so the caching allocator cannot recycle it while a copy is in flight. Nothing on this path
+blocks the host: the call returns as soon as the copies and both barriers are enqueued.
 
 The first call for each `(mode, shape, dtype)` collectively creates a registered output workspace;
 later calls reuse it automatically. The returned workspace is overwritten by the next call with
@@ -105,52 +98,44 @@ collective cleanup.
 
 The first accepted exchange binds each output workspace to the input Storage, address, offset,
 and byte range used for that exchange. Every later use of that output must use the same input
-Storage on both backends. Keep a fixed input buffer and copy producer results into it when an
-application would otherwise allocate a fresh tensor each iteration.
+Storage. Keep a fixed input buffer and copy producer results into it when an application would
+otherwise allocate a fresh tensor each iteration.
 
-Every rank must use identical RDMA/NIC configuration and execute construction, cold output
-allocations, exchanges, and destruction in exactly the same order. Cold allocations compare their
+Every rank must execute construction, cold output allocations, exchanges, and destruction in
+exactly the same order. Cold allocations compare their
 ordinal, mode, shape, dtype, and byte count across ranks. Exchanges deliberately add no hot-path
 host collective for argument validation. A rank-local error, timeout, or process exit therefore
 poisons the run: terminate every torchrun process with an external watchdog, and never catch an
 error and continue using the group. Construction is the one exception, and only because `create()`
 agrees its outcome explicitly; nothing after it does.
 
-On the supported 8-GPU PCIe host, same-socket transfers use CUDA IPC pointers. Cross-socket
-transfers use mlx5 interleaved MKeys: the NIC gathers or scatters the strided `[S,H,D]` slices
-directly, so the application tensor layout never changes. The closest NIC is selected from sysfs.
-
-Set `FAST_ULYSSES_DISABLE_RDMA=1` to use CUDA P2P only. To override NIC discovery, set all eight
-rank-local devices explicitly, for example:
-
-```bash
-export FAST_ULYSSES_NICS=mlx5_2,mlx5_3,mlx5_0,mlx5_1,mlx5_6,mlx5_7,mlx5_4,mlx5_5
-```
+Every peer is reached through torch symmetric-memory windows and written with pitched copies, so
+the sequence/head relayout is folded into the copy strides and the application tensor layout never
+changes. On a two-socket host the peers do not all run at the same rate -- a copy that crosses the
+socket boundary is roughly half as fast as one that does not, under the concurrent all-to-all
+pattern -- and each copy carries an NVTX range naming its class so a profile can tell them apart.
 
 ## Test
 
 `test_correctness.py` runs under torchrun and inference mode. It covers representative shapes and
 both supported dtypes/modes against the NCCL reference, automatic and explicit workspaces,
 fixed-storage and execution-context rejection paths, destruction, and back-to-back calls with
-selected ranks deliberately skewed. Its raw P2P no-barrier loop is only an informational scheduler
-smoke check: it does not exercise verbs, CQ completion, or NIC flush and is not an mlx5 correctness
-oracle. An 8-rank run with RDMA enabled expects `mlx5`, so an unintended P2P fallback fails; set
-`FAST_ULYSSES_EXPECT_BACKEND=p2p|mlx5` only when deliberately testing another admitted setup.
+selected ranks deliberately skewed. Its raw no-barrier loop is an armed control: it runs the same
+skewed pattern without a barrier and must tear. A run whose control stays clean saw nothing, and is
+a blind run rather than a passing one -- raise `SKEW_CYCLES` until it tears again before believing
+anything else.
 
 ```bash
 torchrun --standalone --nproc_per_node=8 test_correctness.py
-FAST_ULYSSES_DISABLE_RDMA=1 torchrun --standalone --nproc_per_node=8 test_correctness.py
+torchrun --standalone --nproc_per_node=4 test_correctness.py
 ```
-
-Run both: the two backends synchronise differently, and only the second one exercises batch > 1.
 
 ## Benchmark
 
 `benchmark.py` runs in inference mode and checks results against NCCL before timing. It records the
 source revision, package and software versions, host, GPU, backend, and run parameters, then
 reports both every slowest-rank trial sample and its median. In a source export without `.git`, set
-`FAST_ULYSSES_SOURCE_REV` to the exact snapshot commit or content ID. The report includes the
-configured `FAST_ULYSSES_NICS` mapping (or marks automatic discovery).
+`FAST_ULYSSES_SOURCE_REV` to the exact snapshot commit or content ID.
 
 It compares:
 

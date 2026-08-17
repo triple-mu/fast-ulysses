@@ -1,5 +1,7 @@
 #include "fast_ulysses.h"
 
+#include <cstdio>
+
 namespace ulysses {
 namespace {
 
@@ -55,14 +57,24 @@ void launch_all_to_all(const void* input,
                        int64_t dim,
                        int64_t element_size,
                        int rank,
-                       cudaStream_t stream,
-                       bool quad_only)
+                       cudaStream_t stream)
 {
+    FU_NVTX("fu::copies");
     const int world_size = peers.size();
     const auto* source = static_cast<const uint8_t*>(input);
     const int64_t width = (mode == 0 ? heads / world_size : heads) * dim * element_size;
 
     auto copy = [&](int peer) {
+        // One range per destination, named by the distinction that decides its rate: a peer on
+        // the near side of the host's socket boundary runs at roughly twice the rate of one
+        // across it under the concurrent pattern. nsys attributes each device-side copy to the
+        // API call inside this range, so without the name a profile shows one undifferentiated
+        // band of peer memcpys and the two classes cannot be told apart.
+        char name[56];
+        std::snprintf(name, sizeof(name), "fu::copy[peer=%d %s]", peer,
+                      peer == rank ? "self"
+                                   : (peer / kNearPeers == rank / kNearPeers ? "near" : "far"));
+        FU_NVTX(name);
         for (int64_t batch_index = 0; batch_index < batch; ++batch_index) {
             int64_t src_offset, dst_offset, src_pitch, dst_pitch, rows;
             if (mode == 0) {
@@ -90,10 +102,9 @@ void launch_all_to_all(const void* input,
         }
     };
 
-    // XOR-shift peer order. Stopping at kQuad keeps the copies inside this rank's quad, which is
-    // exactly the set reachable through IPC pointers when the NIC carries the other quad.
-    const int end = quad_only ? kQuad : world_size;
-    for (int step = 1; step < end; ++step) copy(rank ^ step);
+    // XOR-shift peer order: it staggers which peer each rank writes to first, so eight ranks
+    // starting together do not all queue behind the same destination.
+    for (int step = 1; step < world_size; ++step) copy(rank ^ step);
     copy(rank);
 }
 

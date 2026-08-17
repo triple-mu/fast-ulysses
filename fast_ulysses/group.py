@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import threading
 import warnings
 from typing import Self
@@ -40,9 +39,8 @@ class UlyssesGroup:
         """The group, or ``None`` on **every** rank if any rank could not build one.
 
         This is the entry point for a caller with a fallback. `except: use something else`
-        around the constructor is not that: mlx5 setup fails per rank, not per job --
-        `select_nic` hands each rank a different NIC, so one missing IPv4 GID raises on one
-        rank and leaves the other seven blocked in a collective it has already left. The
+        around a constructor is not that, because it is only correct when the failure is the
+        same on every rank -- a device or stream a caller got wrong on one rank is not. The
         return value here is agreed, so a caller that falls back on ``None`` falls back on
         every rank or on none.
         """
@@ -61,11 +59,10 @@ class UlyssesGroup:
         """Construct, returning an agreed reason instead of raising. None means success.
 
         The order is the whole point. Every rank-local check runs before the first
-        collective; the configuration and the local outcome are agreed in one gather; and the
-        native constructor -- the only step that can fail on some ranks and not others -- is
-        followed by an outcome gather placed strictly before the connect handshake. After the
-        handshake it would be too late: the ranks that got a transport would already be
-        waiting inside it for one that never arrives.
+        collective; the local outcome is agreed in one gather; and the native constructor --
+        the only step that can fail on some ranks and not others -- is followed by an outcome
+        gather placed before any rank allocates. Later would be too late: the ranks that got a
+        group would already be inside a collective waiting for one that never arrives.
         """
         # A partially constructed group cannot be closed collectively from __del__.
         self._destroyed = True
@@ -76,22 +73,14 @@ class UlyssesGroup:
         self.world_size = dist.get_world_size(self.pg)
 
         local_reason = self._prepare_local(device, stream)
-        wire = (
-            local_reason,
-            None if local_reason else self.device.index,
-            None if local_reason else self._environment(),
-        )
+        wire = (local_reason, None if local_reason else self.device.index)
         gathered: list = [None] * self.world_size
         dist.all_gather_object(gathered, wire, group=self.pg)
 
         failures = [entry[0] for entry in gathered if entry[0] is not None]
         if failures:
             return "; ".join(failures)
-        configs = [entry[2] for entry in gathered]
-        if any(config != configs[0] for config in configs[1:]):
-            return f"rank-inconsistent RDMA/NIC configuration: {configs!r}"
         devices = [entry[1] for entry in gathered]
-        enable_rdma, nics = configs[0]
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
@@ -105,8 +94,6 @@ class UlyssesGroup:
                 self.world_size,
                 self.device.index,
                 devices,
-                enable_rdma,
-                list(nics),
             )
         except Exception as error:  # noqa: BLE001 -- reported to every rank below
             native_reason = f"rank {self.rank}: {error}"
@@ -119,10 +106,6 @@ class UlyssesGroup:
             return "; ".join(native_failures)
 
         self.backend = self._group.backend()
-        if self.backend == "mlx5":
-            peers: list = [None] * self.world_size
-            dist.all_gather_object(peers, self._group.connection_info(), group=self.pg)
-            self._group.connect(peers)
         self._output_pool: dict[tuple, torch.Tensor] = {}
         self._allocation_ordinal = 0
         self._destroyed = False
@@ -150,23 +133,11 @@ class UlyssesGroup:
         self._owner_thread = threading.get_ident()
         return None
 
-    @staticmethod
-    def _environment() -> tuple:
-        """The settings that affect collective construction, read in one place."""
-        nics_text = os.environ.get("FAST_ULYSSES_NICS", "")
-        return (
-            not os.environ.get("FAST_ULYSSES_DISABLE_RDMA"),
-            tuple(nics_text.split(",")) if nics_text else (),
-        )
-
     def _abandon(self) -> None:
         """Release a group no rank will use, without the collective shutdown.
 
         destroy() barriers, and a rank whose native constructor threw has no group to barrier
-        with. The native destroy is local and safe here because no workspace exists yet, so
-        close_imports has nothing to coordinate -- and skipping it would leak the verbs
-        context, PD, CQ and QPs for the process lifetime, since the uncoordinated destructor
-        deliberately retains them.
+        with. The native destroy is local and safe here because no workspace exists yet.
         """
         if self._group is not None:
             try:
@@ -212,12 +183,6 @@ class UlyssesGroup:
         self._allocation_ordinal += 1
 
         output = self._group.allocate_output(x, mode)
-        if self.backend == "mlx5":
-            peers = [None] * self.world_size
-            dist.all_gather_object(
-                peers, self._group.buffer_info(output), group=self.pg
-            )
-            self._group.connect_buffer(output, peers)
         torch.cuda.synchronize(self.device)
         dist.barrier(group=self.pg, device_ids=[self.device.index])
         return output
@@ -234,28 +199,24 @@ class UlyssesGroup:
         mode, shape, and dtype. Pass an explicit ``out`` when multiple results
         with the same geometry must remain live simultaneously.
         """
-        self._check_execution_context("all_to_all_4d")
-        if mode not in (0, 1):
-            raise ValueError(f"mode must be 0 or 1, got {mode!r}")
-        if out is None:
-            key = (mode, tuple(x.shape), x.dtype)
-            out = self._output_pool.get(key)
+        # The outer range covers everything a caller pays for a call, including the pool lookup
+        # and the cold allocation a pool miss triggers, so a profile cannot attribute those to
+        # whatever ran before them.
+        with torch.cuda.nvtx.range(f"fu.py::all_to_all_4d[mode={mode}]"):
+            self._check_execution_context("all_to_all_4d")
+            if mode not in (0, 1):
+                raise ValueError(f"mode must be 0 or 1, got {mode!r}")
             if out is None:
-                out = self.allocate_output(x, mode)
-                self._output_pool[key] = out
-        if self.backend == "p2p":
-            # Native P2P copies are stream-asynchronous. Tell the caching allocator not to
-            # recycle the input while the bound stream can still be reading it.
+                key = (mode, tuple(x.shape), x.dtype)
+                out = self._output_pool.get(key)
+                if out is None:
+                    out = self.allocate_output(x, mode)
+                    self._output_pool[key] = out
+            # The copies are stream-asynchronous. Tell the caching allocator not to recycle
+            # the input while the bound stream can still be reading it.
             x.record_stream(self.stream)
-        self._group.all_to_all_4d(x, out, mode, self.stream.cuda_stream)
-        if self.backend == "mlx5":
-            # The cross-quad half finishes on the host, in the completion poll, while the closing
-            # barrier is on the stream. This lines the two back up. It carries its own NVTX range
-            # because it is the last of the three host waits in a call and, like the other two,
-            # shows on no CUDA timeline.
-            with torch.cuda.nvtx.range("fu::trailing_sync"):
-                self.stream.synchronize()
-        return out
+            self._group.all_to_all_4d(x, out, mode, self.stream.cuda_stream)
+            return out
 
     def destroy(self) -> None:
         if self._destroyed:
@@ -265,8 +226,6 @@ class UlyssesGroup:
             raise RuntimeError("destroy is unsupported during CUDA Graph capture")
 
         self.stream.synchronize()
-        dist.barrier(group=self.pg, device_ids=[self.device.index])
-        self._group.close_imports()
         dist.barrier(group=self.pg, device_ids=[self.device.index])
         self._group.destroy()
         self._output_pool.clear()

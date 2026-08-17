@@ -5,9 +5,9 @@
 - back-to-back calls with selected ranks deliberately skewed, which stresses missing or
   mis-ordered barriers.
 
-The raw P2P no-barrier loop is only an informational scheduler smoke check. It does not exercise
-verbs, CQ completion, or NIC flush, so observing (or not observing) a tear cannot arm or validate
-mlx5 correctness.
+The raw P2P no-barrier loop is a control: it runs the same skewed pattern with no barrier and
+must tear. A run whose control stays clean saw nothing, and is a blind run rather than a passing
+one.
 """
 
 from __future__ import annotations
@@ -66,28 +66,20 @@ def raises(fn, what: str, expected: str | None = None) -> None:
     FAILURES.append(f"{what} was accepted")
 
 
-def expected_backend(ws: int) -> str:
-    configured = os.environ.get("FAST_ULYSSES_EXPECT_BACKEND")
-    if configured is not None:
-        if configured not in ("p2p", "mlx5"):
-            raise ValueError("FAST_ULYSSES_EXPECT_BACKEND must be 'p2p' or 'mlx5'")
-        return configured
-    if os.environ.get("FAST_ULYSSES_DISABLE_RDMA") or ws != 8:
-        return "p2p"
-    return "mlx5"
-
-
-def shapes(ws: int, backend: str) -> list[tuple[int, int, int, int]]:
-    """(batch, seq_local, heads_global, dim). The mlx5 backend takes batch 1 only."""
-    cases = [(1, 8, 2 * ws, 16), (1, 128, ws, 64), (1, 592, 7 * ws, 128)]
-    if backend == "p2p":
-        cases += [(2, 16, 2 * ws, 32), (3, 64, ws, 128)]
-    return cases
+def shapes(ws: int) -> list[tuple[int, int, int, int]]:
+    """(batch, seq_local, heads_global, dim)."""
+    return [
+        (1, 8, 2 * ws, 16),
+        (1, 128, ws, 64),
+        (1, 592, 7 * ws, 128),
+        (2, 16, 2 * ws, 32),
+        (3, 64, ws, 128),
+    ]
 
 
 def check_shapes(group: UlyssesGroup, device: int, ws: int) -> None:
     for dtype in (torch.bfloat16, torch.float16):
-        for batch, seq, heads, dim in shapes(ws, group.backend):
+        for batch, seq, heads, dim in shapes(ws):
             for mode in (0, 1):
                 shape = (
                     (batch, seq * ws, heads // ws, dim)
@@ -276,11 +268,10 @@ def scheduler_smoke(device: int, ws: int, rank: int, pg) -> int:
 def check_asymmetric_construction(device: int, ws: int, rank: int) -> None:
     """One rank failing to build must return None on all of them, not strand the rest.
 
-    This is the shape of the real hazard: mlx5 setup fails per rank, because select_nic hands
-    each rank a different NIC, so a failure only one rank sees still has to become a decision
-    all of them make. A bad device on rank 1 stands in for it -- it fails at the same point in
-    the sequence, locally and before the first collective. If the agreement were missing, the
-    other seven would block here rather than fail.
+    A failure only one rank sees still has to become a decision all of them make. A bad device
+    on rank 1 fails locally, before the first collective, which is where a rank-asymmetric
+    failure does the damage: without the agreement the other seven would block here rather
+    than fail.
     """
     if ws < 2:
         return
@@ -300,7 +291,7 @@ def check_capability_query(group: UlyssesGroup, device: int, ws: int) -> None:
     every shape the suite exercises is checked both ways.
     """
     for dtype in (torch.bfloat16, torch.float16):
-        for batch, seq, heads, dim in shapes(ws, group.backend):
+        for batch, seq, heads, dim in shapes(ws):
             for mode in (0, 1):
                 shape = (
                     (batch, seq * ws, heads // ws, dim)
@@ -337,22 +328,11 @@ def check_capability_query(group: UlyssesGroup, device: int, ws: int) -> None:
             f"the query accepted {what}",
         )
 
-    # The MKey stride is mlx5's limit and only mlx5's. A caller that transcribes it instead of
-    # asking refuses this shape on p2p too, where it is perfectly legal -- which is the whole
-    # reason the query exists.
-    wide = ((1, 64, 256, 128), torch.bfloat16, 0)
-    if group.backend == "mlx5":
-        reason = group.unsupported_reason(*wide)
-        check(reason is not None, "mlx5 accepted a head stride over the MKey limit")
-        check(
-            reason is None or "DISABLE_RDMA" in reason,
-            f"the MKey refusal does not say what to do about it: {reason!r}",
-        )
-    else:
-        check(
-            group.supports(*wide),
-            "p2p refused a head stride that only the MKey has a limit on",
-        )
+    # No head stride is out of range here: the copies are pitched, and a pitch is a pitch.
+    check(
+        group.supports((1, 64, 256, 128), torch.bfloat16, 0),
+        "a wide head stride was refused, and nothing on this path has a limit on one",
+    )
 
     check(ws in tuple(SUPPORTED_WORLD_SIZES), f"world size {ws} is not advertised")
     check(supports_dtype(torch.bfloat16), "bfloat16 is not advertised")
@@ -408,14 +388,6 @@ def check_rejections(group: UlyssesGroup, device: int, ws: int) -> None:
         "an output rebound with Tensor.set_()",
         "storage",
     )
-    if group.backend == "mlx5":
-        # heads*dim*itemsize over all ranks is 65536, one byte past what an interleaved MKey's
-        # stride can hold. Accepted by every verbs call and then silently wrong, so it has to be
-        # refused before any of them.
-        wide = torch.randn((1, 64, 256, 128), dtype=torch.bfloat16, device=device)
-        raises(
-            lambda: group.allocate_output(wide, 0), "a head stride over the MKey limit"
-        )
 
 
 @torch.inference_mode()
@@ -426,7 +398,6 @@ def main() -> None:
     rank, ws = dist.get_rank(), dist.get_world_size()
     torch.manual_seed(1234 + rank)
 
-    expected = expected_backend(ws)
     check_asymmetric_construction(local_rank, ws, rank)
     created = UlyssesGroup.create(device=local_rank)
     check(created is not None, "create() refused a group the constructor accepts")
@@ -434,14 +405,10 @@ def main() -> None:
         created.destroy()
 
     with UlyssesGroup(device=local_rank) as group:
-        check(
-            group.backend == expected,
-            f"expected backend={expected}, got {group.backend}; fallback is not a pass",
-        )
         if rank == 0:
             skewed = tuple(r for r in SKEWED_RANKS if r < ws)
             print(
-                f"# world_size={ws} backend={group.backend} expected_backend={expected} "
+                f"# world_size={ws} backend={group.backend} "
                 f"rounds={ROUNDS} skew={SKEW_CYCLES} skewed_ranks={skewed}"
             )
 
@@ -490,7 +457,7 @@ def main() -> None:
                 print(f"FAIL rank {r}: {message}")
         print(
             "# scheduler_smoke_no_barrier_torn_rounds="
-            f"{smoke_all} (informational; not an mlx5 correctness oracle)"
+            f"{smoke_all} (the control: a run whose control stays clean is blind)"
         )
         print("FAILED" if any(failures) else "PASSED")
     sys.exit(1 if any(failures) else 0)

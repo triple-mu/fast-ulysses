@@ -1,7 +1,6 @@
 #pragma once
 
 #include "nvtx.h"
-#include "rdma.h"
 
 #include <ATen/ATen.h>
 #include <c10/core/Storage.h>
@@ -29,11 +28,17 @@ static_assert(TORCH_VERSION_MAJOR > 2 ||
 
 namespace ulysses {
 
-// The p2p barrier addresses peers through PeerFlags::ptr[8] in transfer.cu, which is what
-// bounds a group. Deliberately NOT the same quantity as rdma.cpp's kWorld: that one is mlx5's
-// equality precondition (exactly eight ranks, device i on rank i), while this is a capacity.
-// Merging them would let a future widening here silently rewrite mlx5's entry test.
+// The barrier addresses peers through PeerFlags::ptr[8] in transfer.cu, which is what bounds
+// a group.
 constexpr int64_t kMaxWorldSize = 8;
+
+// Peers this far apart in rank sit on opposite sides of the host's socket boundary on the
+// machine this targets, and a copy across it runs at roughly half the rate of one that stays
+// on the near side under the concurrent all-to-all pattern. Only instrumentation reads this
+// today; it is here because it is the axis any scheduling decision would be made along, and
+// deriving it from cudaDevP2PAttrPerformanceRank rather than asserting it is the obvious
+// next step.
+constexpr int kNearPeers = 4;
 
 // The two admissibility rules that a caller has to answer before a group exists, so they are
 // free functions rather than members. Everything else a shape can be refused for depends on
@@ -72,7 +77,6 @@ struct Buffer {
     std::vector<int64_t> shape;
     at::ScalarType dtype = at::kBFloat16;
     uint64_t epoch = 0;
-    std::unique_ptr<RdmaBuffer> rdma;
 };
 
 class UlyssesGroup final : public torch::CustomClassHolder {
@@ -81,9 +85,7 @@ public:
                  int64_t rank,
                  int64_t world_size,
                  int64_t device,
-                 std::vector<int64_t> devices,
-                 bool enable_rdma,
-                 std::vector<std::string> nics);
+                 std::vector<int64_t> devices);
     ~UlyssesGroup() noexcept override;
 
     at::Tensor allocate_output(const at::Tensor& input, int64_t mode);
@@ -102,12 +104,6 @@ public:
                                    int64_t mode) const;
     std::vector<int64_t> output_shape_for(std::vector<int64_t> sizes, int64_t mode) const;
     std::string backend() const;
-    std::vector<int64_t> connection_info() const;
-    void connect(const std::vector<std::vector<int64_t>>& peers);
-    std::vector<int64_t> buffer_info(at::Tensor output) const;
-    void connect_buffer(at::Tensor output,
-                        const std::vector<std::vector<int64_t>>& peers);
-    void close_imports();
     void destroy();
 
 private:
@@ -116,21 +112,17 @@ private:
     void require_supported(std::vector<int64_t> sizes, at::ScalarType dtype, int64_t mode) const;
     Buffer& lookup_output(const at::Tensor& output) const;
     void bind_or_validate_input(Buffer& buffer, const at::Tensor& input) const;
-    bool has_rdma_buffers() const noexcept;
     void leak_unsafe_resources() noexcept;
 
     std::string name_;
     int rank_;
     int world_size_;
     int device_;
-    bool imports_closed_ = false;
     bool destroyed_ = false;
-    std::unique_ptr<RdmaTransport> rdma_;
     std::vector<std::unique_ptr<Buffer>> buffers_;
     std::unordered_map<const c10::TensorImpl*, Buffer*> outputs_;
 };
 
-// quad_only restricts the copies to this rank's quad; the NIC carries the rest.
 void launch_all_to_all(const void* input,
                        const std::vector<uint64_t>& peers,
                        int mode,
@@ -140,8 +132,7 @@ void launch_all_to_all(const void* input,
                        int64_t dim,
                        int64_t element_size,
                        int rank,
-                       cudaStream_t stream,
-                       bool quad_only);
+                       cudaStream_t stream);
 
 void barrier(cudaStream_t stream,
              const std::vector<uint64_t>& flags,
