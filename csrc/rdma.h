@@ -61,12 +61,9 @@ public:
     std::vector<int64_t> buffer_info(const RdmaBuffer& buffer) const;
     void connect_buffer(RdmaBuffer& buffer,
                         const std::vector<std::vector<int64_t>>& peers) const;
-    std::vector<uint64_t> peer_pointers(const RdmaBuffer& buffer) const;
-    std::vector<uint64_t> peer_flags(const RdmaBuffer& buffer) const;
-    // Close only mappings imported from peers. The caller coordinates this before any rank
-    // releases its locally exported output/flag allocations. Safe to retry after a partial
-    // close and safe to call again after success.
-    void close_buffer_imports(RdmaBuffer& buffer) const;
+    // Drop the input memory region and the MKeys that gather from it, so the next exchange
+    // registers against wherever the input is then. The output registration is untouched.
+    void forget_input(RdmaBuffer& buffer) const;
     void start_exchange(const void* input,
                         int64_t input_bytes,
                         RdmaBuffer& output,

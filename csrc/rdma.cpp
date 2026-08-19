@@ -3,7 +3,9 @@
 #include "nvtx.h"
 
 #include <c10/util/Exception.h>
+#include <cuda.h>
 #include <cuda_runtime.h>
+#include <unistd.h>
 #include <infiniband/mlx5dv.h>
 #include <infiniband/verbs.h>
 
@@ -38,8 +40,6 @@ struct BufferWire {
     uint64_t address = 0;
     uint32_t rkey = 0;
     uint32_t destination_rkey[kWorld]{};
-    cudaIpcMemHandle_t ipc{};
-    cudaIpcMemHandle_t flag_ipc{};
 };
 
 template <typename T>
@@ -104,6 +104,30 @@ size_t checked_registration_bytes(int64_t bytes)
     return static_cast<size_t>(bytes);
 }
 
+struct DmabufRange {
+    CUdeviceptr base = 0;
+    uint64_t offset = 0;
+    size_t export_bytes = 0;
+};
+
+DmabufRange dmabuf_range(const void* pointer, size_t bytes)
+{
+    const long page_size_value = ::sysconf(_SC_PAGESIZE);
+    TORCH_CHECK(page_size_value > 0, "could not read the host page size");
+    const auto page_size = static_cast<size_t>(page_size_value);
+    const auto address = reinterpret_cast<uintptr_t>(pointer);
+    const size_t offset = address % page_size;
+    TORCH_CHECK(bytes <= std::numeric_limits<size_t>::max() - offset,
+                "dma-buf export size exceeds size_t range");
+    const size_t span = offset + bytes;
+    const size_t remainder = span % page_size;
+    const size_t padding = remainder == 0 ? 0 : page_size - remainder;
+    TORCH_CHECK(span <= std::numeric_limits<size_t>::max() - padding,
+                "dma-buf export size exceeds size_t range");
+    return {static_cast<CUdeviceptr>(address - offset), static_cast<uint64_t>(offset),
+            span + padding};
+}
+
 int64_t checked_tensor_bytes(int mode,
                              int64_t bytes,
                              int64_t batch,
@@ -117,10 +141,10 @@ int64_t checked_tensor_bytes(int mode,
                 "RDMA dimensions and element size must be positive");
     if (mode == 0) {
         TORCH_CHECK(heads % kWorld == 0,
-                    "mode=0 head dimension must divide world_size");
+                    "mode=0 head dimension must be divisible by world_size");
     } else {
         TORCH_CHECK(seq % kWorld == 0,
-                    "mode=1 sequence dimension must divide world_size");
+                    "mode=1 sequence dimension must be divisible by world_size");
     }
 
     const int64_t rows = checked_mul(batch, seq, "RDMA element count");
@@ -208,11 +232,38 @@ uint32_t checked_payload(int64_t input_bytes)
     return static_cast<uint32_t>(payload);
 }
 
+// Which of two allocators produced a pointer decides how the NIC can be given it. A cudaMalloc
+// pointer is what nvidia_peermem understands and ibv_reg_mr takes it directly; torch's symmetric
+// memory is virtual-memory-backed (cuMemCreate/cuMemMap), which peermem rejects with EFAULT and
+// which has to be handed over as a dma-buf descriptor instead. That is not something a caller
+// should have to tell us, so try the direct path and fall back.
+//
+// The dma-buf registration takes iova = the device address, not 0. A memory region is addressed
+// by its iova, and every address this transport computes -- peer output offsets, MKey gather
+// bases -- is a device virtual address; registering at 0 would be accepted here and then read
+// the wrong bytes at transfer time.
 ibv_mr* register_gpu_mr(ibv_pd* pd, void* pointer, size_t bytes, int access)
 {
     TORCH_CHECK(pointer, "cannot register a null GPU pointer");
-    auto* mr = ibv_reg_mr(pd, pointer, bytes, access);
-    TORCH_CHECK(mr, "ibv_reg_mr failed: ", std::strerror(errno));
+    if (auto* mr = ibv_reg_mr(pd, pointer, bytes, access)) return mr;
+    const int direct_errno = errno;
+
+    // CUDA requires both arguments of a dma-buf range export to be host-page aligned. Export the
+    // containing pages, then register only the tensor's exact subrange with verbs.
+    const DmabufRange range = dmabuf_range(pointer, bytes);
+    int fd = -1;
+    const CUresult status = cuMemGetHandleForAddressRange(
+        &fd, range.base, range.export_bytes,
+        CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+    TORCH_CHECK(status == CUDA_SUCCESS, "ibv_reg_mr failed (",
+                std::strerror(direct_errno),
+                ") and the range exports no dma-buf handle either (CUresult ",
+                static_cast<int>(status), ")");
+    auto* mr = ibv_reg_dmabuf_mr(
+        pd, range.offset, bytes, reinterpret_cast<uint64_t>(pointer), fd, access);
+    const int dmabuf_errno = errno;
+    ::close(fd);
+    TORCH_CHECK(mr, "ibv_reg_dmabuf_mr failed: ", std::strerror(dmabuf_errno));
     return mr;
 }
 
@@ -334,6 +385,8 @@ struct RdmaTransport::Impl {
     std::array<GroupWire, kWorld> peers{};
     uint64_t next_wr_id = 1;
     int pending_completions = 0;
+    int pending_sends = 0;
+    int pending_receives = 0;
     bool failed = false;
 
     bool cross(int peer) const { return peer / kQuad != rank / kQuad; }
@@ -348,6 +401,8 @@ struct RdmaTransport::Impl {
     {
         failed = true;
         pending_completions = 0;
+        pending_sends = 0;
+        pending_receives = 0;
         for (auto* qp : qps) {
             if (!qp) continue;
             ibv_qp_attr attr{};
@@ -361,7 +416,7 @@ struct RdmaTransport::Impl {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         int consecutive_empty = 0;
         while (consecutive_empty < 2 && std::chrono::steady_clock::now() < deadline) {
-            ibv_wc entries[kWorld]{};
+            ibv_wc entries[kWorld];
             consecutive_empty = ibv_poll_cq(cq, kWorld, entries) > 0 ? 0 : consecutive_empty + 1;
         }
     }
@@ -383,9 +438,10 @@ struct RdmaTransport::Impl {
     void poll(int expected)
     {
         int completed = 0;
+        unsigned empty_polls = 0;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         while (completed < expected) {
-            ibv_wc entries[kWorld]{};
+            ibv_wc entries[kWorld];
             const int count = ibv_poll_cq(cq, std::min(kWorld, expected - completed), entries);
             TORCH_CHECK(count >= 0, "ibv_poll_cq failed");
             for (int i = 0; i < count; ++i) {
@@ -394,10 +450,61 @@ struct RdmaTransport::Impl {
                             " vendor_err=", entries[i].vendor_err);
             }
             completed += count;
-            // Only an empty poll can time out: a poll that completed the set has succeeded
-            // whatever the clock says.
-            TORCH_CHECK(count > 0 || std::chrono::steady_clock::now() < deadline,
-                        "timed out waiting for mlx5 completion");
+            // Reading the monotonic clock on every empty busy-poll can cost as much as the CQ
+            // poll itself. Sampling it every 1024 misses keeps the ten-second watchdog while
+            // leaving the completion path as one verbs call and a status check.
+            if (count == 0 && ++empty_polls == 1024) {
+                TORCH_CHECK(std::chrono::steady_clock::now() < deadline,
+                            "timed out waiting for mlx5 completion");
+                empty_polls = 0;
+            }
+        }
+    }
+
+    // The exchange's wait, split by completion class instead of reported as one number.
+    //
+    // Completions arrive interleaved, so both phases consume whatever the queue offers; what
+    // differs is which count each one waits on. The send phase ends when this rank's own writes
+    // have all been acknowledged, so it is this rank's transfer. The receive phase is whatever
+    // is left after that, so it is how much later than this rank the slowest peer posted. Their
+    // sum is exactly the wait that used to be a single opaque range, which is what makes the
+    // split free: it separates bandwidth from skew without adding any polling.
+    void poll_exchange(int sends, int receives)
+    {
+        int got_sends = 0, got_receives = 0;
+        unsigned empty_polls = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        auto drain = [&](int want_sends, int want_receives) {
+            while (got_sends < want_sends || got_receives < want_receives) {
+                const int room = (sends + receives) - (got_sends + got_receives);
+                ibv_wc entries[kWorld];
+                const int count = ibv_poll_cq(cq, std::min(kWorld, room), entries);
+                TORCH_CHECK(count >= 0, "ibv_poll_cq failed");
+                for (int i = 0; i < count; ++i) {
+                    TORCH_CHECK(entries[i].status == IBV_WC_SUCCESS,
+                                "mlx5 completion failed: ", ibv_wc_status_str(entries[i].status),
+                                " vendor_err=", entries[i].vendor_err);
+                    // IBV_WC_RECV is a flag bit, not a value: every receive opcode carries it.
+                    if (entries[i].opcode & IBV_WC_RECV) {
+                        ++got_receives;
+                    } else {
+                        ++got_sends;
+                    }
+                }
+                if (count == 0 && ++empty_polls == 1024) {
+                    TORCH_CHECK(std::chrono::steady_clock::now() < deadline,
+                                "timed out waiting for mlx5 completion");
+                    empty_polls = 0;
+                }
+            }
+        };
+        {
+            FU_NVTX("fu::cq_spin[send]");
+            drain(sends, 0);
+        }
+        {
+            FU_NVTX("fu::cq_spin[recv]");
+            drain(sends, receives);
         }
     }
 
@@ -490,33 +597,9 @@ struct RdmaBuffer::Impl {
     int64_t dim = 0;
     int64_t element_size = 0;
     std::array<BufferWire, kWorld> peers{};
-    std::array<void*, kWorld> peer_pointers{};
-    void* flags = nullptr;
-    std::array<void*, kWorld> peer_flags{};
     bool connected = false;
-    bool imports_closed = false;
 
-    cudaError_t close_imports() noexcept
-    {
-        // Closing is terminal even if one mapping reports an error. Successfully closed handles
-        // stay null so a coordinated retry only visits the remainder.
-        connected = false;
-        cudaError_t first_error = cudaSuccess;
-        auto close = [&first_error](void*& pointer, const void* local) {
-            if (!pointer || pointer == local) return;
-            const cudaError_t result = cudaIpcCloseMemHandle(pointer);
-            if (result == cudaSuccess)
-                pointer = nullptr;
-            else if (first_error == cudaSuccess)
-                first_error = result;
-        };
-        for (auto*& pointer : peer_pointers) close(pointer, output_pointer);
-        for (auto*& pointer : peer_flags) close(pointer, flags);
-        if (first_error == cudaSuccess) imports_closed = true;
-        return first_error;
-    }
-
-    void release_local() noexcept
+    void forget_input() noexcept
     {
         for (auto*& mkey : source_mkeys) {
             if (mkey) mlx5dv_destroy_mkey(mkey);
@@ -526,29 +609,24 @@ struct RdmaBuffer::Impl {
         input_mr = nullptr;
         input_pointer = nullptr;
         input_bytes = 0;
+    }
+
+    void release_local() noexcept
+    {
+        forget_input();
         for (auto*& mkey : destination_mkeys) {
             if (mkey) mlx5dv_destroy_mkey(mkey);
             mkey = nullptr;
         }
         if (output_mr) ibv_dereg_mr(output_mr);
         output_mr = nullptr;
-        for (auto*& pointer : peer_pointers)
-            if (pointer == output_pointer) pointer = nullptr;
-        for (auto*& pointer : peer_flags)
-            if (pointer == flags) pointer = nullptr;
-        if (flags) cudaFree(flags);
-        flags = nullptr;
         output_pointer = nullptr;
         output_bytes = 0;
     }
 
-    ~Impl()
-    {
-        // The coordinated path closes imports before peers release their exports. This fallback
-        // is deliberately noexcept and makes a successful explicit close safe to repeat.
-        close_imports();
-        release_local();
-    }
+    // Nothing here is imported from a peer any more -- torch's symmetric memory owns the peer
+    // mappings -- so teardown is purely local and needs no coordination with the other ranks.
+    ~Impl() { release_local(); }
 };
 
 RdmaBuffer::RdmaBuffer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -693,6 +771,7 @@ std::vector<int64_t> RdmaTransport::connection_info() const
 void RdmaTransport::connect(const std::vector<std::vector<int64_t>>& encoded_peers)
 {
     TORCH_CHECK(enabled(), "RDMA transport is disabled");
+    TORCH_CHECK(!impl_->connected, "RDMA transport is already connected");
     TORCH_CHECK(encoded_peers.size() == kWorld, "expected eight RDMA peers");
     for (int peer = 0; peer < kWorld; ++peer)
         impl_->peers[peer] = decode<GroupWire>(encoded_peers[peer]);
@@ -784,11 +863,6 @@ std::unique_ptr<RdmaBuffer> RdmaTransport::register_buffer(void* pointer,
     state->heads = heads;
     state->dim = dim;
     state->element_size = element_size;
-    state->peer_pointers[impl_->rank] = pointer;
-    cuda_check(cudaMalloc(&state->flags, kWorld * sizeof(uint64_t)), "cudaMalloc RDMA flags");
-    cuda_check(cudaMemset(state->flags, 0, kWorld * sizeof(uint64_t)),
-               "cudaMemset RDMA flags");
-    state->peer_flags[impl_->rank] = state->flags;
     MrHandle output_mr(register_gpu_mr(
         impl_->pd, pointer, checked_registration_bytes(bytes),
         IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ));
@@ -825,10 +899,6 @@ std::vector<int64_t> RdmaTransport::buffer_info(const RdmaBuffer& buffer) const
     BufferWire wire{};
     wire.address = reinterpret_cast<uint64_t>(buffer.impl_->output_pointer);
     wire.rkey = buffer.impl_->output_mr->rkey;
-    cuda_check(cudaIpcGetMemHandle(&wire.ipc, buffer.impl_->output_pointer),
-               "cudaIpcGetMemHandle");
-    cuda_check(cudaIpcGetMemHandle(&wire.flag_ipc, buffer.impl_->flags),
-               "cudaIpcGetMemHandle flags");
     for (int peer = 0; peer < kWorld; ++peer)
         if (buffer.impl_->destination_mkeys[peer])
             wire.destination_rkey[peer] = buffer.impl_->destination_mkeys[peer]->rkey;
@@ -841,72 +911,19 @@ void RdmaTransport::connect_buffer(
 {
     TORCH_CHECK(encoded_peers.size() == kWorld, "expected eight RDMA buffer peers");
     TORCH_CHECK(!buffer.impl_->connected, "RDMA buffer is already connected");
-    TORCH_CHECK(!buffer.impl_->imports_closed,
-                "RDMA buffer imports were permanently closed");
-    std::array<BufferWire, kWorld> peers{};
+    // Only the far half of the world is described here: an address and a remote key per peer,
+    // which is all an RDMA write needs. The near half is reached through the peer pointers
+    // torch's symmetric memory already established, and the handshake through its barrier.
     for (int peer = 0; peer < kWorld; ++peer)
-        peers[peer] = decode<BufferWire>(encoded_peers[peer]);
-
-    struct PendingImports {
-        std::array<void*, kWorld> payloads{};
-        std::array<void*, kWorld> flags{};
-
-        ~PendingImports()
-        {
-            for (auto* pointer : payloads)
-                if (pointer) cudaIpcCloseMemHandle(pointer);
-            for (auto* pointer : flags)
-                if (pointer) cudaIpcCloseMemHandle(pointer);
-        }
-    } pending;
-    for (int peer = 0; peer < kWorld; ++peer) {
-        if (peer == impl_->rank) continue;
-        if (!impl_->cross(peer))
-            cuda_check(cudaIpcOpenMemHandle(&pending.payloads[peer],
-                                            peers[peer].ipc,
-                                            cudaIpcMemLazyEnablePeerAccess),
-                       "cudaIpcOpenMemHandle");
-        // Flags are mapped from every rank, not just the quad: the payload crosses the quad
-        // boundary through the NIC, but the handshake is a single word and P2P reaches it.
-        cuda_check(cudaIpcOpenMemHandle(&pending.flags[peer],
-                                        peers[peer].flag_ipc,
-                                        cudaIpcMemLazyEnablePeerAccess),
-                   "cudaIpcOpenMemHandle flags");
-    }
-    buffer.impl_->peers = peers;
-    for (int peer = 0; peer < kWorld; ++peer) {
-        if (peer == impl_->rank) continue;
-        buffer.impl_->peer_pointers[peer] = pending.payloads[peer];
-        pending.payloads[peer] = nullptr;
-        buffer.impl_->peer_flags[peer] = pending.flags[peer];
-        pending.flags[peer] = nullptr;
-    }
+        buffer.impl_->peers[peer] = decode<BufferWire>(encoded_peers[peer]);
     buffer.impl_->connected = true;
 }
 
-std::vector<uint64_t> RdmaTransport::peer_pointers(const RdmaBuffer& buffer) const
+void RdmaTransport::forget_input(RdmaBuffer& buffer) const
 {
-    std::vector<uint64_t> result(kWorld);
-    for (int peer = 0; peer < kWorld; ++peer)
-        result[peer] = reinterpret_cast<uint64_t>(buffer.impl_->peer_pointers[peer]);
-    return result;
-}
-
-std::vector<uint64_t> RdmaTransport::peer_flags(const RdmaBuffer& buffer) const
-{
-    std::vector<uint64_t> result(kWorld);
-    for (int peer = 0; peer < kWorld; ++peer)
-        result[peer] = reinterpret_cast<uint64_t>(buffer.impl_->peer_flags[peer]);
-    return result;
-}
-
-void RdmaTransport::close_buffer_imports(RdmaBuffer& buffer) const
-{
-    if (buffer.impl_->imports_closed) return;
     TORCH_CHECK(impl_->pending_completions == 0,
-                "cannot close RDMA buffer imports while an exchange is pending");
-    const cudaError_t result = buffer.impl_->close_imports();
-    cuda_check(result, "cudaIpcCloseMemHandle RDMA buffer imports");
+                "cannot drop an input registration while an exchange is pending");
+    buffer.impl_->forget_input();
 }
 
 void RdmaTransport::start_exchange(const void* input,
@@ -928,8 +945,8 @@ void RdmaTransport::start_exchange(const void* input,
     TORCH_CHECK(input, "RDMA input pointer must not be null");
     if (state.input_mr) {
         TORCH_CHECK(state.input_pointer == input && state.input_bytes == input_bytes,
-                    "RDMA input storage and byte size are fixed after first use; allocate a "
-                    "separate output workspace for a different input storage");
+                    "the input address a workspace was registered against is fixed after the "
+                    "first call; the op surface stages a moved input into it");
     }
     TORCH_CHECK(state.batch == batch && state.seq == seq && state.heads == heads &&
                     state.dim == dim && state.element_size == element_size,
@@ -1048,6 +1065,7 @@ void RdmaTransport::start_exchange(const void* input,
         for (int step = kQuad; step < kWorld; ++step) {
             impl_->post_receive(impl_->rank ^ step);
             ++impl_->pending_completions;
+            ++impl_->pending_receives;
         }
         for (int step = kQuad; step < kWorld; ++step) {
             const int peer = impl_->rank ^ step;
@@ -1059,6 +1077,7 @@ void RdmaTransport::start_exchange(const void* input,
                                   remote_keys[peer], 0);
             }
             ++impl_->pending_completions;
+            ++impl_->pending_sends;
         }
     });
 }
@@ -1071,10 +1090,15 @@ void RdmaTransport::finish_exchange()
     // The host spins here until the NIC has moved the cross-quad share both ways. It is the one
     // place the exchange can be slower than the GPU work it brackets: the near-quad copies are
     // already enqueued and finish on the copy engines, so whatever this outlasts them by is a
-    // gap with nothing on the stream and no owner on a CUDA timeline.
-    FU_NVTX("fu::cq_spin");
-    impl_->retire_on_failure([&] { impl_->poll(pending); });
+    // gap with nothing on the stream and no owner on a CUDA timeline. The two ranges inside
+    // say which half of it is this rank's own transfer and which half is waiting for peers.
+    const int sends = impl_->pending_sends;
+    const int receives = impl_->pending_receives;
+    TORCH_CHECK(sends + receives == pending, "RDMA completion accounting disagrees");
+    impl_->retire_on_failure([&] { impl_->poll_exchange(sends, receives); });
     impl_->pending_completions = 0;
+    impl_->pending_sends = 0;
+    impl_->pending_receives = 0;
 }
 
 void RdmaTransport::flush() const

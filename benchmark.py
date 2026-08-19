@@ -14,19 +14,35 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
-from fast_ulysses import UlyssesGroup, __version__
+import fast_ulysses as fu
+from fast_ulysses import __version__
+from fast_ulysses._fallback import mode0 as nccl_mode0, mode1 as nccl_mode1
+
+
+def positive_int(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def nonnegative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return value
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--shape", action="append", default=[])
-    parser.add_argument("--seq-len", type=int, default=37824)
-    parser.add_argument("--num-heads", type=int, default=56)
-    parser.add_argument("--head-dim", type=int, default=128)
+    parser.add_argument("--seq-len", type=positive_int, default=37824)
+    parser.add_argument("--num-heads", type=positive_int, default=56)
+    parser.add_argument("--head-dim", type=positive_int, default=128)
     parser.add_argument("--common-shapes", action="store_true")
-    parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--iters", type=int, default=1)
-    parser.add_argument("--trials", type=int, default=20)
+    parser.add_argument("--warmup", type=nonnegative_int, default=10)
+    parser.add_argument("--iters", type=positive_int, default=1)
+    parser.add_argument("--trials", type=positive_int, default=20)
     parser.add_argument(
         "--report",
         type=str,
@@ -41,6 +57,8 @@ def parse_shape(text: str) -> tuple[int, int, int]:
     values = tuple(int(v) for v in text.split(","))
     if len(values) != 3:
         raise ValueError("shape must be SEQ,HEADS,HEAD_DIM")
+    if any(value <= 0 for value in values):
+        raise ValueError("shape dimensions must be positive")
     return values
 
 
@@ -92,6 +110,15 @@ def timed(fn, warmup: int, iters: int, trials: int, device: int) -> list[float]:
 
 def gbps(byte_count: float, milliseconds: float) -> float:
     return byte_count / (milliseconds / 1000) / 1e9
+
+
+def require_all_ranks(condition: bool, message: str, device: int) -> None:
+    failed = torch.tensor(
+        [not condition], dtype=torch.uint8, device=torch.device("cuda", device)
+    )
+    dist.all_reduce(failed, op=dist.ReduceOp.MAX)
+    if failed.item():
+        raise RuntimeError(message)
 
 
 def write_report(path: str, metadata: list[str], rows: list[dict]) -> None:
@@ -147,42 +174,6 @@ def write_report(path: str, metadata: list[str], rows: list[dict]) -> None:
         report.write("\n".join(lines) + "\n")
 
 
-def nccl_mode0(
-    x: torch.Tensor,
-    send: torch.Tensor,
-    recv: torch.Tensor,
-    output: torch.Tensor,
-    ws: int,
-) -> torch.Tensor:
-    b, s_local, h_global, d = x.shape
-    h_local = h_global // ws
-    send.view(h_global, b, s_local, d).copy_(x.permute(2, 0, 1, 3))
-    dist.all_to_all_single(recv, send)
-    output.view(b, ws, s_local, h_local, d).copy_(
-        recv.view(ws, h_local, b, s_local, d).permute(2, 0, 3, 1, 4)
-    )
-    return output
-
-
-def nccl_mode1(
-    x: torch.Tensor,
-    send: torch.Tensor,
-    recv: torch.Tensor,
-    output: torch.Tensor,
-    ws: int,
-) -> torch.Tensor:
-    b, s_global, h_local, d = x.shape
-    s_local = s_global // ws
-    send.view(ws, b, s_local, h_local, d).copy_(
-        x.view(b, ws, s_local, h_local, d).permute(1, 0, 2, 3, 4)
-    )
-    dist.all_to_all_single(recv, send)
-    output.view(b, s_local, ws, h_local, d).copy_(
-        recv.view(ws, b, s_local, h_local, d).permute(1, 2, 0, 3, 4)
-    )
-    return output
-
-
 @torch.inference_mode()
 def main():
     args = parse_args()
@@ -196,8 +187,10 @@ def main():
         shapes = [(37824, 56, 128), (75600, 40, 128), (32760, 40, 128)]
     else:
         shapes = [(args.seq_len, args.num_heads, args.head_dim)]
+    if not any(seq % ws == 0 and heads % ws == 0 for seq, heads, _ in shapes):
+        dist.destroy_process_group()
+        raise ValueError(f"no shape is divisible by world_size={ws}")
 
-    group = UlyssesGroup(device=local_rank)
     gpu_names = [None] * ws
     dist.all_gather_object(
         gpu_names, torch.cuda.get_device_name(local_rank), group=dist.group.WORLD
@@ -213,10 +206,11 @@ def main():
         f"GPUs by rank: {gpu_names}",
         f"world_size: {ws}",
         "dtype: bfloat16",
-        f"backend: {group.backend}",
+        f"backend: {fu.backend()}",
         f"FAST_ULYSSES_DISABLE_RDMA: {os.getenv('FAST_ULYSSES_DISABLE_RDMA', '<unset>')}",
         f"FAST_ULYSSES_NICS: {os.getenv('FAST_ULYSSES_NICS', '<auto>')}",
         f"NCCL_P2P_LEVEL: {os.getenv('NCCL_P2P_LEVEL', '<unset>')}",
+        "results: a fresh allocation per call, which is what a caller pays",
         f"warmup: {args.warmup} calls/case",
         (
             f"measurement: {args.iters} call(s)/trial, {args.trials} trials, "
@@ -253,17 +247,23 @@ def main():
             (1, seq, heads // ws, dim), dtype=x.dtype, device=x.device
         )
         nccl_mode0(x, send_mode0, recv_mode0, mode0_ref, ws)
-        out_mode0 = group.all_to_all_4d(x, mode=0)
-        if not torch.equal(out_mode0, mode0_ref):
-            raise RuntimeError(f"rank {rank}: mode=0 mismatch for {seq, heads, dim}")
+        out_mode0 = fu.all_to_all_4d(x, 0)
+        require_all_ranks(
+            torch.equal(out_mode0, mode0_ref),
+            f"mode=0 mismatch on at least one rank for {seq, heads, dim}",
+            local_rank,
+        )
 
         send_mode1 = torch.empty_like(send_mode0)
         recv_mode1 = torch.empty_like(send_mode0)
         mode1_ref = torch.empty_like(x)
         nccl_mode1(mode0_ref, send_mode1, recv_mode1, mode1_ref, ws)
-        out_mode1 = group.all_to_all_4d(out_mode0, mode=1)
-        if not torch.equal(out_mode1, x) or not torch.equal(mode1_ref, x):
-            raise RuntimeError(f"rank {rank}: mode=1 mismatch for {seq, heads, dim}")
+        out_mode1 = fu.all_to_all_4d(out_mode0, 1)
+        require_all_ranks(
+            torch.equal(out_mode1, x) and torch.equal(mode1_ref, x),
+            f"mode=1 mismatch on at least one rank for {seq, heads, dim}",
+            local_rank,
+        )
 
         raw_recv_mode0 = torch.empty_like(recv_mode0)
         raw_recv_mode1 = torch.empty_like(recv_mode1)
@@ -272,12 +272,12 @@ def main():
             "layout_mode0": partial(
                 nccl_mode0, x, send_mode0, recv_mode0, mode0_ref, ws
             ),
-            "fast_mode0": partial(group.all_to_all_4d, x, mode=0),
+            "fast_mode0": partial(fu.all_to_all_4d, x, 0),
             "raw_mode1": partial(dist.all_to_all_single, raw_recv_mode1, send_mode1),
             "layout_mode1": partial(
                 nccl_mode1, mode0_ref, send_mode1, recv_mode1, mode1_ref, ws
             ),
-            "fast_mode1": partial(group.all_to_all_4d, out_mode0, mode=1),
+            "fast_mode1": partial(fu.all_to_all_4d, out_mode0, 1),
         }
         sample_sets = {
             name: timed(fn, args.warmup, args.iters, args.trials, local_rank)
@@ -286,7 +286,7 @@ def main():
         results = {
             name: statistics.median(samples) for name, samples in sample_sets.items()
         }
-        tensor_bytes = x.numel() * x.element_size()
+        tensor_bytes = x.nbytes
         remote_bytes = tensor_bytes * (ws - 1) / ws
         if rank == 0:
             label = f"{seq},{heads},{dim}"
@@ -327,12 +327,11 @@ def main():
                     }
                 )
 
+    fu.shutdown()
+    dist.destroy_process_group()
     if rank == 0 and args.report:
         write_report(args.report, metadata, report_rows)
         print(f"# wrote Markdown report: {args.report}")
-
-    group.destroy()
-    dist.destroy_process_group()
 
 
 if __name__ == "__main__":

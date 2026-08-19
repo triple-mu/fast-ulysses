@@ -25,9 +25,9 @@ def cmake_executable() -> str:
         candidates.extend(
             venv.glob("lib/python*/site-packages/cmake/data/bin/cmake")
         )
-    candidates.extend([Path("/usr/bin/cmake"), Path("/usr/local/bin/cmake")])
     if discovered := shutil.which("cmake"):
         candidates.append(Path(discovered))
+    candidates.extend([Path("/usr/bin/cmake"), Path("/usr/local/bin/cmake")])
 
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -156,6 +156,7 @@ class CMakeBuild(build_ext):
 setup(
     name="fast-ulysses",
     version="0.3.0.dev0",
+    python_requires=">=3.11",
     packages=["fast_ulysses"],
     install_requires=["torch>=2.10"],
     ext_modules=[CMakeExtension()],
