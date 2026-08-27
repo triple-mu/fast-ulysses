@@ -356,6 +356,36 @@ def main() -> None:
         )(),
     )
 
+    # --- packed backend's deliberately narrow first production contract ----------------------
+    check.raises(
+        "an unknown backend",
+        "backend must be",
+        lambda: UlyssesGroup(require_nvlink=False, backend="unknown"),
+    )
+    packed = UlyssesGroup(require_nvlink=False, backend="packed")
+    packed_good = torch.randn(1, 16, 4 * ws, 128, **kw16)
+    check.raises(
+        "packed batch greater than one",
+        "requires batch=1",
+        lambda: packed.all_to_all_4d(good),
+    )
+    check.raises(
+        "packed uneven splits",
+        "even shards only",
+        lambda: packed.all_to_all_4d(packed_good, seq_splits=[16] * ws, head_splits=[4] * ws),
+    )
+    check.raises(
+        "packed async",
+        "synchronous",
+        lambda: packed.all_to_all_4d_async(packed_good),
+    )
+    check.raises(
+        "packed autograd",
+        "inference-only",
+        lambda: packed.all_to_all_4d(packed_good.detach().requires_grad_(True)),
+    )
+    packed.destroy()
+
     # --- a destroyed group --------------------------------------------------------------------
     # `out` from empty_output() takes the zero-copy path, which reaches neither window() nor
     # make_output() -- the only two places that used to check. Without a check in prepare() this

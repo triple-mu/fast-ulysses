@@ -93,7 +93,8 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
              const std::optional<std::vector<int64_t>>& head_splits,
              const std::optional<at::Tensor>&           out,
              WindowRole                                 role,
-             bool                                       lend)
+             bool                                       lend,
+             bool                                       allow_window_output = true)
 {
     Call call;
     // Here rather than deeper in: window() and make_output() also check, but the zero-copy path
@@ -132,7 +133,8 @@ Call prepare(const c10::intrusive_ptr<UlyssesGroup>&    group,
         // call's, and comparing the two element counts would admit a buffer too small to hold what
         // the peers are about to write into it.
         const Window* owned = group->window_of(call.output);
-        if (owned != nullptr && owned->tensor.nbytes() >= call.plan->window_numel * call.x.element_size()) {
+        if (allow_window_output && owned != nullptr
+            && owned->tensor.nbytes() >= call.plan->window_numel * call.x.element_size()) {
             call.win           = owned;
             call.out_is_window = true;
         }
@@ -240,6 +242,60 @@ at::Tensor run(const c10::intrusive_ptr<UlyssesGroup>&    group,
     return call.output;
 }
 
+at::Tensor run_packed(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                      const at::Tensor&                          input,
+                      int64_t                                    mode,
+                      const std::optional<std::vector<int64_t>>& seq_splits,
+                      const std::optional<std::vector<int64_t>>& head_splits,
+                      const std::optional<at::Tensor>&           out,
+                      cudaStream_t                               stream)
+{
+    TORCH_CHECK(!seq_splits.has_value() && !head_splits.has_value(),
+                "the packed backend currently supports even shards only; omit seq_splits and head_splits");
+
+    // In mode 0 the window already has the final layout and can be returned directly. Mode 1
+    // receives sender-major staging and must locally interleave the sender head shards, so even a
+    // symmetric `out` is an ordinary output and the transfer uses the group's internal window.
+    const Call call = prepare(group,
+                              input,
+                              mode,
+                              seq_splits,
+                              head_splits,
+                              out,
+                              kSyncWindow,
+                              /*lend=*/false,
+                              /*allow_window_output=*/mode == kScatterHead);
+    TORCH_CHECK(call.x.size(0) == 1, "the packed backend currently requires batch=1, got batch=", call.x.size(0));
+
+    const int64_t ws          = group->world_size();
+    const int64_t d           = call.x.size(3);
+    const int64_t s_local     = mode == kScatterHead ? call.x.size(1) : call.x.size(1) / ws;
+    const int64_t h_local     = mode == kScatterHead ? call.x.size(2) / ws : call.x.size(2);
+    const int64_t chunk_bytes = call.output.nbytes() / ws;
+
+    at::Tensor source = call.x;
+    if (mode == kScatterHead) {
+        source = at::empty({ws, s_local, h_local, d}, call.x.options());
+        source.copy_(call.x.view({s_local, ws, h_local, d}).permute({1, 0, 2, 3}));
+    }
+
+    const int rank = static_cast<int>(group->rank());
+    fast_barrier(stream, call.win->flag_ptrs, rank);
+    launch_a2a_flat(source.data_ptr(), call.win->peer_ptrs, chunk_bytes, group->xfer_stream(), rank, stream);
+    fast_barrier(stream, call.win->flag_ptrs, rank);
+
+    if (mode == kScatterHead) {
+        if (!call.out_is_window) {
+            copy_out(call, stream, rank);
+        }
+    }
+    else {
+        const at::Tensor staged = call.win->tensor.narrow(0, 0, call.output.numel()).view({ws, s_local, h_local, d});
+        call.output.view({s_local, ws, h_local, d}).copy_(staged.permute({1, 0, 2, 3}));
+    }
+    return call.output;
+}
+
 }  // namespace
 
 // The one collective, in two forms.
@@ -267,6 +323,29 @@ at::Tensor all_to_all_4d(const c10::intrusive_ptr<UlyssesGroup>&    group,
                kSyncWindow,
                at::cuda::getCurrentCUDAStream(),
                /*lend=*/false);
+}
+
+at::Tensor all_to_all_4d_packed(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                                const at::Tensor&                          input,
+                                int64_t                                    mode,
+                                const std::optional<std::vector<int64_t>>& seq_splits,
+                                const std::optional<std::vector<int64_t>>& head_splits)
+{
+    require_cuda(input);
+    const at::cuda::CUDAGuard guard(input.device());
+    return run_packed(group, input, mode, seq_splits, head_splits, std::nullopt, at::cuda::getCurrentCUDAStream());
+}
+
+void all_to_all_4d_packed_out(const c10::intrusive_ptr<UlyssesGroup>&    group,
+                              const at::Tensor&                          input,
+                              int64_t                                    mode,
+                              const std::optional<std::vector<int64_t>>& seq_splits,
+                              const std::optional<std::vector<int64_t>>& head_splits,
+                              const at::Tensor&                          out)
+{
+    require_cuda(input);
+    const at::cuda::CUDAGuard guard(input.device());
+    run_packed(group, input, mode, seq_splits, head_splits, out, at::cuda::getCurrentCUDAStream());
 }
 
 // Shape propagation for FakeTensor and AOTAutograd. CompositeExplicitAutograd already covers the
@@ -725,6 +804,14 @@ TORCH_LIBRARY(fast_ulysses, m)
     m.impl("all_to_all_4d", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_meta);
     refuse_batching("all_to_all_4d");
 
+    // PCIe candidate: one local pack/unpack around flat peer copies. Inference-only for now; the
+    // Python API rejects grad-requiring inputs before reaching this op.
+    m.def("all_to_all_4d_packed(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
+          "int mode, int[]? seq_splits=None, int[]? head_splits=None) -> Tensor");
+    m.impl("all_to_all_4d_packed", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_packed);
+    m.impl("all_to_all_4d_packed", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_meta);
+    refuse_batching("all_to_all_4d_packed");
+
     // Mutating, and says so. Not differentiable: the gradient would have to flow back out of a
     // buffer the caller owns and may already have overwritten.
     m.def("all_to_all_4d_out(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
@@ -735,6 +822,12 @@ TORCH_LIBRARY(fast_ulysses, m)
     // torch's own, for its own reasons, and a torch that grew an out= batching fallback would make
     // this op start looping silently. One line makes it a property of this library instead.
     refuse_batching("all_to_all_4d_out");
+
+    m.def("all_to_all_4d_packed_out(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, Tensor input, "
+          "int mode, int[]? seq_splits, int[]? head_splits, Tensor(a!) out) -> ()");
+    m.impl("all_to_all_4d_packed_out", c10::DispatchKey::CompositeExplicitAutograd, &ulysses::all_to_all_4d_packed_out);
+    m.impl("all_to_all_4d_packed_out", c10::DispatchKey::Meta, &ulysses::all_to_all_4d_out_meta);
+    refuse_batching("all_to_all_4d_packed_out");
 
     m.def("all_to_all_4d_staged(__torch__.torch.classes.fast_ulysses.UlyssesGroup group, "
           "Tensor input, int mode, int[]? seq_splits, int[]? head_splits, "

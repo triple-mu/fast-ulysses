@@ -19,13 +19,14 @@ Violating these hangs the group. Nothing raises and nothing times out.
   concurrent calls need two `empty_output()` buffers — or `all_to_all_4d_async(lend=True)`, which
   keeps the buffers itself and rotates through them.
 
-## `UlyssesGroup(process_group=None, device=None, *, require_nvlink=True)`
+## `UlyssesGroup(process_group=None, device=None, *, require_nvlink=True, backend="pitched")`
 
 | Parameter | Meaning |
 | --- | --- |
 | `process_group` | The group to run over; `None` uses `dist.group.WORLD`. Any subgroup works — there is no restriction on which ranks it contains. |
 | `device` | This rank's CUDA device; `None` uses the current device. |
-| `require_nvlink` | Refuse a group whose GPUs are not all NVLink-joined. `False` is for measuring that case, not for running in it. |
+| `require_nvlink` | Refuse a group whose GPUs are not all NVLink-joined. Set `False` when testing the packed PCIe backend. |
+| `backend` | `"pitched"` is the NVLink-optimised default. `"packed"` locally packs/unpacks around flat peer copies for PCIe. |
 
 The NVLink check reads the link type from NVML. Both a direct GPU-to-GPU link and two GPUs on one
 NVSwitch fabric count. The check **fails open**: when NVML cannot answer — it is missing, or one
@@ -51,7 +52,7 @@ prints it as a matrix.
 Note the alignment rule tightens as the element shrinks: `d % 8` at float16, `d % 4` at float32,
 `d % 16` at float8 and int8. Nothing below the check is dtype-specific — the transport moves bytes.
 
-**Differentiable, except with `out=`.** The vjp of a permutation is the inverse permutation, so the
+The default **pitched backend is differentiable, except with `out=`.** The vjp of a permutation is the inverse permutation, so the
 backward is the other `mode` with the **same** splits. `all_to_all_single`'s backward swaps its
 split sizes, because those describe one call's send and receive counts; `seq_splits` /
 `head_splits` describe the group's geometry, which holds whichever way the data moves. Backward
@@ -90,6 +91,23 @@ neither**, identical on every rank, matching the shape handed in. Neither means 
 the scattered axis must then divide (`n_global % ws` for mode 0, `s_global % ws` for mode 1). Both
 lets shards differ arbitrarily, which is what lets a caller drop sequence padding.
 
+### Packed PCIe backend
+
+Construct it explicitly:
+
+```python
+group = UlyssesGroup(require_nvlink=False, backend="packed")
+```
+
+This first production version supports batch 1, even shards, synchronous inference, and both
+modes. Mode 0 locally packs by destination and sends one flat chunk to each peer. Mode 1 receives
+sender-major flat chunks and locally unpacks the head shards. It rejects autograd, uneven split
+lists, batch greater than one, and `all_to_all_4d_async` before starting the collective.
+
+For mode 0, an `out` from `empty_output()` remains a zero-copy output. Mode 1 needs receiver-side
+unpack, so its `out` is written locally after communication even when it came from
+`empty_output()`.
+
 ### Raises
 
 `RuntimeError`, from validation that runs **before the call's first barrier**, so a rejected
@@ -105,6 +123,8 @@ shape not the output's; `x` overlapping the window, or `out` partially overlappi
 ## `all_to_all_4d_async(x, *, mode=0, out=None, seq_splits=None, head_splits=None, lend=False)`
 
 The same call on the group's high-priority comm stream, returning immediately.
+
+Available only with `backend="pitched"`; the packed backend currently rejects async calls.
 
 **Not differentiable, and it refuses rather than pretending.** An `AsyncCollectiveTensor` is built
 with `requires_grad` on the wrapper, which makes it a leaf: autograd runs above the subclass and

@@ -34,6 +34,19 @@ void launch_a2a_ce(const void*                  src,
                    int                          rank,
                    cudaStream_t                 stream);
 
+/// @brief Issue one flat copy per peer from a destination-packed source.
+///
+/// Source chunk p is sent to peer p. Every source rank writes its chunk at offset
+/// `rank * chunk_bytes` in the peer window, so the receiver sees sender-major staging. As in the
+/// pitched path, remote copies use `xfer`, this rank's own chunk uses `stream`, and both are joined
+/// before returning.
+void launch_a2a_flat(const void*                  src,
+                     const std::vector<uint64_t>& peer_ptrs,
+                     int64_t                      chunk_bytes,
+                     cudaStream_t                 xfer,
+                     int                          rank,
+                     cudaStream_t                 stream);
+
 /// @brief Barrier across the group, over P2P-accessible flags.
 ///
 /// A one-block spin kernel: rank r publishes its epoch into every peer's `flags[r]` with a release

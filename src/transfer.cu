@@ -125,4 +125,45 @@ void launch_a2a_ce(const void*                  src,
     // done and ready are destroyed here, in reverse declaration order, as they were by hand.
 }
 
+void launch_a2a_flat(const void*                  src,
+                     const std::vector<uint64_t>& peer_ptrs,
+                     int64_t                      chunk_bytes,
+                     cudaStream_t                 xfer,
+                     int                          rank,
+                     cudaStream_t                 stream)
+{
+    const int      ws        = static_cast<int>(peer_ptrs.size());
+    const uint8_t* src_bytes = static_cast<const uint8_t*>(src);
+    const Event    ready(cudaEventDisableTiming);
+    ULYSSES_CUDA_CHECK(cudaEventRecord(ready, stream));
+    ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(xfer, ready, 0));
+
+    auto emit = [&](int peer, cudaStream_t on) {
+        ULYSSES_CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<uint8_t*>(peer_ptrs[peer]) + rank * chunk_bytes,
+                                           src_bytes + peer * chunk_bytes,
+                                           static_cast<size_t>(chunk_bytes),
+                                           cudaMemcpyDefault,
+                                           on));
+    };
+
+    for (int k = 1; k < ws; ++k) {
+        const int peer = rank ^ k;
+        if (peer < ws) {
+            emit(peer, xfer);
+        }
+    }
+    if ((ws & (ws - 1)) != 0) {
+        for (int peer = 0; peer < ws; ++peer) {
+            if (peer != rank && (peer ^ rank) >= ws) {
+                emit(peer, xfer);
+            }
+        }
+    }
+    emit(rank, stream);
+
+    const Event done(cudaEventDisableTiming);
+    ULYSSES_CUDA_CHECK(cudaEventRecord(done, xfer));
+    ULYSSES_CUDA_CHECK(cudaStreamWaitEvent(stream, done, 0));
+}
+
 }  // namespace ulysses

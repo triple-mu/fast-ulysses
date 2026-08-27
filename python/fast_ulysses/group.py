@@ -33,7 +33,7 @@ class CompletedHandle:
 
 
 class UlyssesGroup:
-    """Ulysses all-to-all over NVLink, moved by the copy engines.
+    """Ulysses all-to-all moved by the copy engines.
 
     Construction is collective over ``process_group``. Windows are allocated on the first call that
     needs one and cached, so every rank must issue the same sequence of shapes. Contract:
@@ -46,19 +46,25 @@ class UlyssesGroup:
         device: torch.device | str | int | None = None,
         *,
         require_nvlink: bool = True,
+        backend: str = "pitched",
     ) -> None:
         """
         Args:
             process_group: the group this collective runs over; ``None`` uses ``dist.group.WORLD``.
             device: this rank's CUDA device, as anything ``torch.device`` accepts; ``None`` and a
                 device with no index both use the current device.
-            require_nvlink: refuse a group whose GPUs are not all NVLink-joined. ``False`` is for
-                measuring that case, not for running in it.
+            require_nvlink: refuse a group whose GPUs are not all NVLink-joined. Set ``False`` for
+                the experimental packed PCIe backend.
+            backend: ``"pitched"`` keeps the NVLink-optimised strided-copy path. ``"packed"``
+                locally packs/unpacks around flat peer copies and is the experimental PCIe path.
         """
         # Before anything that can throw: a refused construction -- a non-NVLink group, a device
         # that is not CUDA -- still leaves an object for __del__ to run on, with nothing to
         # release.
         self._destroyed = True
+        if backend not in ("pitched", "packed"):
+            raise ValueError(f"backend must be 'pitched' or 'packed', got {backend!r}")
+        self.backend = backend
         pg = process_group if process_group is not None else dist.group.WORLD
         self.pg = pg
         self.rank = dist.get_rank(pg)
@@ -120,12 +126,34 @@ class UlyssesGroup:
         """mode 0 scatters heads and gathers sequence; mode 1 inverts it.
 
         Returns a tensor the caller owns, with no lifetime rules. ``out`` from ``empty_output()``
-        skips the copy-out; any other contiguous CUDA tensor of the output shape is copied into.
+        skips the copy-out on the pitched backend and packed mode 0; packed mode 1 must locally
+        unpack into it. Any other contiguous CUDA tensor of the output shape is copied into.
 
         ``seq_splits[p]`` / ``head_splits[p]`` are rank p's sequence and head shard: pass both or
         neither, identical on every rank and matching the shape handed in. Neither means even
         shards. Collective: every rank must issue the same sequence of shapes.
         """
+        if self.backend == "packed":
+            if seq_splits is not None or head_splits is not None:
+                raise ValueError(
+                    "the packed backend currently supports even shards only; omit seq_splits "
+                    "and head_splits"
+                )
+            if x.ndim == 4 and x.shape[0] != 1:
+                raise ValueError(
+                    f"the packed backend currently requires batch=1, got batch={x.shape[0]}"
+                )
+            if torch.is_grad_enabled() and x.requires_grad:
+                raise RuntimeError(
+                    "the packed backend is currently inference-only and does not support "
+                    "autograd; use backend='pitched' for differentiable calls"
+                )
+            if out is None:
+                return torch.ops.fast_ulysses.all_to_all_4d_packed(
+                    self._handle, x, mode, None, None
+                )
+            torch.ops.fast_ulysses.all_to_all_4d_packed_out(self._handle, x, mode, None, None, out)
+            return out
         if out is None:
             return torch.ops.fast_ulysses.all_to_all_4d(
                 self._handle, x, mode, seq_splits, head_splits
@@ -177,6 +205,10 @@ class UlyssesGroup:
         libtorch with no ``c10d::register_work`` this returns a ``CompletedHandle`` instead --
         correct, no overlap, and a distinct type so it is visible.
         """
+        if self.backend == "packed":
+            raise RuntimeError(
+                "the packed backend currently supports synchronous all_to_all_4d only"
+            )
         # Refused rather than silently ignored: both ask for the zero-copy path, and picking one
         # for the caller would leave a lend=True that quietly did nothing.
         if out is not None and lend:
@@ -246,6 +278,16 @@ class UlyssesGroup:
         COLLECTIVE, so allocate outside the loop -- and use one buffer per concurrent call, since a
         call overwrites it.
         """
+        if self.backend == "packed":
+            if seq_splits is not None or head_splits is not None:
+                raise ValueError(
+                    "the packed backend currently supports even shards only; omit seq_splits "
+                    "and head_splits"
+                )
+            if x.ndim == 4 and x.shape[0] != 1:
+                raise ValueError(
+                    f"the packed backend currently requires batch=1, got batch={x.shape[0]}"
+                )
         return torch.ops.fast_ulysses.empty_output(self._handle, x, mode, seq_splits, head_splits)
 
     def _timed(
@@ -258,6 +300,8 @@ class UlyssesGroup:
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """BENCHMARKS ONLY: the copying call with CUDA events between its stages, which sum to the
         whole call because they are strictly ordered on one stream. Reading the events syncs."""
+        if self.backend == "packed":
+            raise RuntimeError("_timed is not implemented for the packed backend")
         out, stages = torch.ops.fast_ulysses.all_to_all_4d_timed(
             self._handle, x, mode, seq_splits, head_splits
         )

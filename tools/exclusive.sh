@@ -20,8 +20,15 @@ WAIT_SECS="${WAIT_SECS:-0}"          # how long to wait for the GPUs to become f
 SAMPLE_SECS="${SAMPLE_SECS:-5}"
 # One process per GPU is what our own run contributes; anything beyond that is a neighbour.
 EXPECT_PER_GPU="${EXPECT_PER_GPU:-1}"
+EXCLUSIVE_DIAGNOSTICS="${EXCLUSIVE_DIAGNOSTICS:-}"
 
 IFS=',' read -ra GPU_LIST <<< "${DEVICES}"
+expected=$((${#GPU_LIST[@]} * EXPECT_PER_GPU))
+
+if [[ -n "${EXCLUSIVE_DIAGNOSTICS}" ]]; then
+    mkdir -p "$(dirname -- "${EXCLUSIVE_DIAGNOSTICS}")"
+    : > "${EXCLUSIVE_DIAGNOSTICS}"
+fi
 
 uuid_of() { nvidia-smi --query-gpu=index,uuid --format=csv,noheader | awk -F', ' -v i="$1" '$1==i{print $2}'; }
 
@@ -72,6 +79,14 @@ trap cleanup EXIT INT TERM HUP
     parent=$$
     while kill -0 "${parent}" 2>/dev/null; do
         n=$(foreign_count)
+        if [[ -n "${EXCLUSIVE_DIAGNOSTICS}" && "${n}" -gt "${expected}" ]]; then
+            {
+                printf 'timestamp=%s process_count=%s expected=%s\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${n}" "${expected}"
+                nvidia-smi --query-compute-apps=pid,process_name,gpu_uuid,used_gpu_memory \
+                    --format=csv,noheader 2>&1
+            } >> "${EXCLUSIVE_DIAGNOSTICS}"
+        fi
         clk=$(nvidia-smi --query-gpu=index,clocks.sm --format=csv,noheader,nounits |
               awk -F', ' -v list="${DEVICES}" 'BEGIN{split(list,a,",");for(i in a)want[a[i]]=1}
                                                want[$1]{print $2}' | sort -n | head -1)
@@ -102,7 +117,6 @@ while read -r n clk; do
     fi
 done < "${sample_file}"
 
-expected=$((${#GPU_LIST[@]} * EXPECT_PER_GPU))
 if [[ "${max_seen}" -gt "${expected}" ]]; then
     echo "# VERDICT: CONTENDED -- saw up to ${max_seen} processes on ${DEVICES}," \
          "expected at most ${expected} (ours). Discard these numbers." >&2

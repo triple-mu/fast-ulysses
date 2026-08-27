@@ -441,6 +441,41 @@ def main() -> None:
             print(f"OK ws={ws} timed mode={mode} reports four stages inside the call", flush=True)
         dist.barrier()
 
+    # --- packed PCIe backend: both directions and both output forms ---------------------------
+    packed = UlyssesGroup(process_group=pg, require_nvlink=False, backend="packed")
+    px = torch.randn(1, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev)
+    want_p0 = reference_even(px, 0, ws, pg)
+    got_p0 = packed.all_to_all_4d(px, mode=0)
+    check.equal("packed mode=0", got_p0, want_p0)
+
+    packed_plain = torch.empty_like(want_p0)
+    check.equal(
+        "packed mode=0 out=plain",
+        packed.all_to_all_4d(px, mode=0, out=packed_plain),
+        want_p0,
+    )
+    packed_window = packed.empty_output(px, mode=0)
+    check.equal(
+        "packed mode=0 out=window",
+        packed.all_to_all_4d(px, mode=0, out=packed_window),
+        want_p0,
+    )
+
+    want_p1 = reference_even(want_p0, 1, ws, pg)
+    check.equal("packed mode=1", packed.all_to_all_4d(want_p0, mode=1), want_p1)
+    packed_mode1_window = packed.empty_output(want_p0, mode=1)
+    check.equal(
+        "packed mode=1 out=window",
+        packed.all_to_all_4d(want_p0, mode=1, out=packed_mode1_window),
+        want_p1,
+    )
+    check.equal(
+        "packed round trip",
+        packed.all_to_all_4d(packed.all_to_all_4d(px, mode=0), mode=1),
+        px,
+    )
+    packed.destroy()
+
     verdict = torch.tensor([check.failed], device=dev)
     dist.all_reduce(verdict)
     if rank == 0:

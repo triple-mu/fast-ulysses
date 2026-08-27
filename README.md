@@ -87,7 +87,7 @@ wrapper, no manual backward.
 
 | Entry point | Purpose |
 | --- | --- |
-| `UlyssesGroup(process_group=None, device=None, *, require_nvlink=True)` | Collective. Refuses a group whose GPUs are not NVLink-joined. |
+| `UlyssesGroup(..., require_nvlink=True, backend="pitched")` | Collective. `pitched` is the NVLink default; experimental `packed` uses flat copies for PCIe. |
 | `group.all_to_all_4d(x, *, mode=0, out=None, seq_splits=None, head_splits=None)` | The collective. Returns a tensor the caller owns. |
 | `group.all_to_all_4d_async(x, *, ...)` | The same, on a comm stream, returning an `AsyncCollectiveTensor`. `lend=True` drops the copy-out without a buffer of your own, bounded at 4 live results. |
 | `group.empty_output(x, *, mode=0, ...)` | A symmetric buffer to pass as `out=`, which removes the copy-out. `out=` gives up the gradient. |
@@ -101,9 +101,9 @@ have: [docs/migration.md](docs/migration.md).
 
 ## Limits
 
-- **NVLink, one node, `world_size` in [1, 8]**, including odd sizes. Over PCIe — especially across
-  a CPU socket — `torch.distributed` is faster, because the pitched copies this transport is built
-  on degrade badly there. The constructor refuses such a group.
+- **One node, `world_size` in [1, 8]**, including odd sizes for the default `pitched` backend.
+  `backend="packed"` is an experimental PCIe path limited to batch 1, even shards, synchronous
+  inference; use it with `require_nvlink=False`. It still needs target-machine validation.
 - `float16` / `bfloat16` / `float32` / `float8_e4m3fn` / `float8_e5m2` / `int8` / `uint8`, and
   `d * elem_size` must be 16-byte aligned — so `d % 8` at bfloat16, `d % 16` at float8.
 - Differentiable, and it propagates shapes under `FakeTensor`. Not traceable by `torch.compile`:

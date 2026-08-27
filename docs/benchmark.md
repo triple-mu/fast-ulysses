@@ -297,6 +297,10 @@ a second node at 22.85 ms against v0.1's surviving 22.4 ms. **Both modes are rea
 recorded that "a pitched copy runs at 1.00–1.10× a flat one, never slower, on either path" — that
 was measured on different PCIe machines and does not hold here, where the gap is 25×.
 
+`--mode pcie-pretest` now measures the experimental production remedy — local pack followed by
+flat peer copies — beside its layout-only prototype. Its B300 and PCIe validation procedure is in
+[pcie-pretest.md](pcie-pretest.md).
+
 ## Carried over from v0.1
 
 Measured on the NVSHMEM backend, kept as context. A same-machine A/B on 2×H200 put the `transfer`
